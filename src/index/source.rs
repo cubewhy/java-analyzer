@@ -103,9 +103,11 @@ fn parse_java_class(
     }
 
     let name: Arc<str> = Arc::from(class_name);
-    let internal_name: Arc<str> = match package {
-        Some(pkg) => Arc::from(format!("{}/{}", pkg, class_name).as_str()),
-        None => Arc::clone(&name),
+    let internal_name: Arc<str> = match (package, &outer_class) {
+        (Some(pkg), Some(outer)) => Arc::from(format!("{}/{}${}", pkg, outer, class_name).as_str()),
+        (Some(pkg), None) => Arc::from(format!("{}/{}", pkg, class_name).as_str()),
+        (None, Some(outer)) => Arc::from(format!("{}${}", outer, class_name).as_str()),
+        (None, None) => Arc::clone(&name),
     };
 
     // super class
@@ -742,4 +744,74 @@ fn make_kotlin_parser() -> Parser {
     p.set_language(&tree_sitter_kotlin::LANGUAGE.into())
         .expect("kotlin grammar");
     p
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::index::ClassOrigin;
+    use crate::index::source::parse_java_source;
+
+    #[test]
+    fn test_nested_class_internal_name_with_package() {
+        let src = r#"
+package org.cubewhy.a;
+public class Main {
+    public static class NestedClass {
+        public void randomFunction(String arg1) {}
+    }
+}
+"#;
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let nested = classes
+            .iter()
+            .find(|c| c.name.as_ref() == "NestedClass")
+            .unwrap();
+        assert_eq!(
+            nested.internal_name.as_ref(),
+            "org/cubewhy/a/Main$NestedClass",
+            "nested class internal name should use $ separator"
+        );
+        assert_eq!(nested.inner_class_of.as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn test_nested_class_internal_name_without_package() {
+        let src = r#"
+public class Main {
+    public static class NestedClass {
+        public void randomFunction() {}
+    }
+}
+"#;
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let nested = classes
+            .iter()
+            .find(|c| c.name.as_ref() == "NestedClass")
+            .unwrap();
+        assert_eq!(nested.internal_name.as_ref(), "Main$NestedClass");
+    }
+
+    #[test]
+    fn test_nested_class_methods_indexed() {
+        let src = r#"
+package org.cubewhy.a;
+public class Main {
+    public static class NestedClass {
+        public void randomFunction(String arg1) {}
+    }
+}
+"#;
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let nested = classes
+            .iter()
+            .find(|c| c.name.as_ref() == "NestedClass")
+            .unwrap();
+        assert!(
+            nested
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "randomFunction"),
+            "randomFunction should be indexed"
+        );
+    }
 }

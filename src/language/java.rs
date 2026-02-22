@@ -292,7 +292,7 @@ impl<'s> JavaContextExtractor<'s> {
         // "new Foo()"    → ConstructorCall ✓
         // "new Foo()."   → skip, let dot-access handle it ✗
         if let Some(rest) = new_rest {
-            let has_dot_after_ctor = rest.contains(')') && rest.trim_end().ends_with('.');
+            // let has_dot_after_ctor = rest.contains(')') && rest.trim_end().ends_with('.');
             // more precisely: if rest contains "(..." and after closing paren there's a dot
             if !has_chained_dot(rest) {
                 let class_prefix = rest.split('(').next().unwrap_or(rest).trim().to_string();
@@ -559,9 +559,17 @@ impl<'s> JavaContextExtractor<'s> {
                 );
 
                 let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
+                let raw_ty = if raw_ty == "var" {
+                    match infer_type_from_initializer(ty_node, self.bytes) {
+                        Some(inferred) => inferred,
+                        None => return None, // cannot infer → skip
+                    }
+                } else {
+                    raw_ty.to_string()
+                };
                 Some(LocalVar {
                     name: Arc::from(name),
-                    type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                    type_internal: Arc::from(java_type_to_internal(&raw_ty).as_str()),
                 })
             })
             .collect();
@@ -863,6 +871,47 @@ fn has_chained_dot(rest: &str) -> bool {
         }
     }
     false
+}
+
+/// Given the type node of a `var` declaration, walk up to the
+/// `local_variable_declaration` and extract the RHS constructor type.
+/// "var nc = new NestedClass()" → Some("NestedClass")
+fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> {
+    let decl = type_node.parent()?;
+    if decl.kind() != "local_variable_declaration" {
+        return None;
+    }
+    let mut cursor = decl.walk();
+    for child in decl.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let init = child.named_child(1)?;
+        match init.kind() {
+            "object_creation_expression" => {
+                let ty_node = init.child_by_field_name("type")?;
+                let text = ty_node.utf8_text(bytes).ok()?;
+                let simple = text.split('<').next()?.trim();
+                if !simple.is_empty() {
+                    return Some(simple.to_string());
+                }
+            }
+            // tree-sitter sometimes parses "new Foo()" as method_invocation
+            // when there's no package declaration (grammar ambiguity).
+            // Fall back to text heuristic.
+            _ => {
+                let text = init.utf8_text(bytes).ok()?;
+                let text = text.trim();
+                if let Some(rest) = text.strip_prefix("new ") {
+                    let class_name = rest.split('(').next()?.split('<').next()?.trim();
+                    if !class_name.is_empty() {
+                        return Some(class_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// 从当前行提取方法参数位置的前缀
@@ -1830,5 +1879,65 @@ mod tests {
         assert!(has_chained_dot("Foo(bar())."));
         // "Foo(bar())" — no dot after outer close
         assert!(!has_chained_dot("Foo(bar())"));
+    }
+
+    #[test]
+    fn test_var_type_inferred_from_constructor() {
+        let src = indoc::indoc! {r#"
+        class Main {
+            public static class NestedClass {
+                public void randomFunction(String arg1) {}
+            }
+            public static void main(String[] args) {
+                var nc = new NestedClass();
+                nc.
+            }
+        }
+    "#};
+
+        // Find line/col dynamically instead of hardcoding
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("nc.").map(|c| (i as u32, c as u32 + 3)))
+            .expect("nc. not found in source");
+
+        let ctx = at(src, line, col);
+
+        let nc = ctx.local_variables.iter().find(|v| v.name.as_ref() == "nc");
+        assert!(
+            nc.is_some(),
+            "nc should be in locals: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|v| format!("{}:{}", v.name, v.type_internal))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            nc.unwrap().type_internal.as_ref(),
+            "NestedClass",
+            "var type should be inferred as NestedClass"
+        );
+    }
+
+    #[test]
+    fn test_var_with_non_constructor_init_skipped() {
+        // var x = someMethod() — cannot infer, should not crash
+        let src = indoc::indoc! {r#"
+        class A {
+            static String helper() { return ""; }
+            void f() {
+                var x = helper();
+                x.
+            }
+        }
+    "#};
+        let line = 4u32;
+        let raw = src.lines().nth(4).unwrap();
+        let col = raw.find("x.").unwrap() as u32 + 2;
+        let ctx = at(src, line, col);
+        // x should not appear (type unknown), but should not crash
+        // The important thing is no panic
+        let _ = ctx;
     }
 }

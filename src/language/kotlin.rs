@@ -552,11 +552,6 @@ mod tests {
             .unwrap()
     }
 
-    fn end_of_line(src: &str, line_idx: usize) -> CompletionContext {
-        let col = src.lines().nth(line_idx).unwrap_or("").len() as u32;
-        at(src, line_idx as u32, col)
-    }
-
     #[test]
     fn test_import() {
         let src = "import org.example.Foo\n";

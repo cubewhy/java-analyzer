@@ -29,7 +29,7 @@ impl Backend {
         }
     }
 
-    /// 语言 ID 判断
+    /// Language ID determination
     fn is_supported(lang_id: &str) -> bool {
         matches!(lang_id, "java" | "kotlin")
     }
@@ -104,7 +104,7 @@ fn find_jar_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// 从 LSP URI 推断语言 ID
+/// Infer Language ID from LSP URI
 fn language_id_from_uri(uri: &Url) -> &'static str {
     match uri.path().rsplit('.').next() {
         Some("kt") | Some("kts") => "kotlin",
@@ -114,12 +114,10 @@ fn language_id_from_uri(uri: &Url) -> &'static str {
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
-    // ── 生命周期 ──────────────────────────────────────────────────────────────
-
     async fn initialize(&self, params: InitializeParams) -> LspResult<InitializeResult> {
         info!("LSP initialize");
 
-        // 触发工作区索引
+        // Trigger workspace index
         if let Some(root) = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok()) {
             self.spawn_index_workspace(root);
         } else if let Some(folders) = params.workspace_folders {
@@ -136,7 +134,6 @@ impl LanguageServer for Backend {
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
             capabilities: server_capabilities(),
-            ..Default::default()
         })
     }
 
@@ -151,8 +148,6 @@ impl LanguageServer for Backend {
         info!("LSP shutdown");
         Ok(())
     }
-
-    // ── 文档同步 ──────────────────────────────────────────────────────────────
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let td = params.text_document;

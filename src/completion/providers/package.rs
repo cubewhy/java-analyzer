@@ -24,8 +24,7 @@ impl CompletionProvider for PackageProvider {
         match &ctx.location {
             CursorLocation::Import { prefix } => provide_for_import_prefix(prefix, index),
             CursorLocation::Expression { prefix } | CursorLocation::TypeAnnotation { prefix } => {
-                if prefix.contains('.') && prefix.chars().next().map_or(false, |c| c.is_lowercase())
-                {
+                if prefix.contains('.') && prefix.chars().next().is_some_and(|c| c.is_lowercase()) {
                     provide_for_package_prefix(prefix, index)
                 } else {
                     vec![]
@@ -73,17 +72,17 @@ fn provide_for_import_prefix(prefix: &str, index: &mut GlobalIndex) -> Vec<Compl
             std::collections::BTreeSet::new();
 
         for meta in index.iter_all_classes() {
-            if let Some(pkg) = &meta.package {
-                if pkg.starts_with(&pkg_prefix_slash) {
-                    // 取下一级子包名
-                    let rest = &pkg[pkg_prefix_slash.len()..];
-                    let sub = rest.split('/').next().unwrap_or("");
-                    if !sub.is_empty()
-                        && (name_prefix.is_empty()
-                            || sub.to_lowercase().starts_with(&name_prefix.to_lowercase()))
-                    {
-                        sub_packages.insert(sub.to_string());
-                    }
+            if let Some(pkg) = &meta.package
+                && pkg.starts_with(&pkg_prefix_slash)
+            {
+                // Retrieve the name of the next level sub-package
+                let rest = &pkg[pkg_prefix_slash.len()..];
+                let sub = rest.split('/').next().unwrap_or("");
+                if !sub.is_empty()
+                    && (name_prefix.is_empty()
+                        || sub.to_lowercase().starts_with(&name_prefix.to_lowercase()))
+                {
+                    sub_packages.insert(sub.to_string());
                 }
             }
         }

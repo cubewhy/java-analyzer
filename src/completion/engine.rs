@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::context::CursorLocation;
 use super::type_resolver::TypeResolver;
 use super::{
@@ -211,6 +209,8 @@ fn parse_chain_from_expr(expr: &str) -> Vec<super::type_resolver::ChainSegment> 
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use rust_asm::constants::ACC_PUBLIC;
 
     use crate::{

@@ -6,6 +6,7 @@ use std::sync::Arc;
 /// - `fqn`: 点分 FQN，如 "org.cubewhy.RandomClass"
 /// - `existing_imports`: 文件中已有的 import 语句
 /// - `enclosing_package`: 当前文件所在包（内部格式，如 "org/cubewhy/a"）
+///
 /// 判断一个 FQN 是否需要插入 import 语句
 ///
 /// 不需要 import 的情况：
@@ -40,10 +41,10 @@ pub fn is_import_needed(
     }
 
     // 3. 同包
-    if let Some(enc_pkg) = enclosing_package {
-        if same_package(fqn, enc_pkg) {
-            return false;
-        }
+    if let Some(enc_pkg) = enclosing_package
+        && same_package(fqn, enc_pkg)
+    {
+        return false;
     }
 
     true
@@ -114,13 +115,12 @@ pub fn resolve_simple_to_internal(
     // 3. 全局唯一匹配（优先同包）
     let candidates = index.get_classes_by_simple_name(simple);
     if !candidates.is_empty() {
-        if let Some(pkg) = enclosing_package {
-            if let Some(m) = candidates
+        if let Some(pkg) = enclosing_package
+            && let Some(m) = candidates
                 .iter()
                 .find(|c| c.package.as_deref() == Some(pkg))
-            {
-                return Some(Arc::clone(&m.internal_name));
-            }
+        {
+            return Some(Arc::clone(&m.internal_name));
         }
         return Some(Arc::clone(&candidates[0].internal_name));
     }

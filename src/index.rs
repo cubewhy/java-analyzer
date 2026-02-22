@@ -500,16 +500,16 @@ mod tests {
         }
     }
 
-    fn make_field(name: &str, descriptor: &str) -> FieldSummary {
-        FieldSummary {
-            name: Arc::from(name),
-            descriptor: Arc::from(descriptor),
-            access_flags: ACC_PUBLIC,
-            is_synthetic: false,
-        }
-    }
+    // TODO: field tests
 
-    // ── 基础增删查 ────────────────────────────────────────────────────────────
+    // fn make_field(name: &str, descriptor: &str) -> FieldSummary {
+    //     FieldSummary {
+    //         name: Arc::from(name),
+    //         descriptor: Arc::from(descriptor),
+    //         access_flags: ACC_PUBLIC,
+    //         is_synthetic: false,
+    //     }
+    // }
 
     #[test]
     fn test_add_and_get_class() {

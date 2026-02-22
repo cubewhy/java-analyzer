@@ -332,13 +332,6 @@ fn resolve_simple_name_to_internal(
     None
 }
 
-/// Determine if internal_name is a valid class internal name (not a primitive type descriptor)
-fn is_valid_class_internal(internal: &str) -> bool {
-    !matches!(internal, "long" | "int" | "boolean" | "byte" | "char" | "short" | "float" | "double" | "void")
-        && !internal.starts_with('[') // Not an array descriptor
-        && !internal.starts_with('L') // Not a JVM descriptor format
-}
-
 #[cfg(test)]
 mod tests {
     use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};

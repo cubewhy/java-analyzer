@@ -149,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fuzzy_match_var_finds_aVar() {
+    fn test_fuzzy_match_var_finds_a_var() {
         let mut idx = GlobalIndex::new();
         let ctx = make_ctx(
             "var",

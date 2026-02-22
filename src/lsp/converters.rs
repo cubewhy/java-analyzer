@@ -185,7 +185,7 @@ mod tests {
         assert!(
             item.additional_text_edits
                 .as_ref()
-                .map_or(true, |e| e.is_empty()),
+                .is_none_or(|e| e.is_empty()),
             "should not insert duplicate import"
         );
     }
@@ -198,7 +198,7 @@ mod tests {
         assert!(
             item.additional_text_edits
                 .as_ref()
-                .map_or(true, |e| e.is_empty()),
+                .is_none_or(|e| e.is_empty()),
             "should not insert import when wildcard covers it"
         );
     }
@@ -211,7 +211,7 @@ mod tests {
         assert!(
             item.additional_text_edits
                 .as_ref()
-                .map_or(true, |e| e.is_empty()),
+                .is_none_or(|e| e.is_empty()),
             "should not insert import for same-package class"
         );
     }
@@ -224,7 +224,7 @@ mod tests {
         assert!(
             item.additional_text_edits
                 .as_ref()
-                .map_or(true, |e| e.is_empty()),
+                .is_none_or(|e| e.is_empty()),
             "java.lang classes should not get an import edit"
         );
     }

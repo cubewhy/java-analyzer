@@ -125,24 +125,24 @@ impl CompletionProvider for ExpressionProvider {
     }
 }
 
-/// Determine if the candidate class is the class currently being edited (without completing itself).
-fn is_enclosing_class(meta: &crate::index::ClassMetadata, ctx: &CompletionContext) -> bool {
-    match ctx.enclosing_class.as_deref() {
-        Some(simple) => {
-            // Simple name matching + package name matching
-            if meta.name.as_ref() != simple {
-                return false;
-            }
-            // Package names must also match (to prevent misjudgment of classes with the same name)
-            match (meta.package.as_deref(), ctx.enclosing_package.as_deref()) {
-                (Some(mp), Some(cp)) => mp == cp,
-                (None, None) => true,
-                _ => false,
-            }
-        }
-        None => false,
-    }
-}
+// /// Determine if the candidate class is the class currently being edited (without completing itself).
+// fn is_enclosing_class(meta: &crate::index::ClassMetadata, ctx: &CompletionContext) -> bool {
+//     match ctx.enclosing_class.as_deref() {
+//         Some(simple) => {
+//             // Simple name matching + package name matching
+//             if meta.name.as_ref() != simple {
+//                 return false;
+//             }
+//             // Package names must also match (to prevent misjudgment of classes with the same name)
+//             match (meta.package.as_deref(), ctx.enclosing_package.as_deref()) {
+//                 (Some(mp), Some(cp)) => mp == cp,
+//                 (None, None) => true,
+//                 _ => false,
+//             }
+//         }
+//         None => false,
+//     }
+// }
 
 fn fqn_of(meta: &crate::index::ClassMetadata) -> String {
     match &meta.package {
