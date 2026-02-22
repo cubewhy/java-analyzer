@@ -3,7 +3,10 @@ use super::super::{
     context::{CompletionContext, CursorLocation},
 };
 use super::CompletionProvider;
-use crate::{completion::fuzzy, index::GlobalIndex};
+use crate::{
+    completion::{fuzzy, import_utils::is_import_needed},
+    index::GlobalIndex,
+};
 use std::sync::Arc;
 
 pub struct ExpressionProvider;
@@ -95,17 +98,27 @@ impl CompletionProvider for ExpressionProvider {
                 None => continue,
             };
             let fqn = fqn_of(meta);
-            results.push(
-                CompletionCandidate::new(
-                    Arc::clone(&meta.name),
-                    meta.name.to_string(),
-                    CandidateKind::ClassName,
-                    self.name(),
-                )
-                .with_detail(fqn.clone())
-                .with_import(fqn)
-                .with_score(40.0 + score as f32 * 0.1),
+            let candidate = CompletionCandidate::new(
+                Arc::clone(&meta.name),
+                meta.name.to_string(),
+                CandidateKind::ClassName,
+                self.name(),
+            )
+            .with_detail(fqn.clone())
+            .with_score(40.0 + score as f32 * 0.1);
+
+            let needs_import = is_import_needed(
+                &fqn,
+                &ctx.existing_imports,
+                ctx.enclosing_package.as_deref(),
             );
+            let candidate = if needs_import {
+                candidate.with_import(fqn)
+            } else {
+                candidate
+            };
+
+            results.push(candidate);
         }
 
         results

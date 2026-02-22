@@ -3,7 +3,13 @@ use super::super::{
     context::{CompletionContext, CursorLocation},
 };
 use super::CompletionProvider;
-use crate::{completion::scorer::AccessFilter, index::GlobalIndex};
+use crate::{
+    completion::{
+        import_utils::{fqn_of_meta, is_import_needed},
+        scorer::AccessFilter,
+    },
+    index::GlobalIndex,
+};
 use std::sync::Arc;
 
 pub struct ConstructorProvider;
@@ -18,22 +24,31 @@ impl CompletionProvider for ConstructorProvider {
         ctx: &CompletionContext,
         index: &mut GlobalIndex,
     ) -> Vec<CompletionCandidate> {
-        let class_prefix = match &ctx.location {
-            CursorLocation::ConstructorCall { class_prefix } => class_prefix.as_str(),
+        let (class_prefix, expected_type) = match &ctx.location {
+            CursorLocation::ConstructorCall {
+                class_prefix,
+                expected_type,
+            } => (class_prefix.as_str(), expected_type.as_deref()),
             _ => return vec![],
         };
 
         index
-            .fuzzy_search_classes(class_prefix, 30)
+            .fuzzy_search_classes(class_prefix, 50)
             .into_iter()
             .flat_map(|meta| {
-                let fqn = match &meta.package {
-                    Some(pkg) => format!("{}.{}", pkg.replace('/', "."), meta.name),
-                    None => meta.name.to_string(),
-                };
+                let fqn = fqn_of_meta(&meta);
+                let needs_import = is_import_needed(
+                    &fqn,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                );
+
+                // Score boost when class name matches the expected LHS type
+                let type_score_boost = expected_type
+                    .map(|et| type_match_score(et, &meta.name))
+                    .unwrap_or(0.0);
 
                 let filter = AccessFilter::member_completion();
-
                 let constructors: Vec<_> = meta
                     .methods
                     .iter()
@@ -44,6 +59,7 @@ impl CompletionProvider for ConstructorProvider {
                     .collect();
 
                 if constructors.is_empty() {
+                    // Synthesise a default no-arg constructor
                     let candidate = CompletionCandidate::new(
                         Arc::clone(&meta.name),
                         format!("{}()", meta.name),
@@ -53,13 +69,14 @@ impl CompletionProvider for ConstructorProvider {
                         },
                         self.name(),
                     )
-                    .with_detail(format!("new {}()", fqn));
-                    let candidate = if is_already_imported(&fqn, &ctx.existing_imports) {
-                        candidate
+                    .with_detail(format!("new {}()", fqn))
+                    .with_score(type_score_boost);
+
+                    let candidate = if needs_import {
+                        candidate.with_import(fqn)
                     } else {
-                        candidate.with_import(fqn.clone())
+                        candidate
                     };
-                    // default to no parameter constructor
                     return vec![candidate];
                 }
 
@@ -69,7 +86,6 @@ impl CompletionProvider for ConstructorProvider {
                         let readable_params = descriptor_params_to_readable(&ctor.descriptor);
                         let insert_text = format!("{}(", meta.name);
                         let detail = format!("new {}({})", fqn, readable_params);
-
                         let candidate = CompletionCandidate::new(
                             Arc::clone(&meta.name),
                             insert_text,
@@ -80,17 +96,37 @@ impl CompletionProvider for ConstructorProvider {
                             self.name(),
                         )
                         .with_detail(detail)
-                        .with_import(fqn.clone());
+                        .with_score(type_score_boost);
 
-                        if is_already_imported(&fqn, &ctx.existing_imports) {
-                            candidate
-                        } else {
+                        if needs_import {
                             candidate.with_import(fqn.clone())
+                        } else {
+                            candidate
                         }
                     })
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+}
+
+/// Score boost based on how well the class name matches the expected type.
+/// - Exact match (case-insensitive): high boost → sorted to top
+/// - No match: 0
+///
+/// Future: extend to check super_name / interfaces for inheritance bonus.
+fn type_match_score(expected: &str, class_name: &str) -> f32 {
+    if class_name.eq_ignore_ascii_case(expected) {
+        // Exact match — push to the very top
+        200.0
+    } else if class_name
+        .to_lowercase()
+        .starts_with(&expected.to_lowercase())
+    {
+        // Prefix match (e.g. expected="Array", class="ArrayList")
+        50.0
+    } else {
+        0.0
     }
 }
 
@@ -104,19 +140,6 @@ pub fn descriptor_params_to_readable(descriptor: &str) -> String {
         .map(|t| jvm_type_to_readable(&t))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn is_already_imported(fqn: &str, existing_imports: &[String]) -> bool {
-    existing_imports.iter().any(|imp| {
-        imp == fqn
-            || (imp.ends_with(".*") && {
-                // org.cubewhy.* 匹配 org.cubewhy.RandomClass
-                let pkg = &imp[..imp.len() - 2]; // "org.cubewhy"
-                fqn.starts_with(pkg)
-                    && fqn[pkg.len()..].starts_with('.')
-                    && !fqn[pkg.len() + 1..].contains('.')
-            })
-    })
 }
 
 fn parse_type_list(mut s: &str) -> Vec<String> {
@@ -173,4 +196,254 @@ pub fn jvm_type_to_readable(ty: &str) -> String {
         other => other,
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion::context::{CompletionContext, CursorLocation};
+    use crate::completion::providers::CompletionProvider;
+    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex, MethodSummary};
+    use rust_asm::constants::ACC_PUBLIC;
+    use std::sync::Arc;
+
+    fn make_index_with(pkg: &str, name: &str, has_init: bool) -> GlobalIndex {
+        let mut idx = GlobalIndex::new();
+        let methods = if has_init {
+            vec![MethodSummary {
+                name: Arc::from("<init>"),
+                descriptor: Arc::from("()V"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }]
+        } else {
+            vec![]
+        };
+        idx.add_classes(vec![ClassMetadata {
+            package: if pkg.is_empty() {
+                None
+            } else {
+                Some(Arc::from(pkg))
+            },
+            name: Arc::from(name),
+            internal_name: Arc::from(format!("{}/{}", pkg, name).trim_start_matches('/')),
+            super_name: None,
+            interfaces: vec![],
+            methods,
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        idx
+    }
+
+    fn make_ctx(prefix: &str, expected: Option<&str>, imports: Vec<String>) -> CompletionContext {
+        CompletionContext::new(
+            CursorLocation::ConstructorCall {
+                class_prefix: prefix.to_string(),
+                expected_type: expected.map(|s| s.to_string()),
+            },
+            prefix,
+            vec![],
+            Some(Arc::from("Main")),
+            None,
+            Some(Arc::from("org/cubewhy/a")),
+            imports,
+        )
+    }
+
+    // ── empty prefix returns candidates ──────────────────────────────────
+
+    #[test]
+    fn test_empty_prefix_returns_candidates() {
+        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let ctx = make_ctx("", None, vec![]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        assert!(
+            !results.is_empty(),
+            "empty prefix should return constructor candidates"
+        );
+    }
+
+    #[test]
+    fn test_empty_prefix_includes_known_class() {
+        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let ctx = make_ctx("", None, vec![]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "RandomClass"),
+            "RandomClass should appear with empty prefix: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    // ── import logic (was inverted) ───────────────────────────────────────
+
+    #[test]
+    fn test_no_import_when_already_exact_imported() {
+        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let ctx = make_ctx(
+            "RandomClass",
+            None,
+            vec!["org.cubewhy.RandomClass".to_string()],
+        );
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| c.required_import.is_none()),
+            "should not add import when already imported: {:?}",
+            results
+                .iter()
+                .map(|c| &c.required_import)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_import_when_wildcard_imported() {
+        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".to_string()]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| c.required_import.is_none()),
+            "should not add import under wildcard: {:?}",
+            results
+                .iter()
+                .map(|c| &c.required_import)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_import_when_same_package() {
+        let mut idx = make_index_with("org/cubewhy/a", "Helper", true);
+        // enclosing package is org/cubewhy/a — same as Helper
+        let ctx = make_ctx("Helper", None, vec![]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| c.required_import.is_none()),
+            "same-package class should not need import: {:?}",
+            results
+                .iter()
+                .map(|c| &c.required_import)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_import_added_when_not_imported() {
+        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let ctx = make_ctx("RandomClass", None, vec![]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        assert!(
+            results
+                .iter()
+                .any(|c| c.required_import.as_deref() == Some("org.cubewhy.RandomClass")),
+            "should add import when class not imported: {:?}",
+            results
+                .iter()
+                .map(|c| &c.required_import)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // ── expected_type score boost ─────────────────────────────────────────
+
+    #[test]
+    fn test_expected_type_exact_match_scores_highest() {
+        let mut idx = GlobalIndex::new();
+        // Add both String and StringBuilder
+        for (pkg, name) in [("java/lang", "String"), ("java/lang", "StringBuilder")] {
+            idx.add_classes(vec![ClassMetadata {
+                package: Some(Arc::from(pkg)),
+                name: Arc::from(name),
+                internal_name: Arc::from(format!("{}/{}", pkg, name)),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("<init>"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            }]);
+        }
+
+        // expected_type = "String" → String should score higher than StringBuilder
+        let ctx = make_ctx("S", Some("String"), vec![]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+
+        let string_score = results
+            .iter()
+            .find(|c| c.label.as_ref() == "String")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+        let sb_score = results
+            .iter()
+            .find(|c| c.label.as_ref() == "StringBuilder")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+
+        assert!(
+            string_score > sb_score,
+            "String (exact match) should score higher than StringBuilder: {} vs {}",
+            string_score,
+            sb_score
+        );
+    }
+
+    #[test]
+    fn test_no_expected_type_no_score_boost() {
+        let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
+        let ctx = make_ctx("RandomClass", None, vec![]);
+        let results = ConstructorProvider.provide(&ctx, &mut idx);
+        // score should be 0.0 (set by provider; Scorer adds on top in engine)
+        assert!(
+            results.iter().all(|c| c.score == 0.0),
+            "no expected_type → no boost, scores: {:?}",
+            results.iter().map(|c| c.score).collect::<Vec<_>>()
+        );
+    }
+
+    // ── type_match_score unit tests ───────────────────────────────────────
+
+    #[test]
+    fn test_type_match_exact() {
+        assert_eq!(type_match_score("String", "String"), 200.0);
+        assert_eq!(type_match_score("string", "String"), 200.0); // case-insensitive
+    }
+
+    #[test]
+    fn test_type_match_prefix() {
+        assert!(type_match_score("Array", "ArrayList") > 0.0);
+        assert!(type_match_score("Array", "ArrayList") < 200.0);
+    }
+
+    #[test]
+    fn test_type_match_none() {
+        assert_eq!(type_match_score("String", "HashMap"), 0.0);
+    }
+
+    // ── descriptor helpers ────────────────────────────────────────────────
+
+    #[test]
+    fn test_descriptor_params_readable() {
+        assert_eq!(
+            descriptor_params_to_readable("(Ljava/lang/String;I)V"),
+            "String, int"
+        );
+        assert_eq!(descriptor_params_to_readable("()V"), "");
+        assert_eq!(
+            descriptor_params_to_readable("([Ljava/lang/String;)V"),
+            "String[]"
+        );
+    }
 }

@@ -28,7 +28,10 @@ pub enum CursorLocation {
         member_prefix: String,
     },
     /// `new Foo|`
-    ConstructorCall { class_prefix: String },
+    ConstructorCall {
+        class_prefix: String,
+        expected_type: Option<String>,
+    },
     /// Type annotation location: the type part of the variable declaration `Ma|in m;`
     // The class name should be completed, not the variable name.
     TypeAnnotation { prefix: String },

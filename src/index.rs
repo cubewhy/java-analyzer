@@ -170,10 +170,10 @@ fn parse_class_data(_file_name: &str, bytes: &[u8], jar_path: Arc<str>) -> Optio
     let inner_class_of = if !cn.outer_class.is_empty() {
         let outer_simple = cn.outer_class.rsplit('/').next().unwrap_or(&cn.outer_class);
         Some(Arc::from(outer_simple))
-    } else if let Some(pos) = class_name.find('$') {
-        Some(Arc::from(&class_name[..pos]))
     } else {
-        None
+        class_name
+            .find('$')
+            .map(|pos| Arc::from(&class_name[..pos]))
     };
 
     Some(ClassMetadata {
@@ -279,26 +279,26 @@ impl GlobalIndex {
 
         for internal in &internals {
             if let Some(meta) = self.exact_match.remove(internal) {
-                // 从 simple_name_index 里删除
+                // remove from simple_name_index
                 if let Some(v) = self.simple_name_index.get_mut(&meta.name) {
                     v.retain(|n| n != internal);
                     if v.is_empty() {
                         self.simple_name_index.remove(&meta.name);
                     }
                 }
-                // 从 package_index 里删除
-                if let Some(pkg) = &meta.package {
-                    if let Some(v) = self.package_index.get_mut(pkg) {
-                        v.retain(|n| n != internal);
-                        if v.is_empty() {
-                            self.package_index.remove(pkg);
-                        }
+                // remove from package_index
+                if let Some(pkg) = &meta.package
+                    && let Some(v) = self.package_index.get_mut(pkg)
+                {
+                    v.retain(|n| n != internal);
+                    if v.is_empty() {
+                        self.package_index.remove(pkg);
                     }
                 }
             }
         }
 
-        // fuzzy_matcher 不支持删除单条，重建
+        // fuzzy_matcher does not support deleting or rebuilding individual records.
         self.rebuild_fuzzy();
     }
 
@@ -401,6 +401,10 @@ impl GlobalIndex {
     }
 
     pub fn fuzzy_search_classes(&mut self, query: &str, limit: usize) -> Vec<Arc<ClassMetadata>> {
+        if query.is_empty() {
+            // Nucleo returns nothing for empty query; fall back to iter_all_classes
+            return self.exact_match.values().take(limit).cloned().collect();
+        }
         let simple_names = self.fuzzy_autocomplete(query, limit);
         simple_names
             .into_iter()

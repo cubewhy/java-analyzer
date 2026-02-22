@@ -3,7 +3,7 @@ use super::super::{
     context::{CompletionContext, CursorLocation},
 };
 use super::CompletionProvider;
-use crate::index::GlobalIndex;
+use crate::{completion::import_utils::fqn_of_meta, index::GlobalIndex};
 use std::sync::Arc;
 
 pub struct ImportProvider;
@@ -93,10 +93,7 @@ fn search_by_package_and_name(
 }
 
 fn make_import_candidate(meta: &Arc<crate::index::ClassMetadata>) -> CompletionCandidate {
-    let fqn = match &meta.package {
-        Some(pkg) => format!("{}.{}", pkg.replace('/', "."), meta.name),
-        None => meta.name.to_string(),
-    };
+    let fqn = fqn_of_meta(meta);
     CompletionCandidate::new(
         Arc::clone(&meta.name),
         fqn.clone(),

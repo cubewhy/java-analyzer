@@ -235,6 +235,12 @@ fn resolve_receiver_type(
         return r;
     }
 
+    // new Foo() / new Foo(args) -> return Foo's internal name
+    if let Some(class_name) = extract_constructor_class(expr) {
+        return resolve_simple_name_to_internal(class_name, ctx, index);
+    }
+
+    // local variable
     if let Some(lv) = ctx
         .local_variables
         .iter()
@@ -259,6 +265,20 @@ fn resolve_receiver_type(
 
     tracing::debug!(expr, "local var not found");
     None
+}
+
+/// 从 "new Foo()" / "new Foo(a, b)" 中提取 "Foo"
+fn extract_constructor_class(expr: &str) -> Option<&str> {
+    let rest = expr.trim().strip_prefix("new ")?;
+    // 取到 '(' 之前的部分就是类名（可能含泛型，如 "ArrayList<String>"）
+    let class_part = rest.split('(').next()?.trim();
+    // 去掉泛型参数：ArrayList<String> → ArrayList
+    let simple = class_part.split('<').next()?.trim();
+    if simple.is_empty() {
+        None
+    } else {
+        Some(simple)
+    }
 }
 
 /// Resolves simple class names to internal names

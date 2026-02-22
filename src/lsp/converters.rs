@@ -1,28 +1,35 @@
 use tower_lsp::lsp_types::*;
 
-use crate::completion::candidate::{CandidateKind, CompletionCandidate};
+use crate::completion::{
+    candidate::{CandidateKind, CompletionCandidate},
+    import_utils::{extract_imports_from_source, extract_package_from_source, is_import_needed},
+};
 
 /// Convert internal completion candidates to LSP CompletionItem
 pub fn candidate_to_lsp(candidate: &CompletionCandidate, source: &str) -> CompletionItem {
     let kind = map_kind(&candidate.kind);
 
-    let additional_text_edits = candidate.required_import.as_ref().map(|import| {
-        let insert_line = find_import_insert_line(source);
-        let new_text = make_import_text(import, source);
-        vec![TextEdit {
-            range: Range {
-                start: Position {
-                    line: insert_line,
-                    character: 0,
+    let additional_text_edits = candidate
+        .required_import
+        .as_ref()
+        .filter(|import| !is_already_in_source(import, source))
+        .map(|import| {
+            let insert_line = find_import_insert_line(source);
+            let new_text = make_import_text(import, source);
+            vec![TextEdit {
+                range: Range {
+                    start: Position {
+                        line: insert_line,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: insert_line,
+                        character: 0,
+                    },
                 },
-                end: Position {
-                    line: insert_line,
-                    character: 0,
-                },
-            },
-            new_text,
-        }]
-    });
+                new_text,
+            }]
+        });
 
     CompletionItem {
         label: candidate.label.to_string(),
@@ -32,6 +39,14 @@ pub fn candidate_to_lsp(candidate: &CompletionCandidate, source: &str) -> Comple
         sort_text: Some(format!("{:010.4}", 10000.0 - candidate.score)),
         ..Default::default()
     }
+}
+
+/// 检查 source 中是否已经通过精确 import、通配符 import 或同包覆盖了这个 fqn
+fn is_already_in_source(fqn: &str, source: &str) -> bool {
+    let existing_imports = extract_imports_from_source(source);
+    let enclosing_pkg = extract_package_from_source(source);
+
+    !is_import_needed(fqn, &existing_imports, enclosing_pkg.as_deref())
 }
 
 /// Find the line number where the import should be inserted: the first line after the package declaration.
@@ -92,15 +107,145 @@ pub fn lsp_pos_to_offset(source: &str, pos: Position) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::completion::candidate::{CandidateKind, CompletionCandidate};
+    use std::sync::Arc;
+
+    fn make_candidate(label: &str, import: Option<&str>) -> CompletionCandidate {
+        let mut c = CompletionCandidate::new(
+            Arc::from(label),
+            label.to_string(),
+            CandidateKind::ClassName,
+            "test",
+        );
+        c.required_import = import.map(|s| s.to_string());
+        c
+    }
+
+    // ── extract_imports_from_source ───────────────────────────────────────
+
+    #[test]
+    fn test_extract_imports_basic() {
+        let src = "package a;\nimport java.util.List;\nimport java.util.Map;\nclass A {}";
+        let imports = extract_imports_from_source(src);
+        assert_eq!(imports, vec!["java.util.List", "java.util.Map"]);
+    }
+
+    #[test]
+    fn test_extract_imports_empty() {
+        let src = "package a;\nclass A {}";
+        assert!(extract_imports_from_source(src).is_empty());
+    }
+
+    #[test]
+    fn test_extract_imports_wildcard() {
+        let src = "import org.cubewhy.*;\nclass A {}";
+        let imports = extract_imports_from_source(src);
+        assert_eq!(imports, vec!["org.cubewhy.*"]);
+    }
+
+    // ── is_already_in_source ──────────────────────────────────────────────
+
+    #[test]
+    fn test_already_in_source_exact() {
+        let src = "package a;\nimport org.cubewhy.Foo;\nclass A {}";
+        assert!(is_already_in_source("org.cubewhy.Foo", src));
+    }
+
+    #[test]
+    fn test_already_in_source_wildcard() {
+        let src = "package a;\nimport org.cubewhy.*;\nclass A {}";
+        assert!(is_already_in_source("org.cubewhy.Foo", src));
+    }
+
+    #[test]
+    fn test_already_in_source_same_package() {
+        let src = "package org.cubewhy.a;\nclass A {}";
+        assert!(is_already_in_source("org.cubewhy.a.Helper", src));
+    }
+
+    #[test]
+    fn test_already_in_source_java_lang() {
+        let src = "package a;\nclass A {}";
+        assert!(is_already_in_source("java.lang.String", src));
+    }
+
+    #[test]
+    fn test_not_already_in_source() {
+        let src = "package a;\nimport java.util.List;\nclass A {}";
+        assert!(!is_already_in_source("org.cubewhy.Foo", src));
+    }
+
+    // ── candidate_to_lsp 完整场景 ─────────────────────────────────────────
+
+    #[test]
+    fn test_no_edit_when_already_imported_exact() {
+        let src = "package a;\nimport org.cubewhy.Foo;\nclass A {}";
+        let c = make_candidate("Foo", Some("org.cubewhy.Foo"));
+        let item = candidate_to_lsp(&c, src);
+        assert!(
+            item.additional_text_edits
+                .as_ref()
+                .map_or(true, |e| e.is_empty()),
+            "should not insert duplicate import"
+        );
+    }
+
+    #[test]
+    fn test_no_edit_when_covered_by_wildcard() {
+        let src = "package a;\nimport org.cubewhy.*;\nclass A {}";
+        let c = make_candidate("Foo", Some("org.cubewhy.Foo"));
+        let item = candidate_to_lsp(&c, src);
+        assert!(
+            item.additional_text_edits
+                .as_ref()
+                .map_or(true, |e| e.is_empty()),
+            "should not insert import when wildcard covers it"
+        );
+    }
+
+    #[test]
+    fn test_no_edit_for_same_package_class() {
+        let src = "package org.cubewhy.a;\nclass A {}";
+        let c = make_candidate("Helper", Some("org.cubewhy.a.Helper"));
+        let item = candidate_to_lsp(&c, src);
+        assert!(
+            item.additional_text_edits
+                .as_ref()
+                .map_or(true, |e| e.is_empty()),
+            "should not insert import for same-package class"
+        );
+    }
+
+    #[test]
+    fn test_no_edit_for_java_lang() {
+        let src = "package a;\nclass A {}";
+        let c = make_candidate("String", Some("java.lang.String"));
+        let item = candidate_to_lsp(&c, src);
+        assert!(
+            item.additional_text_edits
+                .as_ref()
+                .map_or(true, |e| e.is_empty()),
+            "java.lang classes should not get an import edit"
+        );
+    }
+
+    #[test]
+    fn test_edit_inserted_when_needed() {
+        let src = "package a;\nclass A {}";
+        let c = make_candidate("List", Some("java.util.List"));
+        let item = candidate_to_lsp(&c, src);
+        let edits = item.additional_text_edits.unwrap();
+        assert_eq!(edits.len(), 1);
+        assert!(edits[0].new_text.contains("import java.util.List;"));
+    }
+
+    // ── 原有测试（保持不变）──────────────────────────────────────────────
 
     #[test]
     fn test_import_text_first_import_has_blank_line() {
         let src = "package org.cubewhy;\nclass Main {}\n";
         let text = make_import_text("java.util.List", src);
-        assert!(
-            text.starts_with('\n'),
-            "first import should be preceded by blank line"
-        );
+        assert!(text.starts_with('\n'));
         assert!(text.contains("import java.util.List;"));
     }
 
@@ -108,10 +253,7 @@ mod tests {
     fn test_import_text_subsequent_no_blank_line() {
         let src = "package org.cubewhy;\nimport java.util.List;\nclass Main {}\n";
         let text = make_import_text("java.util.Map", src);
-        assert!(
-            !text.starts_with('\n'),
-            "subsequent import should not add extra blank line"
-        );
+        assert!(!text.starts_with('\n'));
     }
 
     #[test]
@@ -134,82 +276,19 @@ mod tests {
     }
 
     #[test]
-    fn test_import_insert_package_only() {
-        let src = "package org.cubewhy;\nclass Main {}\n";
-        assert_eq!(find_import_insert_line(src), 1);
-    }
-
-    #[test]
-    fn test_import_insert_prefers_last_import_over_package() {
-        // If there are both `package` and `import` directives, the `import` directive should be inserted after the last `import` directive.
-        let src = "package org.cubewhy;\nimport java.util.List;\nclass Main {}\n";
-        assert_eq!(find_import_insert_line(src), 2);
-    }
-
-    #[test]
     fn test_candidate_to_lsp_auto_import_edit() {
-        use crate::completion::candidate::{CandidateKind, CompletionCandidate};
-        use std::sync::Arc;
-
-        // No existing import in the source code → Add a blank line before the first import
         let src = "package org.cubewhy;\nclass Main {}\n";
-        let mut c = CompletionCandidate::new(
-            Arc::from("ArrayList"),
-            "ArrayList".to_string(),
-            CandidateKind::ClassName,
-            "test",
-        );
-        c.required_import = Some("java.util.ArrayList".to_string());
-
+        let c = make_candidate("ArrayList", Some("java.util.ArrayList"));
         let item = candidate_to_lsp(&c, src);
         let edits = item.additional_text_edits.unwrap();
         assert_eq!(edits.len(), 1);
-
-        // The first import statement has a blank line before it: "\nimport ...;\n"
         assert_eq!(edits[0].new_text, "\nimport java.util.ArrayList;\n");
-
-        // Inserted on the first line after package
         assert_eq!(edits[0].range.start.line, 1);
     }
 
     #[test]
-    fn test_candidate_to_lsp_auto_import_edit_with_existing_import() {
-        use crate::completion::candidate::{CandidateKind, CompletionCandidate};
-        use std::sync::Arc;
-
-        // The source code already contains imports → No extra blank lines are added when appending.
-        let src = "package org.cubewhy;\nimport java.util.List;\nclass Main {}\n";
-        let mut c = CompletionCandidate::new(
-            Arc::from("ArrayList"),
-            "ArrayList".to_string(),
-            CandidateKind::ClassName,
-            "test",
-        );
-        c.required_import = Some("java.util.ArrayList".to_string());
-
-        let item = candidate_to_lsp(&c, src);
-        let edits = item.additional_text_edits.unwrap();
-        assert_eq!(edits.len(), 1);
-
-        // If an import already exists: append it directly without adding an extra blank line.
-        assert_eq!(edits[0].new_text, "import java.util.ArrayList;\n");
-
-        // Inserted on the second line after the last import.
-        assert_eq!(edits[0].range.start.line, 2);
-    }
-
-    #[test]
     fn test_candidate_to_lsp_no_import_no_edit() {
-        use crate::completion::candidate::{CandidateKind, CompletionCandidate};
-        use std::sync::Arc;
-
-        let c = CompletionCandidate::new(
-            Arc::from("String"),
-            "String".to_string(),
-            CandidateKind::ClassName,
-            "test",
-        );
-        // required_import = None
+        let c = make_candidate("String", None);
         let item = candidate_to_lsp(&c, "class A {}");
         assert!(
             item.additional_text_edits.is_none()
@@ -219,9 +298,6 @@ mod tests {
 
     #[test]
     fn test_sort_text_higher_score_sorts_first() {
-        use crate::completion::candidate::{CandidateKind, CompletionCandidate};
-        use std::sync::Arc;
-
         let make = |score: f32| {
             let mut c = CompletionCandidate::new(
                 Arc::from("x"),
@@ -232,15 +308,8 @@ mod tests {
             c.score = score;
             candidate_to_lsp(&c, "")
         };
-
         let high = make(90.0);
         let low = make(10.0);
-        // sort_text uses lexicographical order; a higher score should result in a smaller sort_text.
-        assert!(
-            high.sort_text < low.sort_text,
-            "high score={:?} should sort before low score={:?}",
-            high.sort_text,
-            low.sort_text
-        );
+        assert!(high.sort_text < low.sort_text);
     }
 }

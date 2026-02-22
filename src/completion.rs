@@ -2,6 +2,7 @@ pub mod candidate;
 pub mod context;
 pub mod engine;
 pub mod fuzzy;
+pub mod import_utils;
 pub mod providers;
 pub mod scorer;
 pub mod type_resolver;

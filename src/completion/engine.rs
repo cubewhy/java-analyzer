@@ -12,6 +12,7 @@ use super::{
     },
     scorer::Scorer,
 };
+use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::providers::expression::ExpressionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
@@ -99,16 +100,13 @@ impl CompletionEngine {
             // If the result is a simple name (without '/'), it needs to be further parsed into an internal name.
             *receiver_type = match resolved.as_deref() {
                 None => None,
-                Some(ty) if ty.contains('/') => resolved, // already internal name
-                Some(ty) => {
-                    // Simple name, resolved through import and same package.
-                    resolve_simple_to_internal(
-                        ty,
-                        &ctx.existing_imports,
-                        ctx.enclosing_package.as_deref(),
-                        index,
-                    )
-                }
+                Some(ty) if ty.contains('/') => resolved,
+                Some(ty) => resolve_simple_to_internal(
+                    ty,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                    index,
+                ),
             };
         }
     }
@@ -148,43 +146,6 @@ fn dedup(mut candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
         }
     }
     result
-}
-
-fn resolve_simple_to_internal(
-    simple: &str,
-    imports: &[String],
-    enclosing_pkg: Option<&str>,
-    index: &GlobalIndex,
-) -> Option<Arc<str>> {
-    // Parse from imports
-    let imported = index.resolve_imports(imports);
-    if let Some(m) = imported.iter().find(|m| m.name.as_ref() == simple) {
-        return Some(Arc::clone(&m.internal_name));
-    }
-
-    // Same package
-    if let Some(pkg) = enclosing_pkg {
-        let pkg_classes = index.classes_in_package(pkg);
-        if let Some(m) = pkg_classes.iter().find(|m| m.name.as_ref() == simple) {
-            return Some(Arc::clone(&m.internal_name));
-        }
-    }
-
-    // Globally unique match
-    let candidates = index.get_classes_by_simple_name(simple);
-    if !candidates.is_empty() {
-        // Prioritize same package
-        if let Some(pkg) = enclosing_pkg
-            && let Some(m) = candidates
-                .iter()
-                .find(|c| c.package.as_deref() == Some(pkg))
-        {
-            return Some(Arc::clone(&m.internal_name));
-        }
-        return Some(Arc::clone(&candidates[0].internal_name));
-    }
-
-    None
 }
 
 /// Roughly parse the expression string into a call chain
