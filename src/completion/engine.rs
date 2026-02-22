@@ -17,6 +17,7 @@ use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::providers::expression::ExpressionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
+use crate::completion::type_resolver::ChainSegment;
 use crate::index::GlobalIndex;
 
 pub struct CompletionEngine {
@@ -191,7 +192,6 @@ fn resolve_var_init_expr(
                 }
             } else {
                 let recv = current.as_deref()?;
-                // Resolve simple name to full internal name if needed
                 let recv_full = if recv.contains('/') || index.get_class(recv).is_some() {
                     Arc::from(recv)
                 } else {
@@ -202,10 +202,25 @@ fn resolve_var_init_expr(
                         index,
                     )?
                 };
+
+                // Resolve arg_texts → arg_types for overload disambiguation
+                let arg_types: Vec<Arc<str>> = seg
+                    .arg_texts
+                    .iter()
+                    .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing))
+                    .collect();
+                // Only use type matching if all args were successfully resolved
+                let arg_types_ref: &[Arc<str>] = if arg_types.len() == seg.arg_texts.len() {
+                    &arg_types
+                } else {
+                    &[]
+                };
+
                 current = resolver.resolve_method_return(
                     &recv_full,
                     &seg.name,
                     seg.arg_count.unwrap_or(-1),
+                    arg_types_ref,
                 );
             }
         }
@@ -255,40 +270,54 @@ fn dedup(mut candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
 
 /// Roughly parse the expression string into a call chain
 /// "list.stream().filter" → [variable("list"), method("stream", 0), variable("filter")]
-pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<super::type_resolver::ChainSegment> {
-    use super::type_resolver::ChainSegment;
-
+pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
     let mut segments = Vec::new();
     let mut current = String::new();
     let mut depth = 0i32;
     let mut in_method = false;
-    let mut comma_count = 0i32;
-    let mut has_any_arg = false;
+    let mut arg_start = 0usize; // byte position of current arg start
+    let mut arg_texts: Vec<String> = Vec::new();
+    let mut expr_bytes_pos = 0usize; // track position in expr
 
-    for ch in expr.chars() {
+    for (char_pos, ch) in expr.char_indices() {
         match ch {
             '(' => {
                 depth += 1;
                 if depth == 1 {
                     in_method = true;
-                    comma_count = 0;
-                    has_any_arg = false;
+                    arg_start = char_pos + 1;
+                    arg_texts = Vec::new();
                 }
             }
             ')' => {
                 depth -= 1;
                 if depth == 0 && in_method {
-                    // Number of parameters: If there is content within the parentheses, increment comma_count by 1; otherwise, increment comma_count by 0.
-                    let arg_count = if has_any_arg { comma_count + 1 } else { 0 };
-                    segments.push(ChainSegment::method(current.trim(), arg_count));
+                    // Collect last arg
+                    let arg = expr[arg_start..char_pos].trim();
+                    let has_any = !arg.is_empty();
+                    if has_any {
+                        arg_texts.push(arg.to_string());
+                    }
+                    let arg_count = if arg_texts.is_empty() {
+                        0
+                    } else {
+                        arg_texts.len() as i32
+                    };
+                    segments.push(ChainSegment::method_with_types(
+                        current.trim(),
+                        arg_count,
+                        vec![], // arg_types filled later by resolver
+                        arg_texts.clone(),
+                    ));
                     current = String::new();
+                    arg_texts = Vec::new();
                     in_method = false;
                 }
             }
             ',' if depth == 1 => {
-                // Only count the commas in the outermost parentheses
-                comma_count += 1;
-                has_any_arg = true;
+                let arg = expr[arg_start..char_pos].trim();
+                arg_texts.push(arg.to_string());
+                arg_start = char_pos + 1;
             }
             '.' if depth == 0 => {
                 let trimmed = current.trim().to_string();
@@ -300,17 +329,10 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<super::type_resolver::Cha
             c => {
                 if depth == 0 {
                     current.push(c);
-                } else if depth == 1 && !c.is_whitespace() {
-                    // Non-whitespace characters within parentheses -> Parameters are present
-                    has_any_arg = true;
                 }
             }
         }
     }
-
-    // The last remaining fragment is member_prefix, discard it.
-    let _ = current;
-
     segments
 }
 
@@ -668,6 +690,96 @@ mod tests {
             str_var.type_internal.as_ref(),
             "NestedClass",
             "var str should be resolved to NestedClass via method return type"
+        );
+    }
+
+    #[test]
+    fn test_var_overload_resolved_by_long_arg() {
+        // var str = nc.randomFunction("a", 1l) → Main2
+        use crate::completion::context::{CursorLocation, LocalVar};
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        for (name, desc, ret) in [
+            (
+                "randomFunction",
+                "(Ljava/lang/String;I)LRandomClass;",
+                "RandomClass",
+            ),
+            ("randomFunction", "(Ljava/lang/String;J)LMain2;", "Main2"),
+        ] {
+            // add to same class — need one add_classes call
+        }
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("NestedClass"),
+            internal_name: Arc::from("NestedClass"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![
+                MethodSummary {
+                    name: Arc::from("randomFunction"),
+                    descriptor: Arc::from("(Ljava/lang/String;I)LRandomClass;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("RandomClass")),
+                },
+                MethodSummary {
+                    name: Arc::from("randomFunction"),
+                    descriptor: Arc::from("(Ljava/lang/String;J)LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                },
+            ],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "str".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("nc"),
+                    type_internal: Arc::from("NestedClass"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("str"),
+                    type_internal: Arc::from("var"),
+                    // "a" resolves to String, "1l" resolves to long
+                    init_expr: Some("nc.randomFunction(\"a\", 1l)".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        let str_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "str")
+            .unwrap();
+        assert_eq!(
+            str_var.type_internal.as_ref(),
+            "Main2",
+            "long arg should select Main2 overload, got: {}",
+            str_var.type_internal
         );
     }
 }

@@ -79,39 +79,70 @@ impl<'idx> TypeResolver<'idx> {
         receiver_internal: &str,
         method_name: &str,
         arg_count: i32,
+        arg_types: &[Arc<str>],
     ) -> Option<Arc<str>> {
         let class = self.index.get_class(receiver_internal)?;
-
-        // Collect all methods with the same name
         let candidates: Vec<&MethodSummary> = class
             .methods
             .iter()
             .filter(|m| m.name.as_ref() == method_name)
             .collect();
 
+        // // TODO: remove debug output
+        // eprintln!(
+        //     "resolve_method_return: receiver={} method={} arg_count={} arg_types={:?}",
+        //     receiver_internal, method_name, arg_count, arg_types
+        // );
+        // for c in &candidates {
+        //     eprintln!(
+        //         "  candidate: desc={} params_match={}",
+        //         c.descriptor,
+        //         if !arg_types.is_empty() {
+        //             params_match(&c.descriptor, arg_types)
+        //         } else {
+        //             false
+        //         }
+        //     );
+        // }
+
         let method = match candidates.len() {
             0 => return None,
             1 => candidates[0],
             _ => {
-                // Multiple overloads: disambiguation based on the number of parameters
                 if arg_count >= 0 {
-                    candidates
+                    // Filter by param count first
+                    let by_count: Vec<&MethodSummary> = candidates
                         .iter()
                         .copied()
-                        .find(|m| count_params(&m.descriptor) == arg_count as usize)
-                        .unwrap_or(candidates[0])
+                        .filter(|m| count_params(&m.descriptor) == arg_count as usize)
+                        .collect();
+
+                    match by_count.len() {
+                        0 => candidates[0],
+                        1 => by_count[0],
+                        _ => {
+                            // Multiple overloads with same param count → match by type
+                            if !arg_types.is_empty() {
+                                by_count
+                                    .iter()
+                                    .copied()
+                                    .find(|m| params_match(&m.descriptor, arg_types))
+                                    .unwrap_or(by_count[0])
+                            } else {
+                                by_count[0]
+                            }
+                        }
+                    }
                 } else {
                     candidates[0]
                 }
             }
         };
 
-        // Prioritize generic_signature (containing generic information), fall back to descriptor
         let sig = method
             .generic_signature
             .as_deref()
             .unwrap_or(&method.descriptor);
-
         extract_return_internal_name(sig)
     }
 
@@ -130,12 +161,89 @@ impl<'idx> TypeResolver<'idx> {
             } else {
                 // Subsequent section: Method call
                 let receiver = current_type.as_deref()?;
-                current_type =
-                    self.resolve_method_return(receiver, &seg.name, seg.arg_count.unwrap_or(-1));
+                current_type = self.resolve_method_return(
+                    receiver,
+                    &seg.name,
+                    seg.arg_count.unwrap_or(-1),
+                    &seg.arg_types,
+                );
             }
         }
 
         current_type
+    }
+}
+
+/// Check if the descriptor's parameter types match the given arg_types.
+/// arg_types are internal names (e.g. "java/lang/String", "long", "int").
+/// Matching is best-effort: primitive types and object types are compared.
+fn params_match(descriptor: &str, arg_types: &[Arc<str>]) -> bool {
+    let inner = match descriptor.find('(').zip(descriptor.find(')')) {
+        Some((l, r)) => &descriptor[l + 1..r],
+        None => return false,
+    };
+
+    let mut param_descs = Vec::new();
+    let mut s = inner;
+    while !s.is_empty() {
+        let (ty, rest) = consume_one_descriptor_type(s);
+        param_descs.push(ty);
+        s = rest;
+    }
+
+    if param_descs.len() != arg_types.len() {
+        return false;
+    }
+
+    param_descs
+        .iter()
+        .zip(arg_types.iter())
+        .all(|(desc, arg_ty)| descriptor_matches_type(desc, arg_ty))
+}
+
+/// Compare a single parameter descriptor against an inferred type internal name.
+fn descriptor_matches_type(desc: &str, ty: &str) -> bool {
+    match desc {
+        "B" => ty == "byte",
+        "C" => ty == "char",
+        "D" => ty == "double",
+        "F" => ty == "float",
+        "I" => ty == "int",
+        "J" => ty == "long",
+        "S" => ty == "short",
+        "Z" => ty == "boolean",
+        _ if desc.starts_with('L') && desc.ends_with(';') => {
+            // Object type: extract internal name
+            let internal = &desc[1..desc.len() - 1];
+            // Match by simple name or full internal name
+            ty == internal
+                || ty.rsplit('/').next().map_or(false, |simple| {
+                    internal
+                        .rsplit('/')
+                        .next()
+                        .map_or(false, |d_simple| simple == d_simple)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn consume_one_descriptor_type(s: &str) -> (&str, &str) {
+    match s.chars().next() {
+        Some('L') => {
+            if let Some(end) = s.find(';') {
+                (&s[..=end], &s[end + 1..])
+            } else {
+                (s, "")
+            }
+        }
+        Some('[') => {
+            let (_, rest) = consume_one_descriptor_type(&s[1..]);
+            let consumed = s.len() - rest.len();
+            (&s[..consumed], rest)
+        }
+        Some(_) => (&s[..1], &s[1..]),
+        None => ("", ""),
     }
 }
 
@@ -145,6 +253,9 @@ pub struct ChainSegment {
     pub name: String,
     /// If it's a method call, specify the number of arguments; if it's a field/variable, specify None.
     pub arg_count: Option<i32>,
+    /// Inferred types of arguments (internal names), used for overload resolution.
+    pub arg_types: Vec<Arc<str>>,
+    pub arg_texts: Vec<String>, // raw text of each argument
 }
 
 impl ChainSegment {
@@ -152,12 +263,29 @@ impl ChainSegment {
         Self {
             name: name.into(),
             arg_count: None,
+            arg_types: vec![],
+            arg_texts: vec![],
         }
     }
     pub fn method(name: impl Into<String>, arg_count: i32) -> Self {
         Self {
             name: name.into(),
             arg_count: Some(arg_count),
+            arg_types: vec![],
+            arg_texts: vec![],
+        }
+    }
+    pub fn method_with_types(
+        name: impl Into<String>,
+        arg_count: i32,
+        arg_types: Vec<Arc<str>>,
+        arg_texts: Vec<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            arg_count: Some(arg_count),
+            arg_types,
+            arg_texts,
         }
     }
 }
@@ -256,7 +384,10 @@ pub fn parse_return_type_from_descriptor(descriptor: &str) -> Option<Arc<str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::GlobalIndex;
+    use crate::{
+        completion::{CompletionContext, CompletionEngine},
+        index::GlobalIndex,
+    };
 
     fn make_resolver() -> (GlobalIndex, Vec<LocalVar>) {
         let idx = GlobalIndex::new();
@@ -388,5 +519,91 @@ mod tests {
             r.resolve("myL", &locals, None).as_deref(),
             Some("SomeClass")
         );
+    }
+
+    #[test]
+    fn test_resolve_method_return_overload_by_type_long() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("NestedClass"),
+            internal_name: Arc::from("NestedClass"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![
+                MethodSummary {
+                    name: Arc::from("randomFunction"),
+                    descriptor: Arc::from("(Ljava/lang/String;I)LRandomClass;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("RandomClass")),
+                },
+                MethodSummary {
+                    name: Arc::from("randomFunction"),
+                    descriptor: Arc::from("(Ljava/lang/String;J)LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                },
+            ],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let resolver = TypeResolver::new(&idx);
+
+        // arg_types: String + long → should match (String, J) → Main2
+        let result = resolver.resolve_method_return(
+            "NestedClass",
+            "randomFunction",
+            2,
+            &[Arc::from("java/lang/String"), Arc::from("long")],
+        );
+        assert_eq!(
+            result.as_deref(),
+            Some("Main2"),
+            "long arg should select Main2 overload"
+        );
+
+        // arg_types: String + int → RandomClass
+        let result2 = resolver.resolve_method_return(
+            "NestedClass",
+            "randomFunction",
+            2,
+            &[Arc::from("java/lang/String"), Arc::from("int")],
+        );
+        assert_eq!(
+            result2.as_deref(),
+            Some("RandomClass"),
+            "int arg should select RandomClass overload"
+        );
+    }
+
+    #[test]
+    fn test_params_match_primitive_long() {
+        assert!(descriptor_matches_type("J", "long"));
+        assert!(!descriptor_matches_type("J", "int"));
+        assert!(descriptor_matches_type("I", "int"));
+        assert!(!descriptor_matches_type("I", "long"));
+    }
+
+    #[test]
+    fn test_params_match_object_type() {
+        assert!(descriptor_matches_type(
+            "Ljava/lang/String;",
+            "java/lang/String"
+        ));
+        assert!(descriptor_matches_type("Ljava/lang/String;", "String")); // simple name match
+        assert!(!descriptor_matches_type(
+            "Ljava/util/List;",
+            "java/lang/String"
+        ));
     }
 }
