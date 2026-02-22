@@ -1,5 +1,3 @@
-use rust_asm::constants::ACC_STATIC;
-
 use super::super::{
     candidate::{CandidateKind, CompletionCandidate},
     context::{CompletionContext, CursorLocation},
@@ -7,6 +5,7 @@ use super::super::{
 };
 use super::CompletionProvider;
 use crate::{completion::scorer::AccessFilter, index::GlobalIndex};
+use rust_asm::constants::ACC_STATIC;
 use std::sync::Arc;
 
 pub struct StaticMemberProvider;
@@ -34,9 +33,13 @@ impl CompletionProvider for StaticMemberProvider {
         let class_meta = if let Some(m) = index.get_class(class_name_raw) {
             m
         } else {
-            // Search by simple name (there may be multiple names, those in the same package will be prioritized)
             let mut candidates = index.get_classes_by_simple_name(class_name_raw);
             if candidates.is_empty() {
+                // class not in index at all — may be the currently-edited file;
+                // fall back to source members if we're accessing our own class
+                if is_self_class_by_simple_name(class_name_raw, ctx) {
+                    return self.provide_from_source_members(ctx, member_prefix);
+                }
                 return vec![];
             }
             // same package first
@@ -50,7 +53,25 @@ impl CompletionProvider for StaticMemberProvider {
             candidates.into_iter().next().unwrap()
         };
 
-        let filter = AccessFilter::member_completion();
+        // Determine whether this is a self-access (Main.xxx from inside Main)
+        // Compare AFTER resolving to internal name
+        let is_same_class = ctx
+            .enclosing_internal_name
+            .as_deref()
+            .is_some_and(|enc| enc == class_meta.internal_name.as_ref());
+
+        // When accessing own class and source members are available, prefer them
+        // (handles the case where the current file is not yet compiled into the index)
+        if is_same_class && !ctx.current_class_members.is_empty() {
+            return self.provide_from_source_members(ctx, member_prefix);
+        }
+
+        let filter = if is_same_class {
+            AccessFilter::same_class() // private visible
+        } else {
+            AccessFilter::member_completion()
+        };
+
         let prefix_lower = member_prefix.to_lowercase();
         let class_name = class_meta.internal_name.as_ref();
         let mut results = Vec::new();
@@ -114,14 +135,81 @@ impl CompletionProvider for StaticMemberProvider {
     }
 }
 
+impl StaticMemberProvider {
+    /// When `Main.` accesses its own class and `current_class_members` is populated
+    /// (from source-level parsing), use that — only emit static members.
+    fn provide_from_source_members(
+        &self,
+        ctx: &CompletionContext,
+        member_prefix: &str,
+    ) -> Vec<CompletionCandidate> {
+        use crate::completion::fuzzy;
+
+        let enclosing = ctx.enclosing_internal_name.as_deref().unwrap_or("");
+
+        // Only static members for Cls.xxx access
+        let scored = fuzzy::fuzzy_filter_sort(
+            member_prefix,
+            ctx.current_class_members.values().filter(|m| m.is_static),
+            |m| m.name.as_ref(),
+        );
+
+        scored
+            .into_iter()
+            .map(|(m, score)| {
+                let kind = if m.is_method {
+                    CandidateKind::StaticMethod {
+                        descriptor: Arc::clone(&m.descriptor),
+                        defining_class: Arc::from(enclosing),
+                    }
+                } else {
+                    CandidateKind::StaticField {
+                        descriptor: Arc::clone(&m.descriptor),
+                        defining_class: Arc::from(enclosing),
+                    }
+                };
+
+                let insert_text = if m.is_method {
+                    if ctx.has_paren_after_cursor() {
+                        m.name.to_string()
+                    } else {
+                        format!("{}(", m.name)
+                    }
+                } else {
+                    m.name.to_string()
+                };
+
+                let detail = format!(
+                    "{} static {}",
+                    if m.is_private { "private" } else { "public" },
+                    m.name
+                );
+
+                CompletionCandidate::new(Arc::clone(&m.name), insert_text, kind, self.name())
+                    .with_detail(detail)
+                    .with_score(70.0 + score as f32 * 0.1)
+            })
+            .collect()
+    }
+}
+
+/// Check if `class_name_raw` (simple name) refers to the enclosing class,
+/// using only the information available in `ctx` (no index lookup).
+fn is_self_class_by_simple_name(class_name_raw: &str, ctx: &CompletionContext) -> bool {
+    // Match against simple enclosing class name
+    ctx.enclosing_class
+        .as_deref()
+        .is_some_and(|enc| enc == class_name_raw)
+}
+
 #[cfg(test)]
 mod tests {
-    use rust_asm::constants::ACC_PUBLIC;
+    use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 
     use super::*;
-    use crate::completion::context::{CompletionContext, CursorLocation};
+    use crate::completion::context::{CompletionContext, CurrentClassMember, CursorLocation};
     use crate::completion::providers::CompletionProvider;
-    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex, MethodSummary};
+    use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodSummary};
     use crate::language::{JavaLanguage, Language};
     use std::sync::Arc;
 
@@ -170,10 +258,10 @@ mod tests {
         )
     }
 
+    // ── original tests (unchanged) ────────────────────────────────────────
+
     #[test]
     fn test_static_access_by_simple_name() {
-        // "Main.fun|" → class_internal_name="Main" (simple name),
-        // It should be able to be found in the same package as org/cubewhy/Main
         let mut index = make_index_with_main();
         let ctx = static_ctx("Main", "fun", "org/cubewhy");
         let results = StaticMemberProvider.provide(&ctx, &mut index);
@@ -201,9 +289,252 @@ mod tests {
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 
+    // ── new tests for self-class static access ────────────────────────────
+
+    /// Build an index that contains Main with a private static field and a
+    /// public static method, located in org/cubewhy/a.
+    fn make_index_with_self_class() -> GlobalIndex {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy/a")),
+            name: Arc::from("Main"),
+            internal_name: Arc::from("org/cubewhy/a/Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("main"),
+                descriptor: Arc::from("()V"),
+                access_flags: ACC_PUBLIC | ACC_STATIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![
+                FieldSummary {
+                    name: Arc::from("randomField"),
+                    descriptor: Arc::from("Lorg/cubewhy/Inst;"),
+                    access_flags: ACC_PRIVATE | ACC_STATIC,
+                    is_synthetic: false,
+                },
+                FieldSummary {
+                    name: Arc::from("publicField"),
+                    descriptor: Arc::from("I"),
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                },
+            ],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        idx
+    }
+
+    fn self_static_ctx(prefix: &str) -> CompletionContext {
+        // Simulates: inside org.cubewhy.a.Main, typing "Main.|"
+        CompletionContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("Main"), // simple name from parser
+                member_prefix: prefix.to_string(),
+            },
+            prefix,
+            vec![],
+            Some(Arc::from("Main")),               // enclosing_class (simple)
+            Some(Arc::from("org/cubewhy/a/Main")), // enclosing_internal_name
+            Some(Arc::from("org/cubewhy/a")),      // enclosing_package
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_self_class_static_private_field_visible() {
+        // Main.| from inside Main — private static field must appear
+        let mut idx = make_index_with_self_class();
+        let ctx = self_static_ctx("");
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "randomField"),
+            "private static field should be visible when accessing own class: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_self_class_static_public_field_visible() {
+        let mut idx = make_index_with_self_class();
+        let ctx = self_static_ctx("");
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        assert!(results.iter().any(|c| c.label.as_ref() == "publicField"));
+    }
+
+    #[test]
+    fn test_self_class_only_static_members_no_instance() {
+        // Even for same-class access, Cls.xxx must only show STATIC members
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy/a")),
+            name: Arc::from("Main"),
+            internal_name: Arc::from("org/cubewhy/a/Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![
+                FieldSummary {
+                    name: Arc::from("staticF"),
+                    descriptor: Arc::from("I"),
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                },
+                FieldSummary {
+                    name: Arc::from("instanceF"),
+                    descriptor: Arc::from("I"),
+                    access_flags: ACC_PUBLIC, // NOT static
+                    is_synthetic: false,
+                },
+            ],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let ctx = self_static_ctx("");
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "staticF"),
+            "static field must appear"
+        );
+        assert!(
+            results.iter().all(|c| c.label.as_ref() != "instanceF"),
+            "instance field must NOT appear for Cls.xxx access: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_self_class_prefix_filter() {
+        let mut idx = make_index_with_self_class();
+        let ctx = self_static_ctx("rand");
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "randomField"),
+            "prefix 'rand' should match 'randomField': {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(
+            results.iter().all(|c| c.label.as_ref() != "publicField"),
+            "'rand' should not match 'publicField'"
+        );
+    }
+
+    #[test]
+    fn test_self_class_via_source_members_when_not_in_index() {
+        // The current file is not compiled yet → class is absent from the index.
+        // StaticMemberProvider must fall back to current_class_members.
+        let mut idx = GlobalIndex::new(); // empty — class not indexed
+
+        let members = vec![
+            CurrentClassMember {
+                name: Arc::from("randomField"),
+                is_method: false,
+                is_static: true,
+                is_private: true,
+                descriptor: Arc::from("Lorg/cubewhy/Inst;"),
+            },
+            CurrentClassMember {
+                name: Arc::from("instanceField"),
+                is_method: false,
+                is_static: false, // instance — must NOT appear
+                is_private: false,
+                descriptor: Arc::from("I"),
+            },
+            CurrentClassMember {
+                name: Arc::from("staticHelper"),
+                is_method: true,
+                is_static: true,
+                is_private: false,
+                descriptor: Arc::from("()V"),
+            },
+        ];
+
+        let ctx = CompletionContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("Main"),
+                member_prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/a/Main")),
+            Some(Arc::from("org/cubewhy/a")),
+            vec![],
+        )
+        .with_class_members(members);
+
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "randomField"),
+            "private static field from source members should appear: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "staticHelper"),
+            "static method from source members should appear"
+        );
+        assert!(
+            results.iter().all(|c| c.label.as_ref() != "instanceField"),
+            "instance field must NOT appear even from source members: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_other_class_private_not_visible() {
+        // Accessing a DIFFERENT class's static members → private must be hidden
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy/a")),
+            name: Arc::from("Other"),
+            internal_name: Arc::from("org/cubewhy/a/Other"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![FieldSummary {
+                name: Arc::from("secret"),
+                descriptor: Arc::from("I"),
+                access_flags: ACC_PRIVATE | ACC_STATIC,
+                is_synthetic: false,
+            }],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        // We are inside Main, accessing Other.secret
+        let ctx = CompletionContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("Other"),
+                member_prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/a/Main")), // enclosing is Main, not Other
+            Some(Arc::from("org/cubewhy/a")),
+            vec![],
+        );
+
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| c.label.as_ref() != "secret"),
+            "private field of another class must NOT be visible: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    // ── existing parser-based tests (unchanged) ───────────────────────────
+
     #[test]
     fn test_locals_in_static_method_no_semicolon() {
-        // Local variables can still be extracted in lines without semicolons.
         let src = indoc::indoc! {r#"
         class A {
             public static void main() {
@@ -214,7 +545,7 @@ mod tests {
         }
     "#};
         let line = 4u32;
-        let col = src.lines().nth(4).unwrap().len() as u32; // the 4th line content: s
+        let col = src.lines().nth(4).unwrap().len() as u32;
         let ctx = at(src, line, col);
         assert!(
             ctx.local_variables
@@ -238,7 +569,6 @@ mod tests {
 
     #[test]
     fn test_locals_in_method_argument_no_semicolon() {
-        // System.out.println(var|) Scenario
         let src = indoc::indoc! {r#"
         class A {
             public static void main() {
@@ -249,7 +579,6 @@ mod tests {
     "#};
         let line = 3u32;
         let raw = src.lines().nth(3).unwrap();
-        // The cursor is after r in println(aVar)
         let col = raw.find("aVar").unwrap() as u32 + 4;
         let ctx = at(src, line, col);
         assert!(
@@ -266,7 +595,6 @@ mod tests {
 
     #[test]
     fn test_char_after_cursor_paren() {
-        // this.priFunc() places the cursor after (before) priFunc
         let src = indoc::indoc! {r#"
         class A {
             void fun() {
@@ -277,7 +605,6 @@ mod tests {
     "#};
         let line = 2u32;
         let raw = src.lines().nth(2).unwrap();
-        // The cursor is after (before) priFunc
         let col = raw.find("priFunc").unwrap() as u32 + "priFunc".len() as u32;
         let ctx = at(src, line, col);
         assert!(
