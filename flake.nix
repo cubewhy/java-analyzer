@@ -49,6 +49,10 @@
               manager = "pnpm";
             };
 
+            # blackbox.languages.java = {
+            #   enable = true;
+            # };
+
             #: languages end }}}
 
             #: Libraries {{{
@@ -89,6 +93,11 @@
           #: mkShell builtin options are available
           # shellHook = ''
           # '';
+
+          buildInputs = [pkgs.jdk17];
+          env = {
+            JAVA_HOME = pkgs.jdk17.home;
+          };
 
           #: custom options end }}}
         };

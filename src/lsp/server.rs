@@ -81,22 +81,46 @@ impl Backend {
                 workspace.load_jars_from_dir(jar_dir).await;
             }
 
+            // Index JDK (lowest priority, runs last)
+            client
+                .log_message(MessageType::INFO, "Indexing JDK...")
+                .await;
+            let jdk_classes =
+                tokio::task::spawn_blocking(crate::index::jdk::JdkIndexer::index).await;
+
+            match jdk_classes {
+                Ok(classes) if !classes.is_empty() => {
+                    let count = classes.len();
+                    workspace.index.write().await.add_classes(classes);
+                    client
+                        .log_message(
+                            MessageType::INFO,
+                            format!("✓ JDK indexed: {} classes", count),
+                        )
+                        .await;
+                    client.semantic_tokens_refresh().await.ok();
+                }
+                Ok(_) => {
+                    client
+                        .log_message(
+                            MessageType::WARNING,
+                            "JDK not found (set JAVA_HOME to enable JDK completion)",
+                        )
+                        .await;
+                }
+                Err(e) => {
+                    error!(error = %e, "JDK indexing panicked");
+                }
+            }
+
+            // JAR files
+            for jar_dir in find_jar_dirs(&root) {
+                workspace.load_jars_from_dir(jar_dir).await;
+            }
+
             client
                 .log_message(MessageType::INFO, "Workspace indexing complete")
                 .await;
-
-            // Index JDK (lowest priority, runs last)
-            let jdk_classes = JdkIndexer::index().await;
-            if !jdk_classes.is_empty() {
-                let count = jdk_classes.len();
-                workspace.index.write().await.add_classes(jdk_classes);
-                client
-                    .log_message(
-                        MessageType::INFO,
-                        format!("✓ JDK indexed: {} classes", count),
-                    )
-                    .await;
-            }
         });
     }
 }

@@ -1035,32 +1035,17 @@ pub fn line_col_to_offset(source: &str, line: u32, character: u32) -> Option<usi
     Some(offset + char_offset)
 }
 
-// TODO: we should only trust the java classpath, don't hard-encode the type name there
 pub fn java_type_to_internal(ty: &str) -> String {
+    // Primitive types and their common aliases — these are never in the class index
     match ty {
-        "String" => "java/lang/String",
-        "Object" => "java/lang/Object",
-        "Integer" => "java/lang/Integer",
-        "Long" => "java/lang/Long",
-        "Double" => "java/lang/Double",
-        "Boolean" => "java/lang/Boolean",
-        "Float" => "java/lang/Float",
-        "Byte" => "java/lang/Byte",
-        "Short" => "java/lang/Short",
-        "Character" => "java/lang/Character",
-        "List" => "java/util/List",
-        "ArrayList" => "java/util/ArrayList",
-        "Map" => "java/util/Map",
-        "HashMap" => "java/util/HashMap",
-        "Set" => "java/util/Set",
-        "HashSet" => "java/util/HashSet",
-        "Optional" => "java/util/Optional",
-        "Stream" => "java/util/stream/Stream",
-        "File" => "java/io/File",
-        "Path" => "java/nio/file/Path",
-        other => return other.replace('.', "/"),
+        "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "void" => {
+            ty.to_string()
+        }
+        // Everything else: convert dot-notation to slash-notation.
+        // Resolution of simple names (String, List, etc.) should go through
+        // resolve_simple_to_internal which uses the index + imports.
+        other => other.replace('.', "/"),
     }
-    .to_string()
 }
 
 #[cfg(test)]

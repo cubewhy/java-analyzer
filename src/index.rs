@@ -92,7 +92,7 @@ pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> 
     let bytecode_results: Vec<ClassMetadata> = class_files
         .into_par_iter()
         .filter_map(|(name, bytes)| {
-            let meta = parse_class_data(&name, &bytes, Arc::clone(&jar_str))?;
+            let meta = parse_class_data_bytes(&name, &bytes, Arc::clone(&jar_str))?;
             // 如果源文件已经解析了这个类，跳过字节码版本
             if source_internal_names.contains(&meta.internal_name) {
                 None
@@ -106,7 +106,18 @@ pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> 
     Ok(source_results)
 }
 
-fn parse_class_data(_file_name: &str, bytes: &[u8], jar_path: Arc<str>) -> Option<ClassMetadata> {
+/// Parse class bytes with an explicit origin.
+/// `file_name` is used only for debugging; the actual class name comes from the bytecode.
+pub(crate) fn parse_class_data_bytes(
+    _file_name: &str,
+    bytes: &[u8],
+    origin: Arc<str>,
+) -> Option<ClassMetadata> {
+    parse_class_data_with_origin(bytes, ClassOrigin::Jar(origin))
+}
+
+/// Internal: parse class bytes with arbitrary origin.
+fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<ClassMetadata> {
     let cr = ClassReader::new(bytes);
     let cn = cr.to_class_node().ok()?;
 
@@ -186,7 +197,7 @@ fn parse_class_data(_file_name: &str, bytes: &[u8], jar_path: Arc<str>) -> Optio
         fields,
         access_flags: cn.access_flags,
         inner_class_of,
-        origin: ClassOrigin::Jar(jar_path),
+        origin,
     })
 }
 
