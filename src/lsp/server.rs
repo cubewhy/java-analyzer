@@ -39,87 +39,80 @@ impl Backend {
     fn spawn_index_workspace(&self, root: std::path::PathBuf) {
         let workspace = Arc::clone(&self.workspace);
         let client = self.client.clone();
-
         tokio::spawn(async move {
-            client
-                .log_message(
-                    MessageType::INFO,
-                    format!("Indexing workspace: {}", root.display()),
-                )
-                .await;
-
-            // Source file priority, blocking and waiting for completion
-            let codebase = tokio::task::spawn_blocking({
-                let root = root.clone();
-                move || index_codebase(&root)
-            })
+            // Codebase
+            with_progress(
+                &client,
+                "java-analyzer/index/codebase",
+                "Indexing workspace",
+                || async {
+                    let codebase = tokio::task::spawn_blocking({
+                        let root = root.clone();
+                        move || index_codebase(&root)
+                    })
+                    .await;
+                    match codebase {
+                        Ok(result) => {
+                            let msg = format!(
+                                "✓ Codebase: {} files, {} classes",
+                                result.file_count,
+                                result.classes.len()
+                            );
+                            workspace.index.write().await.add_classes(result.classes);
+                            client.log_message(MessageType::INFO, msg).await;
+                            client.semantic_tokens_refresh().await.ok();
+                        }
+                        Err(e) => error!(error = %e, "codebase indexing panicked"),
+                    }
+                },
+            )
             .await;
 
-            match codebase {
-                Ok(result) => {
-                    let file_count = result.file_count;
-                    let class_count = result.classes.len();
-                    workspace.index.write().await.add_classes(result.classes);
+            // JDK
+            with_progress(
+                &client,
+                "java-analyzer/index/jdk",
+                "Indexing JDK",
+                || async {
+                    let jdk_classes =
+                        tokio::task::spawn_blocking(|| crate::index::jdk::JdkIndexer::index())
+                            .await;
+                    match jdk_classes {
+                        Ok(classes) if !classes.is_empty() => {
+                            let msg = format!("✓ JDK: {} classes", classes.len());
+                            workspace.index.write().await.add_classes(classes);
+                            client.log_message(MessageType::INFO, msg).await;
+                            client.semantic_tokens_refresh().await.ok();
+                        }
+                        Ok(_) => {
+                            client
+                                .log_message(
+                                    MessageType::WARNING,
+                                    "JDK not found — set JAVA_HOME for JDK completion",
+                                )
+                                .await;
+                        }
+                        Err(e) => error!(error = %e, "JDK indexing panicked"),
+                    }
+                },
+            )
+            .await;
 
-                    client
-                        .log_message(
-                            MessageType::INFO,
-                            format!(
-                                "✓ Codebase indexed: {} files, {} classes",
-                                file_count, class_count
-                            ),
-                        )
-                        .await;
-
-                    client.semantic_tokens_refresh().await.ok();
-                }
-                Err(e) => error!(error = %e, "codebase indexing panicked"),
-            }
-
-            // JAR files are indexed after the source files and have lower priority.
-            for jar_dir in find_jar_dirs(&root) {
-                workspace.load_jars_from_dir(jar_dir).await;
-            }
-
-            // Index JDK (lowest priority, runs last)
-            client
-                .log_message(MessageType::INFO, "Indexing JDK...")
-                .await;
-            let jdk_classes =
-                tokio::task::spawn_blocking(crate::index::jdk::JdkIndexer::index).await;
-
-            match jdk_classes {
-                Ok(classes) if !classes.is_empty() => {
-                    let count = classes.len();
-                    workspace.index.write().await.add_classes(classes);
-                    client
-                        .log_message(
-                            MessageType::INFO,
-                            format!("✓ JDK indexed: {} classes", count),
-                        )
-                        .await;
-                    client.semantic_tokens_refresh().await.ok();
-                }
-                Ok(_) => {
-                    client
-                        .log_message(
-                            MessageType::WARNING,
-                            "JDK not found (set JAVA_HOME to enable JDK completion)",
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    error!(error = %e, "JDK indexing panicked");
-                }
-            }
-
-            // JAR files
-            for jar_dir in find_jar_dirs(&root) {
-                workspace.load_jars_from_dir(jar_dir).await;
-            }
+            // JARs
+            with_progress(
+                &client,
+                "java-analyzer/index/jars",
+                "Indexing JARs",
+                || async {
+                    for jar_dir in find_jar_dirs(&root) {
+                        workspace.load_jars_from_dir(jar_dir).await;
+                    }
+                },
+            )
+            .await;
 
             client
-                .log_message(MessageType::INFO, "Workspace indexing complete")
+                .log_message(MessageType::INFO, "✓ Indexing complete")
                 .await;
         });
     }
@@ -316,4 +309,46 @@ impl LanguageServer for Backend {
     ) -> LspResult<Option<DocumentSymbolResponse>> {
         Ok(None) // TODO
     }
+}
+
+async fn with_progress<F, Fut>(client: &Client, token: &str, title: &str, f: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    // 创建进度 token
+    let token = NumberOrString::String(token.to_string());
+    client
+        .send_request::<tower_lsp::lsp_types::request::WorkDoneProgressCreate>(
+            WorkDoneProgressCreateParams {
+                token: token.clone(),
+            },
+        )
+        .await
+        .ok();
+
+    // Begin
+    client
+        .send_notification::<tower_lsp::lsp_types::notification::Progress>(ProgressParams {
+            token: token.clone(),
+            value: ProgressParamsValue::WorkDone(WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: title.to_string(),
+                cancellable: Some(false),
+                message: None,
+                percentage: None,
+            })),
+        })
+        .await;
+
+    f().await;
+
+    // End
+    client
+        .send_notification::<tower_lsp::lsp_types::notification::Progress>(ProgressParams {
+            token,
+            value: ProgressParamsValue::WorkDone(WorkDoneProgress::End(WorkDoneProgressEnd {
+                message: None,
+            })),
+        })
+        .await;
 }
