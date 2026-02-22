@@ -1,0 +1,79 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cargo build server",
+      "type": "shell",
+      "command": "cargo",
+      "args": ["build", "--package", "java-analyzer"],
+      "group": {
+        "kind": "build"
+      },
+      "problemMatcher": "$rustc"
+    },
+    {
+      "label": "watch",
+      "dependsOn": [
+        "npm: watch:tsc",
+        "npm: watch:esbuild",
+        "cargo build server"
+      ],
+      "presentation": {
+        "reveal": "never"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "type": "npm",
+      "script": "watch:esbuild",
+      "group": "build",
+      "problemMatcher": "$esbuild-watch",
+      "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}/editors/code"
+      },
+      "label": "npm: watch:esbuild",
+      "presentation": {
+        "group": "watch",
+        "reveal": "never"
+      }
+    },
+    {
+      "type": "npm",
+      "script": "watch:tsc",
+      "group": "build",
+      "problemMatcher": "$tsc-watch",
+      "isBackground": true,
+      "options": {
+        "cwd": "${workspaceFolder}/editors/code"
+      },
+      "label": "npm: watch:tsc",
+      "presentation": {
+        "group": "watch",
+        "reveal": "never"
+      }
+    },
+    {
+      "type": "npm",
+      "script": "watch-tests",
+      "problemMatcher": "$tsc-watch",
+      "options": {
+        "cwd": "${workspaceFolder}/editors/code"
+      },
+      "isBackground": true,
+      "presentation": {
+        "reveal": "never",
+        "group": "watchers"
+      },
+      "group": "build"
+    },
+    {
+      "label": "tasks: watch-tests",
+      "dependsOn": ["npm: watch", "npm: watch-tests"],
+      "problemMatcher": []
+    }
+  ]
+}

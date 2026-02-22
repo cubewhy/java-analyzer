@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Extension (Dev)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": ["--extensionDevelopmentPath=${workspaceFolder}/editors/code"],
+      "outFiles": ["${workspaceFolder}/editors/code/out/**/*.js"],
+      "env": {
+        "SERVER_PATH": "${workspaceFolder}/target/debug/java-analyzer"
+      },
+
+     	"preLaunchTask": "${defaultBuildTask}"
+    }
+  ]
+}
