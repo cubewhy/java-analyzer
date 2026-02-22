@@ -79,7 +79,7 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract(self, root: Node, trigger_char: Option<char>) -> CompletionContext {
-        // 光标本身在注释里（// 行）
+        // The cursor itself is inside a comment (// line)
         if is_cursor_in_comment(self.source, self.offset) {
             return self.empty_context();
         }
@@ -87,7 +87,7 @@ impl<'s> JavaContextExtractor<'s> {
         // Try offset first; if that yields nothing, try offset-1 (handles col-0 case)
         let cursor_node = self.find_cursor_node(root);
 
-        // 如果找到的节点是注释类型（tree-sitter 层面的兜底）
+        // If the found node is an annotation type (a fallback at the tree-sitter level)
         if cursor_node
             .map(|n| n.kind() == "line_comment" || n.kind() == "block_comment")
             .unwrap_or(false)
@@ -95,13 +95,14 @@ impl<'s> JavaContextExtractor<'s> {
             return self.empty_context();
         }
 
-        // 如果找到的节点在注释里（节点 start_byte 所在行是注释行），返回 Unknown
-        if let Some(node) = cursor_node {
-            if self.node_is_in_comment(node) {
-                return self.empty_context();
-            }
+        // If the found node is in a comment (the line containing the node start_byte is a comment line), return Unknown.
+        if let Some(node) = cursor_node
+            && self.node_is_in_comment(node)
+        {
+            return self.empty_context();
         }
-        // 同时检查光标本身是否在注释里
+
+        // Also check if the cursor is inside a comment.
         if is_cursor_in_comment(self.source, self.offset) {
             return self.empty_context();
         }
