@@ -60,7 +60,7 @@ impl CompletionEngine {
         // score
         let scorer = Scorer::new(&ctx.query);
         for c in &mut candidates {
-            c.score = scorer.score(c);
+            c.score += scorer.score(c);
         }
 
         candidates = dedup(candidates);
@@ -431,6 +431,65 @@ mod tests {
             result[0].required_import.is_none(),
             "dedup should prefer the candidate without required_import, got: {:?}",
             result[0].required_import
+        );
+    }
+
+    #[test]
+    fn test_expected_type_ranks_first_in_constructor_completion() {
+        use crate::completion::context::CursorLocation;
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        // Add Main, Main2, RandomClass
+        for (pkg, name) in [
+            ("org/cubewhy/a", "Main"),
+            ("org/cubewhy/a", "Main2"),
+            ("org/cubewhy", "RandomClass"),
+        ] {
+            idx.add_classes(vec![ClassMetadata {
+                package: Some(Arc::from(pkg)),
+                name: Arc::from(name),
+                internal_name: Arc::from(format!("{}/{}", pkg, name)),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("<init>"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            }]);
+        }
+
+        let engine = CompletionEngine::new();
+        let ctx = CompletionContext::new(
+            CursorLocation::ConstructorCall {
+                class_prefix: String::new(),
+                expected_type: Some("RandomClass".to_string()),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/a/Main")),
+            Some(Arc::from("org/cubewhy/a")),
+            vec!["org.cubewhy.RandomClass".to_string()],
+        );
+
+        let results = engine.complete(ctx, &mut idx);
+
+        assert!(!results.is_empty(), "should have candidates");
+        assert_eq!(
+            results[0].label.as_ref(),
+            "RandomClass",
+            "RandomClass should rank first when it matches expected_type, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
     }
 }
