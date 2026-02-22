@@ -431,6 +431,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from(var_name),
                 type_internal: Arc::from(var_type),
+                init_expr: None,
             }],
             None,
             None,
@@ -479,6 +480,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from(var_name),
                 type_internal: Arc::from(var_type_simple), // simple name
+                init_expr: None,
             }],
             None,
             None,
@@ -1098,6 +1100,7 @@ public class RandomClass {
                 name: Arc::from("cl"),
                 // extract_locals will store simple names
                 type_internal: Arc::from("RandomClass"),
+                init_expr: None,
             }],
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),

@@ -64,6 +64,9 @@ pub struct LocalVar {
     pub name: Arc<str>,
     /// internal class name, like "java/util/List"
     pub type_internal: Arc<str>,
+    /// For `var` declarations: the raw initializer expression text,
+    /// used by enrich_context to resolve the actual type via TypeResolver.
+    pub init_expr: Option<String>,
 }
 
 impl CompletionContext {

@@ -67,6 +67,7 @@ mod tests {
                 .map(|(name, ty)| LocalVar {
                     name: Arc::from(name),
                     type_internal: Arc::from(ty),
+                    init_expr: None,
                 })
                 .collect(),
             None,
@@ -135,6 +136,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from("aVar"),
                 type_internal: Arc::from("java/lang/String"),
+                init_expr: None,
             }],
             None,
             None,
@@ -184,6 +186,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from("cl"),
                 type_internal: Arc::from("RandomClass"),
+                init_expr: None,
             }],
             None,
             None,

@@ -335,6 +335,7 @@ impl<'s> KotlinContextExtractor<'s> {
                     vars.push(LocalVar {
                         name: Arc::from(name),
                         type_internal: Arc::from(kotlin_type_to_internal(ty)),
+                        init_expr: None,
                     });
                 }
             }
@@ -353,6 +354,7 @@ impl<'s> KotlinContextExtractor<'s> {
                     vars.push(LocalVar {
                         name: Arc::from(name),
                         type_internal: Arc::from("java/lang/Object"),
+                        init_expr: None,
                     });
                 }
             }
@@ -411,6 +413,7 @@ impl<'s> KotlinContextExtractor<'s> {
                 Some(LocalVar {
                     name: Arc::from(name),
                     type_internal: Arc::from(kotlin_type_to_internal(ty)),
+                    init_expr: None,
                 })
             })
             .collect()

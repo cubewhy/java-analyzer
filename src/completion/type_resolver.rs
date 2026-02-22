@@ -264,18 +264,22 @@ mod tests {
             LocalVar {
                 name: Arc::from("cl"),
                 type_internal: Arc::from("RandomClass"),
+                init_expr: None,
             },
             LocalVar {
                 name: Arc::from("sf"),
                 type_internal: Arc::from("float"),
+                init_expr: None,
             },
             LocalVar {
                 name: Arc::from("result"),
                 type_internal: Arc::from("java/lang/String"),
+                init_expr: None,
             },
             LocalVar {
                 name: Arc::from("myList"),
                 type_internal: Arc::from("java/util/List"),
+                init_expr: None,
             },
         ];
         (idx, locals)
@@ -375,6 +379,7 @@ mod tests {
             LocalVar {
                 name: Arc::from("myL"),
                 type_internal: Arc::from("SomeClass"),
+                init_expr: None,
             },
         ];
         let r = TypeResolver::new(&idx);

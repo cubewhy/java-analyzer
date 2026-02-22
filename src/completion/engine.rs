@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::context::CursorLocation;
 use super::type_resolver::TypeResolver;
 use super::{
@@ -10,6 +12,7 @@ use super::{
     },
     scorer::Scorer,
 };
+use crate::completion::LocalVar;
 use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::providers::expression::ExpressionProvider;
 use crate::completion::providers::package::PackageProvider;
@@ -107,7 +110,111 @@ impl CompletionEngine {
                 ),
             };
         }
+
+        // Resolve `var` local variables
+        {
+            let resolver = TypeResolver::new(index);
+
+            // First pass: collect indices and init_exprs that need resolution
+            let to_resolve: Vec<(usize, String)> = ctx
+                .local_variables
+                .iter()
+                .enumerate()
+                .filter_map(|(i, lv)| {
+                    if lv.type_internal.as_ref() == "var" {
+                        lv.init_expr.as_deref().map(|e| (i, e.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Second pass: resolve each one using a snapshot of locals
+            let locals_snapshot: Vec<LocalVar> = ctx.local_variables.clone();
+            for (idx_in_vec, init_expr) in to_resolve {
+                if let Some(resolved) = resolve_var_init_expr(
+                    &init_expr,
+                    &locals_snapshot,
+                    ctx.enclosing_class.as_ref(),
+                    &resolver,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                    index,
+                ) {
+                    ctx.local_variables[idx_in_vec].type_internal = resolved;
+                }
+            }
+        }
     }
+}
+
+fn resolve_var_init_expr(
+    expr: &str,
+    locals: &[LocalVar],
+    enclosing: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    existing_imports: &[String],
+    enclosing_package: Option<&str>,
+    index: &GlobalIndex,
+) -> Option<Arc<str>> {
+    let expr = expr.trim();
+
+    // Constructor: "new Foo(...)" → type is Foo
+    if let Some(rest) = expr.strip_prefix("new ") {
+        let class_name = rest.split('(').next()?.split('<').next()?.trim();
+        return crate::completion::import_utils::resolve_simple_to_internal(
+            class_name,
+            existing_imports,
+            enclosing_package,
+            index,
+        );
+    }
+
+    // Method call chain: "receiver.method(args)" or "method(args)"
+    // Parse using existing chain parser
+    let chain = crate::completion::engine::parse_chain_from_expr(expr);
+    if !chain.is_empty() {
+        // resolve_chain needs the receiver type first
+        let mut current: Option<Arc<str>> = None;
+        for (i, seg) in chain.iter().enumerate() {
+            if i == 0 {
+                // Try local var first
+                current = resolver.resolve(&seg.name, locals, enclosing);
+                // If not found, try simple name resolution
+                if current.is_none() {
+                    current = crate::completion::import_utils::resolve_simple_to_internal(
+                        &seg.name,
+                        existing_imports,
+                        enclosing_package,
+                        index,
+                    );
+                }
+            } else {
+                let recv = current.as_deref()?;
+                // Resolve simple name to full internal name if needed
+                let recv_full = if recv.contains('/') || index.get_class(recv).is_some() {
+                    Arc::from(recv)
+                } else {
+                    crate::completion::import_utils::resolve_simple_to_internal(
+                        recv,
+                        existing_imports,
+                        enclosing_package,
+                        index,
+                    )?
+                };
+                current = resolver.resolve_method_return(
+                    &recv_full,
+                    &seg.name,
+                    seg.arg_count.unwrap_or(-1),
+                );
+            }
+        }
+        if current.is_some() {
+            return current;
+        }
+    }
+
+    None
 }
 
 impl Default for CompletionEngine {
@@ -148,7 +255,7 @@ fn dedup(mut candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
 
 /// Roughly parse the expression string into a call chain
 /// "list.stream().filter" → [variable("list"), method("stream", 0), variable("filter")]
-fn parse_chain_from_expr(expr: &str) -> Vec<super::type_resolver::ChainSegment> {
+pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<super::type_resolver::ChainSegment> {
     use super::type_resolver::ChainSegment;
 
     let mut segments = Vec::new();
@@ -319,6 +426,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from("cl"),
                 type_internal: Arc::from("RandomClass"), // simple name
+                init_expr: None,
             }],
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
@@ -353,6 +461,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from("cl"),
                 type_internal: Arc::from("RandomClass"),
+                init_expr: None,
             }],
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
@@ -382,6 +491,7 @@ mod tests {
             vec![LocalVar {
                 name: Arc::from("cl"),
                 type_internal: Arc::from("RandomClass"),
+                init_expr: None,
             }],
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
@@ -490,6 +600,74 @@ mod tests {
             "RandomClass",
             "RandomClass should rank first when it matches expected_type, got: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_var_method_return_type_resolved() {
+        use crate::completion::context::{CursorLocation, LocalVar};
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        // NestedClass with randomFunction() returning NestedClass
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("NestedClass"),
+            internal_name: Arc::from("NestedClass"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("randomFunction"),
+                descriptor: Arc::from("(Ljava/lang/String;)LNestedClass;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("NestedClass")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "str".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("nc"),
+                    type_internal: Arc::from("NestedClass"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("str"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("nc.randomFunction()".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        let str_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "str")
+            .unwrap();
+        assert_eq!(
+            str_var.type_internal.as_ref(),
+            "NestedClass",
+            "var str should be resolved to NestedClass via method return type"
         );
     }
 }

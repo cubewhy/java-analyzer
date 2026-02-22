@@ -560,9 +560,25 @@ impl<'s> JavaContextExtractor<'s> {
 
                 let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
                 let raw_ty = if raw_ty == "var" {
+                    // Try constructor first (no index needed)
                     match infer_type_from_initializer(ty_node, self.bytes) {
-                        Some(inferred) => inferred,
-                        None => return None, // cannot infer → skip
+                        Some(t) => {
+                            // Return a LocalVar with the inferred type directly
+                            return Some(LocalVar {
+                                name: Arc::from(name),
+                                type_internal: Arc::from(java_type_to_internal(&t).as_str()),
+                                init_expr: None,
+                            });
+                        }
+                        None => {
+                            // Cannot infer statically — store the init expression for later resolution
+                            let init_text = get_initializer_text(ty_node, self.bytes);
+                            return Some(LocalVar {
+                                name: Arc::from(name),
+                                type_internal: Arc::from("var"), // placeholder
+                                init_expr: init_text,
+                            });
+                        }
                     }
                 } else {
                     raw_ty.to_string()
@@ -570,6 +586,7 @@ impl<'s> JavaContextExtractor<'s> {
                 Some(LocalVar {
                     name: Arc::from(name),
                     type_internal: Arc::from(java_type_to_internal(&raw_ty).as_str()),
+                    init_expr: None,
                 })
             })
             .collect();
@@ -610,6 +627,7 @@ impl<'s> JavaContextExtractor<'s> {
                 Some(LocalVar {
                     name: Arc::from(name),
                     type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                    init_expr: None,
                 })
             })
             .collect()
@@ -871,6 +889,22 @@ fn has_chained_dot(rest: &str) -> bool {
         }
     }
     false
+}
+
+fn get_initializer_text(type_node: Node, bytes: &[u8]) -> Option<String> {
+    let decl = type_node.parent()?;
+    if decl.kind() != "local_variable_declaration" {
+        return None;
+    }
+    let mut cursor = decl.walk();
+    for child in decl.named_children(&mut cursor) {
+        if child.kind() != "variable_declarator" {
+            continue;
+        }
+        let init = child.named_child(1)?;
+        return init.utf8_text(bytes).ok().map(|s| s.to_string());
+    }
+    None
 }
 
 /// Given the type node of a `var` declaration, walk up to the
