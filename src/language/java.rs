@@ -287,18 +287,25 @@ impl<'s> JavaContextExtractor<'s> {
             }
         });
 
+        // Only treat as ConstructorCall if there's no dot after the constructor
+        // "new Foo"      → ConstructorCall ✓
+        // "new Foo()"    → ConstructorCall ✓
+        // "new Foo()."   → skip, let dot-access handle it ✗
         if let Some(rest) = new_rest {
-            let class_prefix = rest.split('(').next().unwrap_or(rest).trim().to_string();
-            let expected_type = self.infer_expected_type_from_text(last_line);
-            return Some((
-                CursorLocation::ConstructorCall {
-                    class_prefix: class_prefix.clone(),
-                    expected_type,
-                },
-                class_prefix,
-            ));
+            let has_dot_after_ctor = rest.contains(')') && rest.trim_end().ends_with('.');
+            // more precisely: if rest contains "(..." and after closing paren there's a dot
+            if !has_chained_dot(rest) {
+                let class_prefix = rest.split('(').next().unwrap_or(rest).trim().to_string();
+                let expected_type = self.infer_expected_type_from_text(last_line);
+                return Some((
+                    CursorLocation::ConstructorCall {
+                        class_prefix: class_prefix.clone(),
+                        expected_type,
+                    },
+                    class_prefix,
+                ));
+            }
         }
-
         // ── dot access ────────────────────────────────────────────────────────
         if let Some(dot_pos) = last_meaningful_dot(last_line) {
             let receiver = last_line[..dot_pos].trim();
@@ -831,6 +838,31 @@ impl<'s> JavaContextExtractor<'s> {
             None
         }
     }
+}
+
+/// Returns true if `rest` (the part after "new ") contains a method chain dot.
+/// e.g. "Foo()."  → true
+///      "Foo(a)." → true
+///      "Foo"     → false
+///      "Foo()"   → false
+fn has_chained_dot(rest: &str) -> bool {
+    // Find the closing paren that matches the first open paren
+    let mut depth = 0i32;
+    let mut after_close = false;
+    for c in rest.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    after_close = true;
+                }
+            }
+            '.' if after_close && depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// 从当前行提取方法参数位置的前缀
@@ -1700,5 +1732,103 @@ mod tests {
             extractor.infer_expected_type_from_text("final String a = new "),
             None
         );
+    }
+
+    #[test]
+    fn test_new_chain_dot_is_member_access() {
+        // new RandomClass().| → MemberAccess{receiver="new RandomClass()", prefix=""}
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new RandomClass().
+            }
+        }
+    "#};
+        let line = 2u32;
+        let raw = src.lines().nth(2).unwrap();
+        let col =
+            raw.find("new RandomClass().").unwrap() as u32 + "new RandomClass().".len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, member_prefix, .. }
+                if receiver_expr == "new RandomClass()" && member_prefix.is_empty()
+            ),
+            "new Foo().| should be MemberAccess, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_new_chain_dot_with_prefix_is_member_access() {
+        // new RandomClass().fu| → MemberAccess{receiver="new RandomClass()", prefix="fu"}
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new RandomClass().fu
+            }
+        }
+    "#};
+        let line = 2u32;
+        let raw = src.lines().nth(2).unwrap();
+        let col = raw.find(".fu").unwrap() as u32 + 3;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, member_prefix, .. }
+                if receiver_expr == "new RandomClass()" && member_prefix == "fu"
+            ),
+            "new Foo().fu| should be MemberAccess{{prefix=fu}}, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_new_without_dot_still_constructor() {
+        // new RandomClass| → ConstructorCall (not affected by fix)
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new RandomClass
+            }
+        }
+    "#};
+        let line = 2u32;
+        let raw = src.lines().nth(2).unwrap();
+        let col = raw.find("new RandomClass").unwrap() as u32 + "new RandomClass".len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::ConstructorCall { class_prefix, .. }
+                if class_prefix == "RandomClass"
+            ),
+            "new Foo| should still be ConstructorCall, got {:?}",
+            ctx.location
+        );
+    }
+
+    // has_chained_dot unit tests
+    #[test]
+    fn test_has_chained_dot_with_dot() {
+        assert!(has_chained_dot("Foo()."));
+        assert!(has_chained_dot("Foo(a, b)."));
+    }
+
+    #[test]
+    fn test_has_chained_dot_without_dot() {
+        assert!(!has_chained_dot("Foo()"));
+        assert!(!has_chained_dot("Foo"));
+        assert!(!has_chained_dot(""));
+    }
+
+    #[test]
+    fn test_has_chained_dot_nested_parens() {
+        // "Foo(bar()).baz" — dot after outer close paren
+        assert!(has_chained_dot("Foo(bar())."));
+        // "Foo(bar())" — no dot after outer close
+        assert!(!has_chained_dot("Foo(bar())"));
     }
 }
