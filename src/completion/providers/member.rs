@@ -42,8 +42,141 @@ impl CompletionProvider for MemberProvider {
             "MemberProvider.provide"
         );
 
-        if receiver_expr == "this" && !ctx.current_class_members.is_empty() {
-            return self.provide_from_source_members(ctx, member_prefix);
+        if receiver_expr == "this" {
+            // ── source members（含 private，直接从 AST 解析）──────────────────
+            let mut results = if !ctx.current_class_members.is_empty() {
+                self.provide_from_source_members(ctx, member_prefix)
+            } else {
+                vec![]
+            };
+
+            if let Some(enclosing) = ctx.enclosing_internal_name.as_deref() {
+                let source_names: std::collections::HashSet<Arc<str>> =
+                    ctx.current_class_members.keys().map(Arc::clone).collect();
+                let prefix_lower = member_prefix.to_lowercase();
+
+                // ── index MRO：skip(0) 即从当前类开始，用 same_class filter ──
+                // 当 source members 已覆盖当前类时，当前类的 index 条目会因
+                // source_names 去重而跳过，不会重复。
+                let filter = AccessFilter::same_class(); // 允许 private
+                let mro = index.mro(enclosing);
+
+                for (i, class_meta) in mro.iter().enumerate() {
+                    // 父类及以上：只允许 non-private
+                    let filter = if i == 0 {
+                        AccessFilter::same_class()
+                    } else {
+                        AccessFilter::member_completion()
+                    };
+
+                    for method in &class_meta.methods {
+                        if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
+                            continue;
+                        }
+                        if !filter.is_method_accessible(method.access_flags, method.is_synthetic) {
+                            continue;
+                        }
+                        // 当前类自身：source members 已包含，跳过避免重复
+                        if i == 0 && source_names.contains(&method.name) {
+                            continue;
+                        }
+                        if !prefix_lower.is_empty()
+                            && !method.name.to_lowercase().contains(&prefix_lower)
+                        {
+                            continue;
+                        }
+                        use rust_asm::constants::ACC_STATIC;
+                        let is_static = method.access_flags & ACC_STATIC != 0;
+                        let kind = if is_static {
+                            CandidateKind::StaticMethod {
+                                descriptor: Arc::clone(&method.descriptor),
+                                defining_class: Arc::clone(&class_meta.internal_name),
+                            }
+                        } else {
+                            CandidateKind::Method {
+                                descriptor: Arc::clone(&method.descriptor),
+                                defining_class: Arc::clone(&class_meta.internal_name),
+                            }
+                        };
+                        let insert_text = if ctx.has_paren_after_cursor() {
+                            method.name.to_string()
+                        } else {
+                            format!("{}(", method.name)
+                        };
+                        let detail = if i == 0 {
+                            scorer::method_detail(enclosing, method)
+                        } else {
+                            format!("inherited from {}", class_meta.name)
+                        };
+                        results.push(
+                            CompletionCandidate::new(
+                                Arc::clone(&method.name),
+                                insert_text,
+                                kind,
+                                self.name(),
+                            )
+                            .with_detail(detail)
+                            .with_score(if i == 0 {
+                                60.0
+                            } else {
+                                55.0
+                            }),
+                        );
+                    }
+
+                    for field in &class_meta.fields {
+                        let filter = if i == 0 {
+                            AccessFilter::same_class()
+                        } else {
+                            AccessFilter::member_completion()
+                        };
+                        if !filter.is_field_accessible(field.access_flags, field.is_synthetic) {
+                            continue;
+                        }
+                        if i == 0 && source_names.contains(&field.name) {
+                            continue;
+                        }
+                        if !prefix_lower.is_empty()
+                            && !field.name.to_lowercase().contains(&prefix_lower)
+                        {
+                            continue;
+                        }
+                        use rust_asm::constants::ACC_STATIC;
+                        let is_static = field.access_flags & ACC_STATIC != 0;
+                        let kind = if is_static {
+                            CandidateKind::StaticField {
+                                descriptor: Arc::clone(&field.descriptor),
+                                defining_class: Arc::clone(&class_meta.internal_name),
+                            }
+                        } else {
+                            CandidateKind::Field {
+                                descriptor: Arc::clone(&field.descriptor),
+                                defining_class: Arc::clone(&class_meta.internal_name),
+                            }
+                        };
+                        let detail = if i == 0 {
+                            scorer::field_detail(enclosing, field)
+                        } else {
+                            format!("inherited from {}", class_meta.name)
+                        };
+                        results.push(
+                            CompletionCandidate::new(
+                                Arc::clone(&field.name),
+                                field.name.to_string(),
+                                kind,
+                                self.name(),
+                            )
+                            .with_detail(detail)
+                            .with_score(if i == 0 {
+                                60.0
+                            } else {
+                                55.0
+                            }),
+                        );
+                    }
+                }
+            }
+            return results;
         }
 
         let resolved: Option<Arc<str>> = receiver_type.map(Arc::clone).or_else(|| {
@@ -1397,6 +1530,83 @@ public class RandomClass {
         assert!(
             results.iter().any(|c| c.label.as_ref() == "funcA"),
             "funcA should be inherited from BaseClass, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_this_dot_shows_inherited_methods() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("BaseClass"),
+                internal_name: Arc::from("org/cubewhy/BaseClass"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("funcA"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("org/cubewhy/Main2"),
+                super_name: Some("org/cubewhy/BaseClass".to_string()),
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        // this.| inside Main2 (static or instance — both should see inherited methods via this.)
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "this".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main2")),
+            Some(Arc::from("org/cubewhy/Main2")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_class_members(vec![crate::completion::context::CurrentClassMember {
+            name: Arc::from("func"),
+            is_method: true,
+            is_static: true,
+            is_private: false,
+            descriptor: Arc::from("()V"),
+        }]);
+
+        let results = MemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "funcA"),
+            "this.| should show inherited funcA from BaseClass, got: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
     }

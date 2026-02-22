@@ -1,3 +1,5 @@
+use rust_asm::constants::ACC_STATIC;
+
 use super::CompletionProvider;
 use crate::completion::{
     candidate::{CandidateKind, CompletionCandidate},
@@ -17,21 +19,32 @@ impl CompletionProvider for ThisMemberProvider {
     fn provide(
         &self,
         ctx: &CompletionContext,
-        _index: &mut GlobalIndex,
+        index: &mut GlobalIndex,
     ) -> Vec<CompletionCandidate> {
+        tracing::debug!(
+            "ThisMemberProvider: enclosing={:?}",
+            ctx.enclosing_internal_name
+        );
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
             _ => return vec![],
         };
 
-        if ctx.current_class_members.is_empty() {
+        if ctx.current_class_members.is_empty() && ctx.enclosing_internal_name.is_none() {
             return vec![];
         }
 
         let in_static = ctx.is_in_static_context();
         let enclosing = ctx.enclosing_internal_name.as_deref().unwrap_or("");
 
+        tracing::debug!("  in_static={}", in_static);
+        tracing::debug!(
+            "  current_class_members: {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+
+        // ── 1. 当前类 source members（含 private，不依赖 index）──────────────
         let scored = fuzzy::fuzzy_filter_sort(
             prefix,
             ctx.current_class_members
@@ -40,7 +53,7 @@ impl CompletionProvider for ThisMemberProvider {
             |m| m.name.as_ref(),
         );
 
-        scored
+        let mut results: Vec<CompletionCandidate> = scored
             .into_iter()
             .map(|(m, score)| {
                 let kind = match (m.is_method, m.is_static) {
@@ -80,7 +93,128 @@ impl CompletionProvider for ThisMemberProvider {
                     .with_detail(detail)
                     .with_score(60.0 + score as f32 * 0.1)
             })
-            .collect()
+            .collect();
+
+        // ── 2. 继承链成员（从 index MRO 查，跳过当前类自身已有的）────────────
+        if !enclosing.is_empty() {
+            // 当前类 source 里已有的名字，避免重复
+            let source_names: std::collections::HashSet<Arc<str>> =
+                ctx.current_class_members.keys().map(Arc::clone).collect();
+
+            let prefix_lower = prefix.to_lowercase();
+
+            let mro = index.mro(enclosing);
+
+            tracing::debug!(
+                "  mro: {:?}",
+                mro.iter()
+                    .map(|c| c.internal_name.as_ref())
+                    .collect::<Vec<_>>()
+            );
+            // mro[0] 是当前类自身，跳过；从 super 开始
+            for class_meta in mro.iter().skip(1) {
+                for method in &class_meta.methods {
+                    if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
+                        continue;
+                    }
+                    // 静态上下文只显示 static 成员
+                    let is_static = method.access_flags & ACC_STATIC != 0;
+                    // if in_static && !is_static {
+                    //     continue;
+                    // }
+                    // 跳过 private（继承不可见）
+                    use rust_asm::constants::ACC_PRIVATE;
+                    if method.access_flags & ACC_PRIVATE != 0 {
+                        continue;
+                    }
+                    // 跳过 synthetic
+                    if method.is_synthetic {
+                        continue;
+                    }
+                    // 当前类 source 已声明同名方法，不重复
+                    if source_names.contains(&method.name) {
+                        continue;
+                    }
+                    // 前缀过滤
+                    if !prefix_lower.is_empty()
+                        && !method.name.to_lowercase().contains(&prefix_lower)
+                    {
+                        continue;
+                    }
+                    let kind = if is_static {
+                        CandidateKind::StaticMethod {
+                            descriptor: Arc::clone(&method.descriptor),
+                            defining_class: Arc::clone(&class_meta.internal_name),
+                        }
+                    } else {
+                        CandidateKind::Method {
+                            descriptor: Arc::clone(&method.descriptor),
+                            defining_class: Arc::clone(&class_meta.internal_name),
+                        }
+                    };
+                    let insert_text = if ctx.has_paren_after_cursor() {
+                        method.name.to_string()
+                    } else {
+                        format!("{}(", method.name)
+                    };
+                    results.push(
+                        CompletionCandidate::new(
+                            Arc::clone(&method.name),
+                            insert_text,
+                            kind,
+                            self.name(),
+                        )
+                        .with_detail(format!("inherited from {}", class_meta.name))
+                        .with_score(50.0),
+                    );
+                }
+
+                for field in &class_meta.fields {
+                    use rust_asm::constants::ACC_PRIVATE;
+                    if field.access_flags & ACC_PRIVATE != 0 {
+                        continue;
+                    }
+                    if field.is_synthetic {
+                        continue;
+                    }
+                    let is_static = field.access_flags & ACC_STATIC != 0;
+                    if in_static && !is_static {
+                        continue;
+                    }
+                    if source_names.contains(&field.name) {
+                        continue;
+                    }
+                    if !prefix_lower.is_empty()
+                        && !field.name.to_lowercase().contains(&prefix_lower)
+                    {
+                        continue;
+                    }
+                    let kind = if is_static {
+                        CandidateKind::StaticField {
+                            descriptor: Arc::clone(&field.descriptor),
+                            defining_class: Arc::clone(&class_meta.internal_name),
+                        }
+                    } else {
+                        CandidateKind::Field {
+                            descriptor: Arc::clone(&field.descriptor),
+                            defining_class: Arc::clone(&class_meta.internal_name),
+                        }
+                    };
+                    results.push(
+                        CompletionCandidate::new(
+                            Arc::clone(&field.name),
+                            field.name.to_string(),
+                            kind,
+                            self.name(),
+                        )
+                        .with_detail(format!("inherited from {}", class_meta.name))
+                        .with_score(50.0),
+                    );
+                }
+            }
+        }
+
+        results
     }
 }
 
@@ -470,5 +604,149 @@ mod tests {
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
         // CONST is static, so "he" cannot match "CONST", and it's normal for the result to be empty.
+    }
+
+    #[test]
+    fn test_inherited_instance_method_visible_in_instance_context() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("BaseClass"),
+                internal_name: Arc::from("org/cubewhy/BaseClass"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("funcA"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("org/cubewhy/Main2"),
+                super_name: Some("org/cubewhy/BaseClass".to_string()),
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        // 模拟在 Main2 的实例方法里补全
+        let enclosing_method = CurrentClassMember {
+            name: Arc::from("func"),
+            is_method: true,
+            is_static: false, // 实例方法
+            is_private: false,
+            descriptor: Arc::from("()V"),
+        };
+        let ctx = CompletionContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main2")),
+            Some(Arc::from("org/cubewhy/Main2")), // enclosing_internal_name
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_class_members(vec![make_member("func", true, false, false)])
+        .with_enclosing_member(Some(enclosing_method));
+
+        let results = ThisMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "funcA"),
+            "funcA inherited from BaseClass should be visible inside Main2 instance method, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_private_super_method_not_inherited() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC};
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Base"),
+                internal_name: Arc::from("Base"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("superPrivate"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PRIVATE,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Child"),
+                internal_name: Arc::from("Child"),
+                super_name: Some("Base".to_string()),
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let enclosing_method = CurrentClassMember {
+            name: Arc::from("doWork"),
+            is_method: true,
+            is_static: false,
+            is_private: false,
+            descriptor: Arc::from("()V"),
+        };
+        let ctx = CompletionContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Child")),
+            Some(Arc::from("Child")),
+            None,
+            vec![],
+        )
+        .with_enclosing_member(Some(enclosing_method));
+
+        let results = ThisMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| c.label.as_ref() != "superPrivate"),
+            "private super method should NOT be visible in subclass"
+        );
     }
 }
