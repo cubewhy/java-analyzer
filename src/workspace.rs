@@ -14,6 +14,7 @@ pub struct Workspace {
     pub documents: DocumentStore,
     pub index: Arc<RwLock<GlobalIndex>>,
     loaded_jars: RwLock<Vec<PathBuf>>,
+    pub source_roots: RwLock<Vec<PathBuf>>,
 }
 
 impl Workspace {
@@ -22,6 +23,47 @@ impl Workspace {
             documents: DocumentStore::new(),
             index: Arc::new(RwLock::new(GlobalIndex::new())),
             loaded_jars: RwLock::new(Vec::new()),
+            source_roots: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// 注册 source root（由 LSP initialize / didChangeConfiguration 调用）
+    pub async fn add_source_root(&self, root: PathBuf) {
+        let mut roots = self.source_roots.write().await;
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+
+    /// 根据文件 URI 推断 Java 包名（slash 格式，如 "org/cubewhy/a"）
+    /// 遍历所有 source roots，找到最长匹配前缀
+    pub async fn infer_package_from_uri(&self, file_uri: &str) -> Option<Arc<str>> {
+        // TODO: infer source root from Build tools result
+        // 把 URI 转成文件路径
+        let url = tower_lsp::lsp_types::Url::parse(file_uri).ok()?;
+        let file_path = url.to_file_path().ok()?;
+        let parent = file_path.parent()?;
+
+        let roots = self.source_roots.read().await;
+        // 找最长匹配的 source root
+        let best = roots
+            .iter()
+            .filter_map(|root| parent.strip_prefix(root).ok().map(|rel| (root, rel)))
+            .max_by_key(|(_, rel)| rel.components().count());
+
+        if let Some((_, rel)) = best {
+            let pkg = rel
+                .components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .collect::<Vec<_>>()
+                .join("/");
+            if pkg.is_empty() {
+                None
+            } else {
+                Some(Arc::from(pkg.as_str()))
+            }
+        } else {
+            None
         }
     }
 

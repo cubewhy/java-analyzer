@@ -4,6 +4,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CandidateKind {
     ClassName,
+    Package,
+    Snippet,
     Method {
         descriptor: Arc<str>,
         defining_class: Arc<str>,

@@ -57,6 +57,8 @@ pub struct CompletionContext {
     /// The method/field member where the cursor is located (None indicates that it is in the field initializer or static block)
     pub enclosing_class_member: Option<CurrentClassMember>,
     pub char_after_cursor: Option<char>,
+    pub file_uri: Option<Arc<str>>,
+    pub inferred_package: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +92,26 @@ impl CompletionContext {
             current_class_members: HashMap::new(),
             enclosing_class_member: None,
             char_after_cursor: None,
+            file_uri: None,
+            inferred_package: None,
         }
+    }
+
+    pub fn with_file_uri(mut self, uri: Arc<str>) -> Self {
+        self.file_uri = Some(uri);
+        self
+    }
+
+    pub fn with_inferred_package(mut self, pkg: Arc<str>) -> Self {
+        self.inferred_package = Some(pkg);
+        self
+    }
+
+    /// Returns valid package names: prioritizes AST resolution, then falls back to path inference.
+    pub fn effective_package(&self) -> Option<&str> {
+        self.enclosing_package
+            .as_deref()
+            .or(self.inferred_package.as_deref())
     }
 
     pub fn with_class_members(
@@ -124,5 +145,11 @@ impl CompletionContext {
     /// The cursor is immediately followed by '(', and method completion does not require additional parentheses.
     pub fn has_paren_after_cursor(&self) -> bool {
         self.char_after_cursor == Some('(')
+    }
+
+    pub fn file_stem(&self) -> Option<&str> {
+        let uri = self.file_uri.as_deref()?;
+        let last = uri.rsplit('/').next()?;
+        Some(last.split('.').next().unwrap_or(last))
     }
 }

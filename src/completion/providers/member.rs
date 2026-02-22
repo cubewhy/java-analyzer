@@ -43,7 +43,7 @@ impl CompletionProvider for MemberProvider {
         );
 
         if receiver_expr == "this" {
-            // ── source members（含 private，直接从 AST 解析）──────────────────
+            // source members (including private members, directly parsed from the AST)
             let mut results = if !ctx.current_class_members.is_empty() {
                 self.provide_from_source_members(ctx, member_prefix)
             } else {
@@ -55,14 +55,13 @@ impl CompletionProvider for MemberProvider {
                     ctx.current_class_members.keys().map(Arc::clone).collect();
                 let prefix_lower = member_prefix.to_lowercase();
 
-                // ── index MRO：skip(0) 即从当前类开始，用 same_class filter ──
-                // 当 source members 已覆盖当前类时，当前类的 index 条目会因
-                // source_names 去重而跳过，不会重复。
-                let filter = AccessFilter::same_class(); // 允许 private
+                // index MRO: skip(0) means starting from the current class, using the same_class filter
+                //
+                // When source members have already covered the current class, the index entries of the current class will be skipped due to
+                // source_names deduplication, and will not be repeated.
                 let mro = index.mro(enclosing);
 
                 for (i, class_meta) in mro.iter().enumerate() {
-                    // 父类及以上：只允许 non-private
                     let filter = if i == 0 {
                         AccessFilter::same_class()
                     } else {
@@ -76,7 +75,7 @@ impl CompletionProvider for MemberProvider {
                         if !filter.is_method_accessible(method.access_flags, method.is_synthetic) {
                             continue;
                         }
-                        // 当前类自身：source members 已包含，跳过避免重复
+                        // The current class itself: source members are already included, skipping to avoid duplication.
                         if i == 0 && source_names.contains(&method.name) {
                             continue;
                         }
@@ -410,12 +409,12 @@ fn resolve_receiver_type(
     None
 }
 
-/// 从 "new Foo()" / "new Foo(a, b)" 中提取 "Foo"
+/// Extract "Foo" from "new Foo()" / "new Foo(a, b)".
 fn extract_constructor_class(expr: &str) -> Option<&str> {
     let rest = expr.trim().strip_prefix("new ")?;
-    // 取到 '(' 之前的部分就是类名（可能含泛型，如 "ArrayList<String>"）
+    // The part before the '(' is the class name (which may contain generics, such as "ArrayList<String>").
     let class_part = rest.split('(').next()?.trim();
-    // 去掉泛型参数：ArrayList<String> → ArrayList
+    // Remove generic parameter: ArrayList<String> -> ArrayList
     let simple = class_part.split('<').next()?.trim();
     if simple.is_empty() {
         None
@@ -424,14 +423,14 @@ fn extract_constructor_class(expr: &str) -> Option<&str> {
     }
 }
 
-/// 解析 "someMethod()" / "someMethod(args)" 形式的 receiver 表达式
-/// 找 enclosing class 的 MRO 里的该方法，取其返回类型
+/// Parse receiver expressions of the form "someMethod()" / "someMethod(args)"
+/// Find the method in the MRO of the enclosing class and get its return type
 fn resolve_method_call_receiver(
     expr: &str,
     ctx: &CompletionContext,
     index: &mut GlobalIndex,
 ) -> Option<Arc<str>> {
-    // 必须含 '(' 且以 ')' 结尾
+    // Must contain '(' and end with ')'
     let paren = expr.find('(')?;
     if !expr.ends_with(')') {
         return None;
@@ -440,7 +439,7 @@ fn resolve_method_call_receiver(
     if method_name.is_empty() || method_name.contains('.') || method_name.contains(' ') {
         return None;
     }
-    // arg count（简单估算，不需要精确）
+    // arg count (simple estimate, no need for precision)
     let args_text = &expr[paren + 1..expr.len() - 1];
     let arg_count = if args_text.trim().is_empty() {
         0i32
@@ -463,14 +462,6 @@ fn resolve_simple_name_to_internal(
     tracing::debug!(simple, "resolve_simple_name_to_internal called");
 
     let imported = index.resolve_imports(&ctx.existing_imports);
-    // if let Some(m) = imported.iter().find(|m| m.name.as_ref() == simple) {
-    //     // 防御：internal_name 必须包含 '/' 或者等于简单名（默认包）
-    //     // 不应该是基本类型
-    //     // 但这只是治标，要治本还需要找到为什么索引里有 internal_name = "long" 的类。
-    //     if is_valid_class_internal(m.internal_name.as_ref()) {
-    //         return Some(Arc::clone(&m.internal_name));
-    //     }
-    // }
     tracing::debug!(
         simple,
         imported = ?imported.iter().map(|m| format!("name={} internal={}", m.name, m.internal_name)).collect::<Vec<_>>(),
@@ -1153,7 +1144,7 @@ mod tests {
             },
         ];
 
-        // "pf" 是 "priFunc" 的子序列（p...f），不是 "fun" 的子序列
+        // "pf" is a subsequence (p...f) of "priFunc", not a subsequence of "fun".
         let ctx = CompletionContext::new(
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -1339,7 +1330,7 @@ public class RandomClass {
 
     #[test]
     fn test_bare_method_call_receiver_resolved() {
-        // getMain2()| → Main2 的方法应出现
+        // getMain2()| -> The method of Main2 should appear
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
@@ -1394,7 +1385,7 @@ public class RandomClass {
             "",
             vec![],
             Some(Arc::from("Main")),
-            Some(Arc::from("Main")), // enclosing_internal_name
+            Some(Arc::from("Main")),
             None,
             vec![],
         );
@@ -1409,7 +1400,7 @@ public class RandomClass {
 
     #[test]
     fn test_new_expr_receiver_resolved_via_global_index() {
-        // new Main2().| → Main2 的方法应出现
+        // new Main2().| -> The Main2 method should appear
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 
@@ -1458,7 +1449,7 @@ public class RandomClass {
 
     #[test]
     fn test_inherited_method_visible_on_subclass() {
-        // m2: Main2 extends BaseClass，funcA 应该出现
+        // m2: Main2 extends BaseClass, funcA should appear
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
         use rust_asm::constants::ACC_PUBLIC;
 

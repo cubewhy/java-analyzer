@@ -122,7 +122,9 @@ impl Scorer {
             StaticMethod { .. } => 12.0,
             StaticField { .. } => 10.0,
             ClassName => 8.0,
+            Package => 6.0,
             Keyword => 5.0,
+            Snippet => 2.0,
         }
     }
 }

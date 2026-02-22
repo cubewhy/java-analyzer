@@ -31,17 +31,28 @@ pub fn candidate_to_lsp(candidate: &CompletionCandidate, source: &str) -> Comple
             }]
         });
 
+    let (insert_text_format, insert_text) = if candidate.kind == CandidateKind::Snippet {
+        (
+            Some(InsertTextFormat::SNIPPET),
+            Some(candidate.insert_text.clone()),
+        )
+    } else {
+        (None, None)
+    };
+
     CompletionItem {
         label: candidate.label.to_string(),
         kind: Some(kind),
         detail: candidate.detail.clone(),
         additional_text_edits,
+        insert_text,
+        insert_text_format,
         sort_text: Some(format!("{:010.4}", 10000.0 - candidate.score)),
         ..Default::default()
     }
 }
 
-/// 检查 source 中是否已经通过精确 import、通配符 import 或同包覆盖了这个 fqn
+/// Check if this fqn has been overridden in the source code via exact import, wildcard import, or import from the same package.
 fn is_already_in_source(fqn: &str, source: &str) -> bool {
     let existing_imports = extract_imports_from_source(source);
     let enclosing_pkg = extract_package_from_source(source);
@@ -89,6 +100,8 @@ fn make_import_text(import: &str, source: &str) -> String {
 fn map_kind(kind: &CandidateKind) -> CompletionItemKind {
     match kind {
         CandidateKind::ClassName => CompletionItemKind::CLASS,
+        CandidateKind::Package => CompletionItemKind::MODULE,
+        CandidateKind::Snippet => CompletionItemKind::SNIPPET,
         CandidateKind::Method { .. } => CompletionItemKind::METHOD,
         CandidateKind::StaticMethod { .. } => CompletionItemKind::FUNCTION,
         CandidateKind::Field { .. } => CompletionItemKind::FIELD,
@@ -238,8 +251,6 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert!(edits[0].new_text.contains("import java.util.List;"));
     }
-
-    // ── 原有测试（保持不变）──────────────────────────────────────────────
 
     #[test]
     fn test_import_text_first_import_has_blank_line() {

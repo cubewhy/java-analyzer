@@ -25,7 +25,9 @@ pub async fn handle_completion(
     let doc = workspace.documents.get(uri)?;
     let lang = registry.find(&doc.language_id)?;
 
-    debug!(
+    let uri_str = uri.as_str();
+
+    tracing::debug!(
         uri = %uri,
         lang = lang.id(),
         line = position.line,
@@ -35,10 +37,21 @@ pub async fn handle_completion(
     );
 
     // Parse and complete the context
-    let ctx =
-        lang.parse_completion_context(&doc.content, position.line, position.character, trigger)?;
+    let ctx = lang
+        .parse_completion_context(&doc.content, position.line, position.character, trigger)?
+        .with_file_uri(Arc::from(uri_str));
 
-    debug!(location = ?ctx.location, query = %ctx.query, "parsed context");
+    let ctx = if ctx.enclosing_package.is_none() {
+        if let Some(pkg) = workspace.infer_package_from_uri(uri_str).await {
+            ctx.with_inferred_package(pkg)
+        } else {
+            ctx
+        }
+    } else {
+        ctx
+    };
+
+    tracing::debug!(location = ?ctx.location, query = %ctx.query, "parsed context");
 
     // Perform completion
     let mut index = workspace.index.write().await;
