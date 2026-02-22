@@ -302,7 +302,6 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
     let mut in_method = false;
     let mut arg_start = 0usize; // byte position of current arg start
     let mut arg_texts: Vec<String> = Vec::new();
-    let mut expr_bytes_pos = 0usize; // track position in expr
 
     for (char_pos, ch) in expr.char_indices() {
         match ch {

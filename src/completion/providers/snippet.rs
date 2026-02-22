@@ -185,8 +185,16 @@ impl CompletionProvider for SnippetProvider {
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
+            CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
             _ => return vec![],
         };
+
+        tracing::debug!(
+            "SnippetProvider: ast_pkg={:?} inferred={:?} effective={:?}",
+            ctx.enclosing_package,
+            ctx.inferred_package,
+            ctx.effective_package()
+        );
 
         all_rules()
             .iter()
@@ -212,7 +220,7 @@ impl CompletionProvider for SnippetProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::completion::context::{CompletionContext, CursorLocation};
+    use crate::completion::context::{CompletionContext, CurrentClassMember, CursorLocation};
     use crate::index::GlobalIndex;
     use std::sync::Arc;
 
@@ -369,7 +377,13 @@ mod tests {
     #[test]
     fn test_sout_alias_println() {
         let mut idx = GlobalIndex::new();
-        let c = ctx("println", None, None, None);
+        let c = ctx("println", None, None, None).with_enclosing_member(Some(CurrentClassMember {
+            is_method: true,
+            name: Arc::from("randomMethod"),
+            descriptor: Arc::from("()V"),
+            is_static: false,
+            is_private: false,
+        }));
         let results = SnippetProvider.provide(&c, &mut idx);
         let m = results.iter().find(|r| r.label.as_ref() == "println");
         assert!(m.is_some(), "alias 'println' should match sout");

@@ -39,7 +39,19 @@ impl Language for JavaLanguage {
         trigger_char: Option<char>,
     ) -> Option<CompletionContext> {
         let offset = line_col_to_offset(source, line, character)?;
-        debug!(line, character, trigger = ?trigger_char, "java: parsing context");
+        tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context");
+
+        if is_cursor_in_comment(source, offset) {
+            return Some(CompletionContext::new(
+                crate::completion::context::CursorLocation::Unknown,
+                "",
+                vec![],
+                None,
+                None,
+                None,
+                vec![],
+            ));
+        }
 
         let mut parser = self.make_parser();
         let tree = parser.parse(source, None)?;
@@ -67,8 +79,32 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract(self, root: Node, trigger_char: Option<char>) -> CompletionContext {
+        // 光标本身在注释里（// 行）
+        if is_cursor_in_comment(self.source, self.offset) {
+            return self.empty_context();
+        }
+
         // Try offset first; if that yields nothing, try offset-1 (handles col-0 case)
         let cursor_node = self.find_cursor_node(root);
+
+        // 如果找到的节点是注释类型（tree-sitter 层面的兜底）
+        if cursor_node
+            .map(|n| n.kind() == "line_comment" || n.kind() == "block_comment")
+            .unwrap_or(false)
+        {
+            return self.empty_context();
+        }
+
+        // 如果找到的节点在注释里（节点 start_byte 所在行是注释行），返回 Unknown
+        if let Some(node) = cursor_node {
+            if self.node_is_in_comment(node) {
+                return self.empty_context();
+            }
+        }
+        // 同时检查光标本身是否在注释里
+        if is_cursor_in_comment(self.source, self.offset) {
+            return self.empty_context();
+        }
 
         let (location, query) = self.determine_location(cursor_node, trigger_char);
         let local_variables = self.extract_locals(root, cursor_node);
@@ -115,15 +151,66 @@ impl<'s> JavaContextExtractor<'s> {
         .with_char_after_cursor(char_after_cursor)
     }
 
-    fn find_cursor_node<'tree>(&self, root: Node<'tree>) -> Option<Node<'tree>> {
-        // Primary: named node at [offset-1, offset)
-        let node = root.named_descendant_for_byte_range(self.offset.saturating_sub(1), self.offset);
-        if node.is_some() {
-            return node;
+    fn node_is_in_comment(&self, node: Node) -> bool {
+        // 检查节点的 kind 是否是注释
+        if node.kind() == "line_comment" || node.kind() == "block_comment" {
+            return true;
         }
-        // Fallback: try [offset, offset+1) for col-0 cases
+        // 检查节点 start_byte 所在行是否是注释行
+        let node_start = node.start_byte();
+        if node_start >= self.bytes.len() {
+            return false;
+        }
+        // 找节点开始位置所在行的行首
+        let line_start = self.source[..node_start]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        // 如果节点不在光标所在行（说明 tree-sitter 找到了别的行的节点）
+        let cursor_line_start = self.source[..self.offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        if line_start != cursor_line_start {
+            // 节点在不同行，说明光标所在位置没有有效节点，检查光标行
+            return false; // 由外层 is_cursor_in_comment 处理
+        }
+        false
+    }
+
+    fn empty_context(&self) -> CompletionContext {
+        CompletionContext::new(
+            crate::completion::context::CursorLocation::Unknown,
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        )
+    }
+
+    fn find_cursor_node<'tree>(&self, root: Node<'tree>) -> Option<Node<'tree>> {
+        let node = root.named_descendant_for_byte_range(self.offset.saturating_sub(1), self.offset);
+        if let Some(n) = node {
+            if n.kind() == "line_comment" || n.kind() == "block_comment" {
+                return None;
+            }
+            // 节点的范围必须包含光标（end_byte >= offset）
+            // 如果节点在光标之前结束，说明找到的是相邻节点
+            if n.end_byte() < self.offset {
+                return None;
+            }
+            return Some(n);
+        }
         if self.offset < self.bytes.len() {
-            return root.named_descendant_for_byte_range(self.offset, self.offset + 1);
+            let n = root.named_descendant_for_byte_range(self.offset, self.offset + 1);
+            if let Some(n) = n {
+                if n.kind() == "line_comment" || n.kind() == "block_comment" {
+                    return None;
+                }
+                return Some(n);
+            }
         }
         None
     }
@@ -133,6 +220,11 @@ impl<'s> JavaContextExtractor<'s> {
         cursor_node: Option<Node>,
         trigger_char: Option<char>,
     ) -> (CursorLocation, String) {
+        // 光标在注释里
+        if is_cursor_in_comment(self.source, self.offset) {
+            return (CursorLocation::Unknown, String::new());
+        }
+
         let node = match cursor_node {
             Some(n) => n,
             None => return self.fallback_location(trigger_char),
@@ -339,12 +431,12 @@ impl<'s> JavaContextExtractor<'s> {
     /// When tree-sitter fails to recognize field_access, use text heuristics to determine it.
     fn maybe_member_access_from_text(&self, text: String) -> (CursorLocation, String) {
         let prefix_text = &self.source[..self.offset];
-        let last_line = prefix_text.lines().last().unwrap_or("").trim();
+        let line_start = prefix_text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let last_line = prefix_text[line_start..].trim();
 
         if let Some(result) = self.parse_last_line(last_line) {
             return result;
         }
-
         (
             CursorLocation::Expression {
                 prefix: text.clone(),
@@ -354,18 +446,29 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn fallback_location(&self, _trigger_char: Option<char>) -> (CursorLocation, String) {
-        let prefix_text = &self.source[..self.offset];
-        let last_line = prefix_text.lines().last().unwrap_or("").trim();
+        if is_cursor_in_comment(self.source, self.offset) {
+            return (CursorLocation::Unknown, String::new());
+        }
 
-        if let Some(result) = self.parse_last_line(last_line) {
+        let prefix_text = &self.source[..self.offset];
+
+        let line_start = prefix_text.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let current_line = prefix_text[line_start..].trim();
+
+        if is_in_line_comment(current_line) {
+            return (CursorLocation::Unknown, String::new());
+        }
+
+        if let Some(result) = self.parse_last_line(current_line) {
             return result;
         }
 
-        let query = last_line
+        let query = current_line
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .next_back()
             .unwrap_or("")
             .to_string();
+
         (
             CursorLocation::Expression {
                 prefix: query.clone(),
@@ -1071,6 +1174,61 @@ pub fn java_type_to_internal(ty: &str) -> String {
         // resolve_simple_to_internal which uses the index + imports.
         other => other.replace('.', "/"),
     }
+}
+
+/// 检测 offset 是否在单行注释（//）或块注释（/* */）内
+fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
+    // 只看 offset 之前的内容
+    let before = &source[..offset];
+
+    // 检查块注释：找最后一个 /* 和最后一个 */
+    // 如果最后一个 /* 在最后一个 */ 之后，说明在块注释内
+    let last_open = before.rfind("/*");
+    let last_close = before.rfind("*/");
+    if let Some(open) = last_open {
+        match last_close {
+            None => return true,                        // /* 没有闭合
+            Some(close) if open > close => return true, // 最近的 /* 在最近的 */ 之后
+            _ => {}
+        }
+    }
+
+    // 检查单行注释：当前行是否有 //（且不在字符串内）
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let current_line = &before[line_start..];
+    is_in_line_comment(current_line)
+}
+
+/// 检查当前行（光标前的部分）是否处于 // 注释中（简单处理，不考虑字符串内的 //）
+fn is_in_line_comment(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => {
+                escaped = true;
+            }
+            '"' if !in_char => {
+                in_string = !in_string;
+            }
+            '\'' if !in_string => {
+                in_char = !in_char;
+            }
+            '/' if !in_string && !in_char => {
+                if chars.peek() == Some(&'/') {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -2017,5 +2175,108 @@ mod tests {
             "enclosing_internal_name should be set even without semicolon"
         );
         assert_eq!(ctx.enclosing_class.as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn test_cursor_in_line_comment_returns_unknown() {
+        let src = "// some random comments\n\npublic class ExampleClass {}";
+        // 光标在注释行末尾
+        let col = "// some random comments".len() as u32;
+        let ctx = JavaLanguage
+            .parse_completion_context(src, 0, col, None)
+            .unwrap();
+        assert!(
+            matches!(ctx.location, CursorLocation::Unknown),
+            "cursor inside line comment should give Unknown, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_cursor_on_empty_line_after_comment_is_expression() {
+        let src = "// some random comments\n\npublic class ExampleClass {}";
+        // 光标在第1行（空行）
+        let ctx = JavaLanguage
+            .parse_completion_context(src, 1, 0, None)
+            .unwrap();
+        assert!(
+            !matches!(ctx.location, CursorLocation::Unknown),
+            "empty line after comment should not be Unknown, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_empty_line_after_comment_not_comment_context() {
+        let src = indoc::indoc! {r#"
+        // some random comments
+        
+        public class ExampleClass {}
+    "#};
+        let ctx = at(src, 1, 0);
+        assert!(
+            !matches!(&ctx.location,
+            CursorLocation::Expression { prefix } if prefix == "comments"),
+            "empty line after comment should not have prefix='comments', got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_cursor_inside_line_comment_is_unknown() {
+        let src = "// some random comments";
+        let col = src.len() as u32;
+        let ctx = at(src, 0, col);
+        assert!(
+            matches!(ctx.location, CursorLocation::Unknown),
+            "cursor inside line comment should be Unknown, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_cursor_at_start_of_line_comment_is_unknown() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                // comment here
+            }
+        }
+    "#};
+        let line = 2u32;
+        let raw = src.lines().nth(2).unwrap();
+        let col = raw.find("//").unwrap() as u32 + 5;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(ctx.location, CursorLocation::Unknown),
+            "cursor inside // comment should be Unknown, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_empty_line_after_comment_is_not_unknown() {
+        // 空行紧跟注释行，光标在空行，不应该被判为注释
+        let src = "// some random comments\n\npublic class ExampleClass {}";
+        // line=1 是空行
+        let ctx = at(src, 1, 0);
+        assert!(
+            !matches!(ctx.location, CursorLocation::Unknown),
+            "empty line after comment should NOT be Unknown, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_cursor_inside_comment_is_unknown() {
+        let src = "// some random comments\n\npublic class ExampleClass {}";
+        // line=0, col 在注释中间
+        let col = "// some random".len() as u32;
+        let ctx = at(src, 0, col);
+        assert!(
+            matches!(ctx.location, CursorLocation::Unknown),
+            "cursor inside comment should be Unknown, got {:?}",
+            ctx.location
+        );
     }
 }

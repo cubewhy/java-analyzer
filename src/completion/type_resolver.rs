@@ -283,12 +283,10 @@ fn descriptor_matches_type(desc: &str, ty: &str) -> bool {
             let internal = &desc[1..desc.len() - 1];
             // Match by simple name or full internal name
             ty == internal
-                || ty.rsplit('/').next().map_or(false, |simple| {
-                    internal
-                        .rsplit('/')
-                        .next()
-                        .map_or(false, |d_simple| simple == d_simple)
-                })
+                || ty
+                    .rsplit('/')
+                    .next()
+                    .is_some_and(|simple| internal.rsplit('/').next() == Some(simple))
         }
         _ => false,
     }
@@ -450,10 +448,7 @@ pub fn parse_return_type_from_descriptor(descriptor: &str) -> Option<Arc<str>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        completion::{CompletionContext, CompletionEngine},
-        index::GlobalIndex,
-    };
+    use crate::index::GlobalIndex;
 
     fn make_resolver() -> (GlobalIndex, Vec<LocalVar>) {
         let idx = GlobalIndex::new();

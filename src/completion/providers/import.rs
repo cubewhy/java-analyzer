@@ -102,3 +102,155 @@ fn make_import_candidate(meta: &Arc<crate::index::ClassMetadata>) -> CompletionC
     )
     .with_detail(fqn)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion::context::{CompletionContext, CursorLocation};
+    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+    use rust_asm::constants::ACC_PUBLIC;
+    use std::sync::Arc;
+
+    fn make_index() -> GlobalIndex {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_cls("org/cubewhy", "Main"),
+            make_cls("org/cubewhy", "RealMain"),
+            make_cls("org/cubewhy/utils", "StringUtil"),
+            make_cls("java/util", "ArrayList"),
+            make_cls("java/util", "HashMap"),
+        ]);
+        idx
+    }
+
+    fn make_cls(pkg: &str, name: &str) -> ClassMetadata {
+        ClassMetadata {
+            package: Some(Arc::from(pkg)),
+            name: Arc::from(name),
+            internal_name: Arc::from(format!("{}/{}", pkg, name).as_str()),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }
+    }
+
+    fn import_ctx(prefix: &str) -> CompletionContext {
+        CompletionContext::new(
+            CursorLocation::Import {
+                prefix: prefix.to_string(),
+            },
+            prefix,
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_simple_name_prefix_matches() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("Re"), &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "RealMain"),
+            "Re should match RealMain: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_simple_name_insert_text_is_fqn() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("Re"), &mut idx);
+        let r = results
+            .iter()
+            .find(|c| c.label.as_ref() == "RealMain")
+            .unwrap();
+        assert_eq!(
+            r.insert_text, "org.cubewhy.RealMain",
+            "insert_text should be FQN"
+        );
+    }
+
+    #[test]
+    fn test_package_prefix_matches_classes_in_pkg() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("org.cubewhy.Ma"), &mut idx);
+        assert!(results.iter().any(|c| c.label.as_ref() == "Main"));
+        assert!(
+            !results.iter().any(|c| c.label.as_ref() == "RealMain"),
+            "RealMain doesn't start with 'Ma'"
+        );
+    }
+
+    #[test]
+    fn test_package_prefix_dot_only_lists_all_in_pkg() {
+        // "org.cubewhy." → all classes in org.cubewhy
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"Main"), "{:?}", labels);
+        assert!(labels.contains(&"RealMain"), "{:?}", labels);
+    }
+
+    #[test]
+    fn test_package_prefix_includes_subpackage_classes() {
+        // "org.cubewhy." の実装は pkg == "org/cubewhy" OR starts_with("org/cubewhy/")
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(
+            labels.contains(&"StringUtil"),
+            "subpackage class should appear: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_empty_prefix_returns_some() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx(""), &mut idx);
+        assert!(
+            !results.is_empty(),
+            "empty prefix should return classes (up to limit)"
+        );
+    }
+
+    #[test]
+    fn test_no_match_returns_empty() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("Zzz"), &mut idx);
+        assert!(results.is_empty(), "no class starts with Zzz");
+    }
+
+    #[test]
+    fn test_case_insensitive_match() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("real"), &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "RealMain"),
+            "should match case-insensitively: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_fqn_format_dot_notation() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("ArrayList"), &mut idx);
+        let r = results
+            .iter()
+            .find(|c| c.label.as_ref() == "ArrayList")
+            .unwrap();
+        assert_eq!(r.insert_text, "java.util.ArrayList");
+        assert!(
+            !r.insert_text.contains('/'),
+            "FQN should use dots not slashes"
+        );
+    }
+}

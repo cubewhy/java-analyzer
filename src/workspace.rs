@@ -35,23 +35,27 @@ impl Workspace {
         }
     }
 
-    /// 根据文件 URI 推断 Java 包名（slash 格式，如 "org/cubewhy/a"）
-    /// 遍历所有 source roots，找到最长匹配前缀
+    /// 从文件 URI 推断 Java 包名（不依赖显式注册的 source roots）
+    /// 策略：在路径里找 "java"/"kotlin"/"src" 等典型分隔段，取其后的部分作为包路径
     pub async fn infer_package_from_uri(&self, file_uri: &str) -> Option<Arc<str>> {
-        // TODO: infer source root from Build tools result
-        // 把 URI 转成文件路径
+        // 先尝试已注册的 source roots
+        if let Some(pkg) = self.infer_from_source_roots(file_uri).await {
+            return Some(pkg);
+        }
+        // 回退：启发式路径解析
+        infer_package_heuristic(file_uri)
+    }
+
+    async fn infer_from_source_roots(&self, file_uri: &str) -> Option<Arc<str>> {
         let url = tower_lsp::lsp_types::Url::parse(file_uri).ok()?;
         let file_path = url.to_file_path().ok()?;
         let parent = file_path.parent()?;
-
         let roots = self.source_roots.read().await;
-        // 找最长匹配的 source root
         let best = roots
             .iter()
-            .filter_map(|root| parent.strip_prefix(root).ok().map(|rel| (root, rel)))
-            .max_by_key(|(_, rel)| rel.components().count());
-
-        if let Some((_, rel)) = best {
+            .filter_map(|root| parent.strip_prefix(root).ok().map(|rel| rel.to_path_buf()))
+            .max_by_key(|rel| rel.components().count());
+        best.and_then(|rel| {
             let pkg = rel
                 .components()
                 .filter_map(|c| c.as_os_str().to_str())
@@ -62,9 +66,7 @@ impl Workspace {
             } else {
                 Some(Arc::from(pkg.as_str()))
             }
-        } else {
-            None
-        }
+        })
     }
 
     pub async fn load_jar_async(&self, path: PathBuf) -> Result<()> {
@@ -133,4 +135,29 @@ impl Default for Workspace {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 启发式包名推断：从路径里找典型 source root 分隔词
+fn infer_package_heuristic(file_uri: &str) -> Option<Arc<str>> {
+    let url = tower_lsp::lsp_types::Url::parse(file_uri).ok()?;
+    let file_path = url.to_file_path().ok()?;
+    let parent = file_path.parent()?;
+
+    let components: Vec<&str> = parent
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+
+    // 典型 source root 分隔词，找最后一个匹配的位置
+    const SEPARATORS: &[&str] = &["java", "kotlin", "groovy", "scala", "src"];
+
+    // 从后往前找最后一个分隔词
+    let split_pos = components.iter().rposition(|c| SEPARATORS.contains(c))?;
+
+    let pkg_parts = &components[split_pos + 1..];
+    if pkg_parts.is_empty() {
+        return None;
+    }
+    let pkg = pkg_parts.join("/");
+    Some(Arc::from(pkg.as_str()))
 }

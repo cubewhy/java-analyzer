@@ -18,9 +18,10 @@ impl CompletionProvider for PackageProvider {
         ctx: &CompletionContext,
         index: &mut GlobalIndex,
     ) -> Vec<CompletionCandidate> {
+        tracing::debug!(location = ?ctx.location, "PackageProvider.provide");
         match &ctx.location {
             CursorLocation::Import { prefix } => provide_import(prefix, index),
-            // 表达式位置：只有当 prefix 看起来像包路径时触发
+
             CursorLocation::Expression { prefix } | CursorLocation::TypeAnnotation { prefix } => {
                 if is_package_like(prefix) {
                     provide_import(prefix, index)
@@ -28,9 +29,43 @@ impl CompletionProvider for PackageProvider {
                     vec![]
                 }
             }
+
+            // org.cubewhy.| → MemberAccess { receiver_expr: "org.cubewhy", member_prefix: "" }
+            // org.cubewhy.Ex| → MemberAccess { receiver_expr: "org.cubewhy", member_prefix: "Ex" }
+            CursorLocation::MemberAccess {
+                receiver_expr,
+                member_prefix,
+                ..
+            } => {
+                // receiver_expr 必须看起来像包路径（小写字母开头，含点或本身是合法包段）
+                if is_package_expr(receiver_expr) {
+                    // 重建 prefix："org.cubewhy" + "." + "Ex" → "org.cubewhy.Ex"
+                    let prefix = if member_prefix.is_empty() {
+                        format!("{}.", receiver_expr)
+                    } else {
+                        format!("{}.{}", receiver_expr, member_prefix)
+                    };
+                    provide_import(&prefix, index)
+                } else {
+                    vec![]
+                }
+            }
+
             _ => vec![],
         }
     }
+}
+
+/// receiver_expr 是否像包路径：小写字母开头，只含字母数字下划线和点
+fn is_package_expr(expr: &str) -> bool {
+    if expr.is_empty() {
+        return false;
+    }
+    expr.chars().next().is_some_and(|c| c.is_lowercase())
+        && expr
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+        && !expr.contains("..")
 }
 
 /// prefix 是否看起来像包路径（含小写字母开头的段 + 点）
@@ -322,6 +357,78 @@ mod tests {
             results.is_empty(),
             "uppercase prefix should not match packages: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_member_access_package_like_triggers() {
+        // org.cubewhy.| → MemberAccess 场景
+        let mut idx = make_index();
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "org.cubewhy".to_string(),
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        let results = PackageProvider.provide(&ctx, &mut idx);
+        assert!(
+            !results.is_empty(),
+            "org.cubewhy.| should trigger package completion: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(results.iter().any(|c| c.label.as_ref() == "Main"));
+    }
+
+    #[test]
+    fn test_member_access_package_with_name_prefix() {
+        // org.cubewhy.Ma| → MemberAccess { receiver="org.cubewhy", prefix="Ma" }
+        let mut idx = make_index();
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "Ma".to_string(),
+                receiver_expr: "org.cubewhy".to_string(),
+            },
+            "Ma",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        let results = PackageProvider.provide(&ctx, &mut idx);
+        assert!(results.iter().any(|c| c.label.as_ref() == "Main"));
+        assert!(results.iter().any(|c| c.label.as_ref() == "Main2"));
+    }
+
+    #[test]
+    fn test_member_access_uppercase_receiver_not_package() {
+        // String.| → 不是包路径
+        let mut idx = make_index();
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "String".to_string(),
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        let results = PackageProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.is_empty(),
+            "String.| should not trigger package completion"
         );
     }
 }

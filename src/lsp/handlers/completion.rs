@@ -68,10 +68,25 @@ pub async fn handle_completion(
 
     // Convert to LSP format (limit the number to avoid an explosion)
     const MAX_ITEMS: usize = 100;
+    // 在 handle_completion 里，candidate_to_lsp 之前
     let items: Vec<CompletionItem> = candidates
         .iter()
         .take(MAX_ITEMS)
-        .map(|c| candidate_to_lsp(c, &doc.content))
+        .map(|c| {
+            let mut item = candidate_to_lsp(c, &doc.content);
+            // import 场景：用 textEdit 替换整行 import 前缀
+            if matches!(
+                ctx.location,
+                crate::completion::context::CursorLocation::Import { .. }
+            ) {
+                if let Some(edit) = make_import_text_edit(c, &doc.content, position) {
+                    item.text_edit = Some(edit);
+                    item.insert_text = None;
+                    item.insert_text_format = None;
+                }
+            }
+            item
+        })
         .collect();
 
     let is_incomplete = candidates.len() > MAX_ITEMS;
@@ -85,5 +100,46 @@ pub async fn handle_completion(
     Some(CompletionResponse::List(CompletionList {
         is_incomplete,
         items,
+    }))
+}
+
+fn make_import_text_edit(
+    candidate: &crate::completion::candidate::CompletionCandidate,
+    source: &str,
+    position: tower_lsp::lsp_types::Position,
+) -> Option<tower_lsp::lsp_types::CompletionTextEdit> {
+    use tower_lsp::lsp_types::*;
+
+    // 找当前行
+    let line_str = source.lines().nth(position.line as usize)?;
+
+    // 找 "import " 之后的内容起始列
+    let import_prefix = "import ";
+    let start_char = if let Some(pos) = line_str.find(import_prefix) {
+        (pos + import_prefix.len()) as u32
+    } else {
+        return None;
+    };
+
+    // 结束列：到分号或行末（不含分号）
+    let end_char = line_str
+        .find(';')
+        .map(|p| p as u32)
+        .unwrap_or(line_str.len() as u32);
+
+    // insert_text 是 FQN（如 "org.cubewhy.RealMain"）
+    // 替换 import 后的整段文本
+    Some(CompletionTextEdit::Edit(TextEdit {
+        range: Range {
+            start: Position {
+                line: position.line,
+                character: start_char,
+            },
+            end: Position {
+                line: position.line,
+                character: end_char,
+            },
+        },
+        new_text: candidate.insert_text.clone(),
     }))
 }
