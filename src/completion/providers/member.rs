@@ -64,18 +64,6 @@ impl CompletionProvider for MemberProvider {
         };
 
         tracing::debug!(class_internal, "looking up class in index");
-        let class_meta = match index.get_class(class_internal) {
-            Some(m) => m,
-            None => {
-                tracing::debug!(class_internal, "class NOT FOUND in index");
-                return vec![];
-            }
-        };
-        tracing::debug!(
-            class_internal,
-            methods = class_meta.methods.len(),
-            "class found"
-        );
 
         // Check if it's a similar access (allow private/protected access)
         let is_same_class = ctx.enclosing_internal_name.as_deref() == Some(class_internal);
@@ -89,73 +77,90 @@ impl CompletionProvider for MemberProvider {
         let prefix_lower = member_prefix.to_lowercase();
         let mut results = Vec::new();
 
-        for method in &class_meta.methods {
-            if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
-                continue;
-            }
-            if !filter.is_method_accessible(method.access_flags, method.is_synthetic) {
-                continue;
-            }
-            if !prefix_lower.is_empty() && !method.name.to_lowercase().contains(&prefix_lower) {
-                continue;
-            }
-            let is_static = method.access_flags & ACC_STATIC != 0;
-            let kind = if is_static {
-                CandidateKind::StaticMethod {
-                    descriptor: Arc::clone(&method.descriptor),
-                    defining_class: Arc::from(class_internal),
-                }
-            } else {
-                CandidateKind::Method {
-                    descriptor: Arc::clone(&method.descriptor),
-                    defining_class: Arc::from(class_internal),
-                }
-            };
-            results.push(
-                CompletionCandidate::new(
-                    Arc::clone(&method.name),
-                    if ctx.has_paren_after_cursor() {
-                        method.name.to_string()
-                    } else {
-                        format!("{}(", method.name)
-                    },
-                    kind,
-                    self.name(),
-                )
-                .with_detail(scorer::method_detail(class_internal, method)),
-            );
-        }
+        let mro = index.mro(class_internal);
+        let mut seen_methods = std::collections::HashSet::new();
+        let mut seen_fields = std::collections::HashSet::new();
 
-        for field in &class_meta.fields {
-            if !filter.is_field_accessible(field.access_flags, field.is_synthetic) {
-                continue;
-            }
-            if !prefix_lower.is_empty() && !field.name.to_lowercase().contains(&prefix_lower) {
-                continue;
-            }
-            let is_static = field.access_flags & ACC_STATIC != 0;
-            let kind = if is_static {
-                CandidateKind::StaticField {
-                    descriptor: Arc::clone(&field.descriptor),
-                    defining_class: Arc::from(class_internal),
+        for class_meta in &mro {
+            for method in &class_meta.methods {
+                // skip <init>, <clinit>
+                if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
+                    continue;
                 }
-            } else {
-                CandidateKind::Field {
-                    descriptor: Arc::clone(&field.descriptor),
-                    defining_class: Arc::from(class_internal),
+                // shadowing: subclass method hides superclass method with same name+descriptor
+                let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
+                if !seen_methods.insert(key) {
+                    continue;
                 }
-            };
-            results.push(
-                CompletionCandidate::new(
-                    Arc::clone(&field.name),
-                    field.name.to_string(),
-                    kind,
-                    self.name(),
-                )
-                .with_detail(scorer::field_detail(class_internal, field)),
-            );
-        }
+                if !filter.is_method_accessible(method.access_flags, method.is_synthetic) {
+                    continue;
+                }
+                if !filter.is_method_accessible(method.access_flags, method.is_synthetic) {
+                    continue;
+                }
+                if !prefix_lower.is_empty() && !method.name.to_lowercase().contains(&prefix_lower) {
+                    continue;
+                }
+                let is_static = method.access_flags & ACC_STATIC != 0;
+                let kind = if is_static {
+                    CandidateKind::StaticMethod {
+                        descriptor: Arc::clone(&method.descriptor),
+                        defining_class: Arc::from(class_internal),
+                    }
+                } else {
+                    CandidateKind::Method {
+                        descriptor: Arc::clone(&method.descriptor),
+                        defining_class: Arc::from(class_internal),
+                    }
+                };
+                results.push(
+                    CompletionCandidate::new(
+                        Arc::clone(&method.name),
+                        if ctx.has_paren_after_cursor() {
+                            method.name.to_string()
+                        } else {
+                            format!("{}(", method.name)
+                        },
+                        kind,
+                        self.name(),
+                    )
+                    .with_detail(scorer::method_detail(class_internal, method)),
+                );
+            }
 
+            for field in &class_meta.fields {
+                if !seen_fields.insert(Arc::clone(&field.name)) {
+                    continue;
+                }
+                if !filter.is_field_accessible(field.access_flags, field.is_synthetic) {
+                    continue;
+                }
+                if !prefix_lower.is_empty() && !field.name.to_lowercase().contains(&prefix_lower) {
+                    continue;
+                }
+                let is_static = field.access_flags & ACC_STATIC != 0;
+                let kind = if is_static {
+                    CandidateKind::StaticField {
+                        descriptor: Arc::clone(&field.descriptor),
+                        defining_class: Arc::from(class_internal),
+                    }
+                } else {
+                    CandidateKind::Field {
+                        descriptor: Arc::clone(&field.descriptor),
+                        defining_class: Arc::from(class_internal),
+                    }
+                };
+                results.push(
+                    CompletionCandidate::new(
+                        Arc::clone(&field.name),
+                        field.name.to_string(),
+                        kind,
+                        self.name(),
+                    )
+                    .with_detail(scorer::field_detail(class_internal, field)),
+                );
+            }
+        }
         results
     }
 }

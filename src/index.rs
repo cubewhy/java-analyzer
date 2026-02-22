@@ -1,6 +1,7 @@
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 use rayon::prelude::*;
+use rust_asm::class_reader::AttributeInfo;
 use rust_asm::{class_reader::ClassReader, nodes::ClassNode};
 use std::collections::HashMap;
 use std::io::Read;
@@ -13,6 +14,7 @@ use zip::ZipArchive;
 use crate::completion::type_resolver::parse_return_type_from_descriptor;
 
 pub mod codebase;
+pub mod jdk;
 pub mod source;
 
 #[derive(Debug, Serialize)]
@@ -105,8 +107,6 @@ pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> 
 }
 
 fn parse_class_data(_file_name: &str, bytes: &[u8], jar_path: Arc<str>) -> Option<ClassMetadata> {
-    use rust_asm::class_reader::AttributeInfo;
-
     let cr = ClassReader::new(bytes);
     let cn = cr.to_class_node().ok()?;
 
@@ -378,6 +378,99 @@ impl GlobalIndex {
                     tracing::debug!(internal, "exact import NOT FOUND");
                 }
             }
+        }
+        result
+    }
+
+    /// Collect all methods and fields visible on `class_internal`,
+    /// walking the inheritance chain (super_name + interfaces).
+    /// Stops at classes not present in the index (e.g. java/lang/Object if not indexed).
+    /// Returns (methods, fields) deduplicated by name — subclass members shadow superclass.
+    pub fn collect_inherited_members(
+        &self,
+        class_internal: &str,
+    ) -> (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>) {
+        let mut methods: Vec<Arc<MethodSummary>> = Vec::new();
+        let mut fields: Vec<Arc<FieldSummary>> = Vec::new();
+        // Track seen method signatures to implement shadowing
+        let mut seen_methods: std::collections::HashSet<(Arc<str>, Arc<str>)> = Default::default(); // (name, descriptor)
+        let mut seen_fields: std::collections::HashSet<Arc<str>> = Default::default();
+        let mut queue: std::collections::VecDeque<String> = Default::default();
+        queue.push_back(class_internal.to_string());
+        while let Some(internal) = queue.pop_front() {
+            let meta = match self.get_class(&internal) {
+                Some(m) => m,
+                None => continue, // not in index (e.g. java/lang/Object without JDK)
+            };
+            // Add methods not yet shadowed by a subclass
+            for method in &meta.methods {
+                let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
+                if seen_methods.insert(key) {
+                    methods.push(Arc::new(MethodSummary {
+                        name: Arc::clone(&method.name),
+                        descriptor: Arc::clone(&method.descriptor),
+                        access_flags: method.access_flags,
+                        is_synthetic: method.is_synthetic,
+                        generic_signature: method.generic_signature.clone(),
+                        return_type: method.return_type.clone(),
+                    }));
+                }
+            }
+            for field in &meta.fields {
+                if seen_fields.insert(Arc::clone(&field.name)) {
+                    fields.push(Arc::new(FieldSummary {
+                        name: Arc::clone(&field.name),
+                        descriptor: Arc::clone(&field.descriptor),
+                        access_flags: field.access_flags,
+                        is_synthetic: field.is_synthetic,
+                    }));
+                }
+            }
+            // Enqueue super class
+            if let Some(ref super_name) = meta.super_name
+                && !super_name.is_empty()
+            {
+                queue.push_back(super_name.clone());
+            }
+            // Enqueue interfaces
+            for iface in &meta.interfaces {
+                if !iface.is_empty() {
+                    queue.push_back(iface.clone());
+                }
+            }
+        }
+        (methods, fields)
+    }
+
+    /// Return all classes in the MRO (Method Resolution Order) of `class_internal`,
+    /// starting from the class itself, walking super_name then interfaces.
+    /// Classes not in the index are silently skipped.
+    pub fn mro(&self, class_internal: &str) -> Vec<Arc<ClassMetadata>> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(class_internal.to_string());
+        while let Some(internal) = queue.pop_front() {
+            if !seen.insert(internal.clone()) {
+                continue; // avoid cycles (e.g. broken index)
+            }
+            let meta = match self.get_class(&internal) {
+                Some(m) => m,
+                None => continue,
+            };
+            // Enqueue super + interfaces before pushing meta,
+            // so we process in BFS order (subclass first)
+            if let Some(ref super_name) = meta.super_name {
+                if !super_name.is_empty() {
+                    queue.push_back(super_name.clone());
+                }
+            }
+            for iface in &meta.interfaces {
+                if !iface.is_empty() {
+                    queue.push_back(iface.clone());
+                }
+            }
+            result.push(meta);
         }
         result
     }

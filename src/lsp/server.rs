@@ -9,6 +9,7 @@ use super::handlers::completion::handle_completion;
 use crate::completion::engine::CompletionEngine;
 use crate::index::ClassOrigin;
 use crate::index::codebase::{index_codebase, index_source_text};
+use crate::index::jdk::JdkIndexer;
 use crate::language::LanguageRegistry;
 use crate::workspace::{Workspace, document::Document};
 
@@ -83,6 +84,19 @@ impl Backend {
             client
                 .log_message(MessageType::INFO, "Workspace indexing complete")
                 .await;
+
+            // Index JDK (lowest priority, runs last)
+            let jdk_classes = JdkIndexer::index().await;
+            if !jdk_classes.is_empty() {
+                let count = jdk_classes.len();
+                workspace.index.write().await.add_classes(jdk_classes);
+                client
+                    .log_message(
+                        MessageType::INFO,
+                        format!("✓ JDK indexed: {} classes", count),
+                    )
+                    .await;
+            }
         });
     }
 }
