@@ -93,10 +93,14 @@ impl CompletionEngine {
                 resolver.resolve(
                     receiver_expr,
                     &ctx.local_variables,
-                    ctx.enclosing_class.as_ref(),
+                    ctx.enclosing_internal_name.as_ref(),
                 )
             } else {
-                resolver.resolve_chain(&chain, &ctx.local_variables, ctx.enclosing_class.as_ref())
+                resolver.resolve_chain(
+                    &chain,
+                    &ctx.local_variables,
+                    ctx.enclosing_internal_name.as_ref(),
+                )
             };
 
             // If the result is a simple name (without '/'), it needs to be further parsed into an internal name.
@@ -136,7 +140,7 @@ impl CompletionEngine {
                 if let Some(resolved) = resolve_var_init_expr(
                     &init_expr,
                     &locals_snapshot,
-                    ctx.enclosing_class.as_ref(),
+                    ctx.enclosing_internal_name.as_ref(),
                     &resolver,
                     &ctx.existing_imports,
                     ctx.enclosing_package.as_deref(),
@@ -152,7 +156,7 @@ impl CompletionEngine {
 fn resolve_var_init_expr(
     expr: &str,
     locals: &[LocalVar],
-    enclosing: Option<&Arc<str>>,
+    enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
     existing_imports: &[String],
     enclosing_package: Option<&str>,
@@ -179,16 +183,35 @@ fn resolve_var_init_expr(
         let mut current: Option<Arc<str>> = None;
         for (i, seg) in chain.iter().enumerate() {
             if i == 0 {
-                // Try local var first
-                current = resolver.resolve(&seg.name, locals, enclosing);
-                // If not found, try simple name resolution
-                if current.is_none() {
-                    current = crate::completion::import_utils::resolve_simple_to_internal(
+                if seg.arg_count.is_some() {
+                    let recv_internal = enclosing_internal?;
+                    let arg_types: Vec<Arc<str>> = seg
+                        .arg_texts
+                        .iter()
+                        .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
+                        .collect();
+                    let arg_types_ref: &[Arc<str>] = if arg_types.len() == seg.arg_texts.len() {
+                        &arg_types
+                    } else {
+                        &[]
+                    };
+                    current = resolver.resolve_method_return(
+                        recv_internal.as_ref(),
                         &seg.name,
-                        existing_imports,
-                        enclosing_package,
-                        index,
+                        seg.arg_count.unwrap_or(-1),
+                        arg_types_ref,
                     );
+                } else {
+                    // variable or class name lookup — unchanged
+                    current = resolver.resolve(&seg.name, locals, enclosing_internal);
+                    if current.is_none() {
+                        current = resolve_simple_to_internal(
+                            &seg.name,
+                            existing_imports,
+                            enclosing_package,
+                            index,
+                        );
+                    }
                 }
             } else {
                 let recv = current.as_deref()?;
@@ -207,7 +230,7 @@ fn resolve_var_init_expr(
                 let arg_types: Vec<Arc<str>> = seg
                     .arg_texts
                     .iter()
-                    .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing))
+                    .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
                     .collect();
                 // Only use type matching if all args were successfully resolved
                 let arg_types_ref: &[Arc<str>] = if arg_types.len() == seg.arg_texts.len() {
@@ -780,6 +803,186 @@ mod tests {
             "Main2",
             "long arg should select Main2 overload, got: {}",
             str_var.type_internal
+        );
+    }
+
+    #[test]
+    fn test_var_bare_method_call_resolved() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Main"),
+            internal_name: Arc::from("Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("getString"),
+                descriptor: Arc::from("()Ljava/lang/String;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("java/lang/String")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "str".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("str"),
+                type_internal: Arc::from("var"),
+                init_expr: Some("getString()".to_string()),
+            }],
+            Some(Arc::from("Main")),
+            Some(Arc::from("Main")), // enclosing_internal_name
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        let str_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "str")
+            .unwrap();
+        assert_eq!(
+            str_var.type_internal.as_ref(),
+            "java/lang/String",
+            "var str should resolve to String via bare method call return type"
+        );
+    }
+
+    #[test]
+    fn test_resolve_method_return_walks_mro() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        // Parent has the method
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Parent"),
+                internal_name: Arc::from("Parent"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getValue"),
+                    descriptor: Arc::from("()Ljava/lang/String;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("java/lang/String")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Child"),
+                internal_name: Arc::from("Child"),
+                super_name: Some("Parent".to_string()),
+                interfaces: vec![],
+                methods: vec![], // Child has no methods of its own
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let resolver = TypeResolver::new(&idx);
+        let result = resolver.resolve_method_return("Child", "getValue", 0, &[]);
+        assert_eq!(
+            result.as_deref(),
+            Some("java/lang/String"),
+            "should find getValue() in Parent via MRO"
+        );
+    }
+
+    #[test]
+    fn test_complete_member_after_bare_method_call() {
+        use crate::completion::context::{CompletionContext, CursorLocation};
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main"),
+                internal_name: Arc::from("Main"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getMain2"),
+                    descriptor: Arc::from("()LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("Main2"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let engine = CompletionEngine::new();
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "getMain2()".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("Main")), // enclosing_internal_name
+            None,
+            vec![],
+        );
+
+        let results = engine.complete(ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "func"),
+            "getMain2().| should complete with func from Main2: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
     }
 }

@@ -74,6 +74,78 @@ impl<'idx> TypeResolver<'idx> {
         None
     }
 
+    // pub fn resolve_method_return(
+    //     &self,
+    //     receiver_internal: &str,
+    //     method_name: &str,
+    //     arg_count: i32,
+    //     arg_types: &[Arc<str>],
+    // ) -> Option<Arc<str>> {
+    //     let class = self.index.get_class(receiver_internal)?;
+    //     let candidates: Vec<&MethodSummary> = class
+    //         .methods
+    //         .iter()
+    //         .filter(|m| m.name.as_ref() == method_name)
+    //         .collect();
+    //
+    //     // // TODO: remove debug output
+    //     // eprintln!(
+    //     //     "resolve_method_return: receiver={} method={} arg_count={} arg_types={:?}",
+    //     //     receiver_internal, method_name, arg_count, arg_types
+    //     // );
+    //     // for c in &candidates {
+    //     //     eprintln!(
+    //     //         "  candidate: desc={} params_match={}",
+    //     //         c.descriptor,
+    //     //         if !arg_types.is_empty() {
+    //     //             params_match(&c.descriptor, arg_types)
+    //     //         } else {
+    //     //             false
+    //     //         }
+    //     //     );
+    //     // }
+    //
+    //     let method = match candidates.len() {
+    //         0 => return None,
+    //         1 => candidates[0],
+    //         _ => {
+    //             if arg_count >= 0 {
+    //                 // Filter by param count first
+    //                 let by_count: Vec<&MethodSummary> = candidates
+    //                     .iter()
+    //                     .copied()
+    //                     .filter(|m| count_params(&m.descriptor) == arg_count as usize)
+    //                     .collect();
+    //
+    //                 match by_count.len() {
+    //                     0 => candidates[0],
+    //                     1 => by_count[0],
+    //                     _ => {
+    //                         // Multiple overloads with same param count → match by type
+    //                         if !arg_types.is_empty() {
+    //                             by_count
+    //                                 .iter()
+    //                                 .copied()
+    //                                 .find(|m| params_match(&m.descriptor, arg_types))
+    //                                 .unwrap_or(by_count[0])
+    //                         } else {
+    //                             by_count[0]
+    //                         }
+    //                     }
+    //                 }
+    //             } else {
+    //                 candidates[0]
+    //             }
+    //         }
+    //     };
+    //
+    //     let sig = method
+    //         .generic_signature
+    //         .as_deref()
+    //         .unwrap_or(&method.descriptor);
+    //     extract_return_internal_name(sig)
+    // }
+
     pub fn resolve_method_return(
         &self,
         receiver_internal: &str,
@@ -81,85 +153,80 @@ impl<'idx> TypeResolver<'idx> {
         arg_count: i32,
         arg_types: &[Arc<str>],
     ) -> Option<Arc<str>> {
-        let class = self.index.get_class(receiver_internal)?;
-        let candidates: Vec<&MethodSummary> = class
-            .methods
-            .iter()
-            .filter(|m| m.name.as_ref() == method_name)
-            .collect();
+        // Walk MRO to find the method
+        for class in self.index.mro(receiver_internal) {
+            let candidates: Vec<&MethodSummary> = class
+                .methods
+                .iter()
+                .filter(|m| m.name.as_ref() == method_name)
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            // Found in this class — resolve overload and return
+            let method = Self::select_overload(&candidates, arg_count, arg_types);
+            let sig = method
+                .generic_signature
+                .as_deref()
+                .unwrap_or(&method.descriptor);
+            return extract_return_internal_name(sig);
+        }
+        None
+    }
 
-        // // TODO: remove debug output
-        // eprintln!(
-        //     "resolve_method_return: receiver={} method={} arg_count={} arg_types={:?}",
-        //     receiver_internal, method_name, arg_count, arg_types
-        // );
-        // for c in &candidates {
-        //     eprintln!(
-        //         "  candidate: desc={} params_match={}",
-        //         c.descriptor,
-        //         if !arg_types.is_empty() {
-        //             params_match(&c.descriptor, arg_types)
-        //         } else {
-        //             false
-        //         }
-        //     );
-        // }
-
-        let method = match candidates.len() {
-            0 => return None,
+    fn select_overload<'a>(
+        candidates: &[&'a MethodSummary],
+        arg_count: i32,
+        arg_types: &[Arc<str>],
+    ) -> &'a MethodSummary {
+        match candidates.len() {
             1 => candidates[0],
             _ => {
                 if arg_count >= 0 {
-                    // Filter by param count first
                     let by_count: Vec<&MethodSummary> = candidates
                         .iter()
                         .copied()
                         .filter(|m| count_params(&m.descriptor) == arg_count as usize)
                         .collect();
-
                     match by_count.len() {
                         0 => candidates[0],
                         1 => by_count[0],
-                        _ => {
-                            // Multiple overloads with same param count → match by type
-                            if !arg_types.is_empty() {
-                                by_count
-                                    .iter()
-                                    .copied()
-                                    .find(|m| params_match(&m.descriptor, arg_types))
-                                    .unwrap_or(by_count[0])
-                            } else {
-                                by_count[0]
-                            }
-                        }
+                        _ if !arg_types.is_empty() => by_count
+                            .iter()
+                            .copied()
+                            .find(|m| params_match(&m.descriptor, arg_types))
+                            .unwrap_or(by_count[0]),
+                        _ => by_count[0],
                     }
                 } else {
                     candidates[0]
                 }
             }
-        };
-
-        let sig = method
-            .generic_signature
-            .as_deref()
-            .unwrap_or(&method.descriptor);
-        extract_return_internal_name(sig)
+        }
     }
 
     pub fn resolve_chain(
         &self,
         chain: &[ChainSegment],
         locals: &[LocalVar],
-        enclosing: Option<&Arc<str>>,
+        enclosing_internal_name: Option<&Arc<str>>,
     ) -> Option<Arc<str>> {
         let mut current_type: Option<Arc<str>> = None;
-
         for (i, seg) in chain.iter().enumerate() {
             if i == 0 {
-                // First section: Variable name or class name
-                current_type = self.resolve(&seg.name, locals, enclosing);
+                if seg.arg_count.is_some() {
+                    // Bare method call: receiver is the enclosing class
+                    let recv = enclosing_internal_name?;
+                    current_type = self.resolve_method_return(
+                        recv.as_ref(),
+                        &seg.name,
+                        seg.arg_count.unwrap_or(-1),
+                        &[],
+                    );
+                } else {
+                    current_type = self.resolve(&seg.name, locals, enclosing_internal_name);
+                }
             } else {
-                // Subsequent section: Method call
                 let receiver = current_type.as_deref()?;
                 current_type = self.resolve_method_return(
                     receiver,
@@ -169,7 +236,6 @@ impl<'idx> TypeResolver<'idx> {
                 );
             }
         }
-
         current_type
     }
 }
@@ -605,5 +671,67 @@ mod tests {
             "Ljava/util/List;",
             "java/lang/String"
         ));
+    }
+
+    #[test]
+    fn test_resolve_chain_bare_method_call() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        // Main has getMain2() returning Main2
+        // Main2 has func()
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main"),
+                internal_name: Arc::from("Main"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getMain2"),
+                    descriptor: Arc::from("()LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("Main2"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let resolver = TypeResolver::new(&idx);
+        let enclosing = Arc::from("Main");
+
+        // "getMain2()" → chain = [method("getMain2", 0)]
+        let chain = crate::completion::engine::parse_chain_from_expr("getMain2()");
+        let result = resolver.resolve_chain(&chain, &[], Some(&enclosing));
+        assert_eq!(
+            result.as_deref(),
+            Some("Main2"),
+            "bare method call should resolve via enclosing class"
+        );
     }
 }

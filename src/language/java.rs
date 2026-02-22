@@ -72,7 +72,9 @@ impl<'s> JavaContextExtractor<'s> {
 
         let (location, query) = self.determine_location(cursor_node, trigger_char);
         let local_variables = self.extract_locals(root, cursor_node);
-        let enclosing_class = self.extract_enclosing_class(cursor_node);
+        let enclosing_class = self
+            .extract_enclosing_class(cursor_node)
+            .or_else(|| self.extract_enclosing_class_by_offset(root));
         let enclosing_package = self.extract_package(root);
 
         // Construct the internal name using the package name + simple class name
@@ -637,6 +639,29 @@ impl<'s> JavaContextExtractor<'s> {
         let class_node = cursor_node.and_then(|n| find_ancestor(n, "class_declaration"))?;
         let name_node = class_node.child_by_field_name("name")?;
         Some(Arc::from(self.node_text(name_node)))
+    }
+
+    fn extract_enclosing_class_by_offset(&self, root: Node) -> Option<Arc<str>> {
+        // Find the innermost class_declaration containing self.offset
+        let mut result: Option<Arc<str>> = None;
+        fn dfs<'a>(node: Node<'a>, offset: usize, bytes: &[u8], result: &mut Option<Arc<str>>) {
+            if node.start_byte() > offset || node.end_byte() <= offset {
+                return;
+            }
+            if node.kind() == "class_declaration"
+                && let Some(name_node) = node.child_by_field_name("name")
+                && let Ok(name) = name_node.utf8_text(bytes)
+            {
+                *result = Some(Arc::from(name));
+            }
+
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                dfs(child, offset, bytes, result);
+            }
+        }
+        dfs(root, self.offset, self.bytes, &mut result);
+        result
     }
 
     fn extract_imports(&self, root: Node) -> Vec<String> {
@@ -1958,5 +1983,39 @@ mod tests {
         // x should not appear (type unknown), but should not crash
         // The important thing is no panic
         let _ = ctx;
+    }
+
+    #[test]
+    fn test_bare_method_call_no_semicolon() {
+        // getMain2().| without semicolon
+        let src = indoc::indoc! {r#"
+        class Main {
+            public static void main(String[] args) {
+                getMain2().
+            }
+            private static Object getMain2() { return null; }
+        }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("getMain2().").map(|c| (i as u32, c as u32 + 11)))
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, member_prefix, .. }
+                if receiver_expr == "getMain2()" && member_prefix.is_empty()
+            ),
+            "getMain2().| should be MemberAccess, got {:?}",
+            ctx.location
+        );
+        // enclosing_internal_name must be set for bare method call resolution
+        assert!(
+            ctx.enclosing_internal_name.is_some(),
+            "enclosing_internal_name should be set even without semicolon"
+        );
+        assert_eq!(ctx.enclosing_class.as_deref(), Some("Main"));
     }
 }
