@@ -4,5 +4,6 @@ Extreme fast Java LSP, built in Rust
 
 ## Feature Matrix
 
-- Analyze Jar/Codebase
+- Analyze Jar, Codebase and JDK builtins
 - Code completion
+- Java 8 to 25 support
