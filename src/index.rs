@@ -275,8 +275,8 @@ impl GlobalIndex {
         }
     }
 
-    /// 并行解析多个 jar，批量写入索引
-    /// 比逐个调用 add_classes 快，因为只重建一次 fuzzy
+    /// Parse multiple JARs in parallel and write them to the index in batches
+    /// Faster than calling add_classes one by one because it only rebuilds the class once. (fuzzy)
     pub fn add_classes_bulk(&mut self, batch: Vec<Vec<ClassMetadata>>) {
         let flat: Vec<ClassMetadata> = batch.into_iter().flatten().collect();
         self.add_classes(flat);
@@ -364,6 +364,16 @@ impl GlobalIndex {
         result
     }
 
+    /// 先按内部名精确查，失败时按简单名回退（处理 source 解析时只有简单名的继承关系）
+    pub fn resolve_class_name(&self, name: &str) -> Option<Arc<ClassMetadata>> {
+        if let Some(c) = self.get_class(name) {
+            return Some(c);
+        }
+        // 简单名回退：取最后一段（"extends Parent" 修复后不再需要，但保留防御）
+        let simple = name.rsplit('/').next().unwrap_or(name);
+        self.get_classes_by_simple_name(simple).into_iter().next()
+    }
+
     pub fn resolve_imports(&self, imports: &[String]) -> Vec<Arc<ClassMetadata>> {
         let mut result = Vec::new();
         for import in imports {
@@ -409,7 +419,7 @@ impl GlobalIndex {
         let mut queue: std::collections::VecDeque<String> = Default::default();
         queue.push_back(class_internal.to_string());
         while let Some(internal) = queue.pop_front() {
-            let meta = match self.get_class(&internal) {
+            let meta = match self.resolve_class_name(&internal) {
                 Some(m) => m,
                 None => continue, // not in index (e.g. java/lang/Object without JDK)
             };
@@ -465,7 +475,7 @@ impl GlobalIndex {
             if !seen.insert(internal.clone()) {
                 continue; // avoid cycles (e.g. broken index)
             }
-            let meta = match self.get_class(&internal) {
+            let meta = match self.resolve_class_name(&internal) {
                 Some(m) => m,
                 None => continue,
             };
@@ -1096,6 +1106,41 @@ class Main {
             resolved.iter().any(|c| c.name.as_ref() == "RandomClass"),
             "wildcard import should resolve RandomClass: {:?}",
             resolved.iter().map(|c| c.name.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_mro_walks_superclass() {
+        let mut idx = GlobalIndex::new();
+        let mut parent = make_class("com/example", "Parent", ClassOrigin::Unknown);
+        parent.methods.push(make_method("parentMethod", "()V"));
+        let mut child = make_class("com/example", "Child", ClassOrigin::Unknown);
+        child.super_name = Some("com/example/Parent".to_string());
+        child.methods.push(make_method("childMethod", "()V"));
+        idx.add_classes(vec![parent, child]);
+
+        let (methods, _) = idx.collect_inherited_members("com/example/Child");
+        assert!(methods.iter().any(|m| m.name.as_ref() == "childMethod"));
+        assert!(
+            methods.iter().any(|m| m.name.as_ref() == "parentMethod"),
+            "parentMethod should be inherited"
+        );
+    }
+
+    #[test]
+    fn test_mro_simple_name_fallback_for_interface() {
+        let mut idx = GlobalIndex::new();
+        let mut iface = make_class("java/lang", "Runnable", ClassOrigin::Unknown);
+        iface.methods.push(make_method("run", "()V"));
+        let mut child = make_class("com/example", "MyThread", ClassOrigin::Unknown);
+        // source 解析只有简单名
+        child.interfaces = vec!["Runnable".to_string()];
+        idx.add_classes(vec![iface, child]);
+
+        let (methods, _) = idx.collect_inherited_members("com/example/MyThread");
+        assert!(
+            methods.iter().any(|m| m.name.as_ref() == "run"),
+            "run() from Runnable should be inherited via simple-name fallback"
         );
     }
 }

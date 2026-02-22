@@ -245,6 +245,11 @@ fn resolve_receiver_type(
         return resolve_simple_name_to_internal(class_name, ctx, index);
     }
 
+    // function call: "getMain2()" / "getMain2(arg1, arg2)"
+    if let Some(internal) = resolve_method_call_receiver(expr, ctx, index) {
+        return Some(internal);
+    }
+
     // local variable
     if let Some(lv) = ctx
         .local_variables
@@ -284,6 +289,35 @@ fn extract_constructor_class(expr: &str) -> Option<&str> {
     } else {
         Some(simple)
     }
+}
+
+/// 解析 "someMethod()" / "someMethod(args)" 形式的 receiver 表达式
+/// 找 enclosing class 的 MRO 里的该方法，取其返回类型
+fn resolve_method_call_receiver(
+    expr: &str,
+    ctx: &CompletionContext,
+    index: &mut GlobalIndex,
+) -> Option<Arc<str>> {
+    // 必须含 '(' 且以 ')' 结尾
+    let paren = expr.find('(')?;
+    if !expr.ends_with(')') {
+        return None;
+    }
+    let method_name = expr[..paren].trim();
+    if method_name.is_empty() || method_name.contains('.') || method_name.contains(' ') {
+        return None;
+    }
+    // arg count（简单估算，不需要精确）
+    let args_text = &expr[paren + 1..expr.len() - 1];
+    let arg_count = if args_text.trim().is_empty() {
+        0i32
+    } else {
+        args_text.split(',').count() as i32
+    };
+
+    let enclosing = ctx.enclosing_internal_name.as_deref()?;
+    let resolver = crate::completion::type_resolver::TypeResolver::new(index);
+    resolver.resolve_method_return(enclosing, method_name, arg_count, &[])
 }
 
 /// Resolves simple class names to internal names
@@ -1168,5 +1202,202 @@ public class RandomClass {
             .find(|v| v.name.as_ref() == "cl")
             .unwrap();
         assert_eq!(cl.type_internal.as_ref(), "RandomClass");
+    }
+
+    #[test]
+    fn test_bare_method_call_receiver_resolved() {
+        // getMain2()| → Main2 的方法应出现
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main"),
+                internal_name: Arc::from("Main"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getMain2"),
+                    descriptor: Arc::from("()LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("Main2"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "getMain2()".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("Main")), // enclosing_internal_name
+            None,
+            vec![],
+        );
+
+        let results = MemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "func"),
+            "getMain2().| should show func from Main2, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_new_expr_receiver_resolved_via_global_index() {
+        // new Main2().| → Main2 的方法应出现
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Main2"),
+            internal_name: Arc::from("Main2"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("func"),
+                descriptor: Arc::from("()V"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "new Main2()".to_string(),
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        let results = MemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "func"),
+            "new Main2().| should show func, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_inherited_method_visible_on_subclass() {
+        // m2: Main2 extends BaseClass，funcA 应该出现
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("BaseClass"),
+                internal_name: Arc::from("BaseClass"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("funcA"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("Main2"),
+                super_name: Some("BaseClass".to_string()), // 正确的简单名
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "m2".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("m2"),
+                type_internal: Arc::from("Main2"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        let results = MemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "func"),
+            "func should be visible on Main2"
+        );
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "funcA"),
+            "funcA should be inherited from BaseClass, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
     }
 }

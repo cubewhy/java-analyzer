@@ -113,7 +113,12 @@ fn parse_java_class(
     // super class
     let super_name = node
         .child_by_field_name("superclass")
-        .map(|n| node_text(n, bytes).to_string());
+        .and_then(|superclass_node| {
+            superclass_node
+                .named_children(&mut superclass_node.walk())
+                .find(|c| c.kind() == "type_identifier")
+                .map(|c| node_text(c, bytes).to_string())
+        });
 
     // interfaces
     let interfaces = node
@@ -813,5 +818,39 @@ public class Main {
                 .any(|m| m.name.as_ref() == "randomFunction"),
             "randomFunction should be indexed"
         );
+    }
+
+    #[test]
+    fn test_super_name_no_extends_keyword() {
+        let src = "public class Child extends Parent implements Runnable, Serializable {}";
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let child = classes.iter().find(|c| c.name.as_ref() == "Child").unwrap();
+        assert_eq!(
+            child.super_name.as_deref(),
+            Some("Parent"),
+            "super_name should be 'Parent', not 'extends Parent'"
+        );
+        assert!(
+            child.interfaces.contains(&"Runnable".to_string()),
+            "interfaces should contain Runnable"
+        );
+        assert!(
+            child.interfaces.contains(&"Serializable".to_string()),
+            "interfaces should contain Serializable"
+        );
+    }
+
+    #[test]
+    fn test_super_name_strips_extends_keyword() {
+        let src = "public class Child extends Parent implements Runnable {}";
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let child = classes.iter().find(|c| c.name.as_ref() == "Child").unwrap();
+        assert_eq!(
+            child.super_name.as_deref(),
+            Some("Parent"),
+            "super_name should be 'Parent' not 'extends Parent', got {:?}",
+            child.super_name
+        );
+        assert!(child.interfaces.contains(&"Runnable".to_string()));
     }
 }
