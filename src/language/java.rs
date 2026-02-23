@@ -6,6 +6,7 @@ use crate::completion::{
     context::{CursorLocation, LocalVar},
 };
 use crate::language::ts_utils::find_method_by_offset;
+use ropey::Rope;
 use std::sync::Arc;
 use tracing::debug;
 use tree_sitter::{Node, Parser, Query};
@@ -64,6 +65,7 @@ struct JavaContextExtractor<'s> {
     source: &'s str,
     bytes: &'s [u8],
     offset: usize,
+    rope: Rope,
 }
 
 impl<'s> JavaContextExtractor<'s> {
@@ -72,6 +74,7 @@ impl<'s> JavaContextExtractor<'s> {
             source,
             bytes: source.as_bytes(),
             offset,
+            rope: Rope::from_str(source),
         }
     }
 
@@ -261,11 +264,11 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     /// The content from the beginning of the current line to the cursor (after trimming).
-    // Use `rfind('\n')` instead of `lines().last()` to avoid Rust discarding trailing blank lines.
     fn current_line_prefix_trimmed(&self) -> &str {
-        let before = &self.source[..self.offset];
-        let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        before[line_start..].trim()
+        // rope.byte_to_line 是 O(log n)
+        let line_idx = self.rope.byte_to_line(self.offset);
+        let line_byte_start = self.rope.line_to_byte(line_idx);
+        self.source[line_byte_start..self.offset].trim()
     }
 
     fn maybe_member_access_from_text(&self, text: String) -> (CursorLocation, String) {
@@ -959,7 +962,7 @@ fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> 
 pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
     let before = &source[..offset];
 
-    // Block comment detection
+    // Determinate block comment
     let last_open = before.rfind("/*");
     let last_close = before.rfind("*/");
     if let Some(open) = last_open {
@@ -970,9 +973,10 @@ pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
         }
     }
 
-    // Single-line comment detection: Only view the line where the cursor is located
-    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    is_in_line_comment(&before[line_start..])
+    let rope = Rope::from_str(source);
+    let line_idx = rope.byte_to_line(offset.min(source.len().saturating_sub(1)));
+    let line_byte_start = rope.line_to_byte(line_idx);
+    is_in_line_comment(&source[line_byte_start..offset])
 }
 
 /// Check if a line of text (the part before the cursor) is in a comment.
@@ -1008,30 +1012,30 @@ fn is_in_line_comment(line: &str) -> bool {
 }
 
 pub fn line_col_to_offset(source: &str, line: u32, character: u32) -> Option<usize> {
-    let mut current_line = 0u32;
-    let mut offset = 0usize;
-    for ch in source.chars() {
-        if current_line == line {
-            break;
-        }
-        if ch == '\n' {
-            current_line += 1;
-        }
-        offset += ch.len_utf8();
-    }
-    if current_line != line {
+    let rope = Rope::from_str(source);
+    let line = line as usize;
+    let character = character as usize;
+
+    if line >= rope.len_lines() {
         return None;
     }
-    let mut char_count = 0u32;
-    let mut char_offset = 0usize;
-    for ch in source[offset..].chars() {
-        if char_count >= character {
+
+    let line_byte_start = rope.line_to_byte(line);
+    let line_slice = rope.line(line);
+
+    // 按 UTF-16 单元累积，找到对应的行内字节偏移
+    let mut utf16_units = 0usize;
+    let mut byte_offset_in_line = 0usize;
+
+    for ch in line_slice.chars() {
+        if utf16_units >= character {
             break;
         }
-        char_count += ch.len_utf16() as u32;
-        char_offset += ch.len_utf8();
+        utf16_units += ch.len_utf16();
+        byte_offset_in_line += ch.len_utf8();
     }
-    Some(offset + char_offset)
+
+    Some(line_byte_start + byte_offset_in_line)
 }
 
 pub fn java_type_to_internal(ty: &str) -> String {
@@ -2086,5 +2090,31 @@ mod tests {
             "cursor inside comment should be Unknown, got {:?}",
             ctx.location
         );
+    }
+
+    #[test]
+    fn test_line_col_to_offset_multibyte() {
+        // 含 CJK 字符（UTF-8 3字节，UTF-16 1单元）
+        let src = "你好\nworld";
+        // line=0, character=2 → 第3个UTF-16单元 = 6字节
+        assert_eq!(line_col_to_offset(src, 0, 2), Some(6));
+        // line=1, character=3 → "wor" = 3字节
+        assert_eq!(line_col_to_offset(src, 1, 3), Some(6 + 1 + 3)); // \n=1, wor=3
+    }
+
+    #[test]
+    fn test_line_col_to_offset_out_of_bounds() {
+        let src = "hello\nworld";
+        assert_eq!(line_col_to_offset(src, 5, 0), None);
+    }
+
+    #[test]
+    fn test_current_line_prefix_uses_rope() {
+        // 验证多行文件中 current_line_prefix_trimmed 正确定位
+        let src = "class A {\n    void f() {\n        items\n    }\n}\n";
+        let offset = line_col_to_offset(src, 2, 13).unwrap(); // 末尾 's' 之后
+        let extractor = JavaContextExtractor::new(src, offset);
+        let prefix = extractor.current_line_prefix_trimmed();
+        assert_eq!(prefix, "items");
     }
 }
