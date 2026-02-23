@@ -32,8 +32,15 @@ impl CompletionProvider for ConstructorProvider {
             _ => return vec![],
         };
 
+        // When prefix is empty but expected_type exists, search for expected_type first
+        let search_prefix = if class_prefix.is_empty() {
+            expected_type.unwrap_or("")
+        } else {
+            class_prefix
+        };
+
         index
-            .fuzzy_search_classes(class_prefix, 50)
+            .fuzzy_search_classes(search_prefix, 50)
             .into_iter()
             .flat_map(|meta| {
                 let fqn = fqn_of_meta(&meta);
