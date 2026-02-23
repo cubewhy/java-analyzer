@@ -240,11 +240,6 @@ impl<'s> JavaContextExtractor<'s> {
         let sentinel_offset = injected_source.find(SENTINEL)?;
         let sentinel_end = sentinel_offset + SENTINEL.len();
 
-        debug!(
-            injected = &injected_source[..injected_source.len().min(200)],
-            sentinel_offset, "injection reparse"
-        );
-
         let mut parser = self.make_parser();
         let new_tree = parser.parse(&injected_source, None)?;
         let new_root = new_tree.root_node();
@@ -781,11 +776,10 @@ impl<'s> JavaContextExtractor<'s> {
                                     && self.source[next_node.start_byte()..next_node.end_byte()]
                                         .trim_start()
                                         .starts_with('(')
+                                    && let Some(m) = self.parse_misread_method(bc, *next_node)
                                 {
-                                    if let Some(m) = self.parse_misread_method(bc, *next_node) {
-                                        members.push(m);
-                                        i += 1; // skip the ERROR node too
-                                    }
+                                    members.push(m);
+                                    i += 1; // skip the ERROR node too
                                 }
                             }
                             i += 1;
@@ -1093,12 +1087,8 @@ impl<'s> JavaContextExtractor<'s> {
 
 fn find_top_error_node(root: Node) -> Option<Node> {
     let mut cursor = root.walk();
-    for child in root.children(&mut cursor) {
-        if child.kind() == "ERROR" {
-            return Some(child);
-        }
-    }
-    None
+    root.children(&mut cursor)
+        .find(|&child| child.kind() == "ERROR")
 }
 
 fn build_internal_name(package: &Option<Arc<str>>, class: &Option<Arc<str>>) -> Option<Arc<str>> {
@@ -2959,31 +2949,6 @@ mod tests {
             .set_language(&tree_sitter_java::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(src, None).unwrap();
-
-        fn find_block<'a>(
-            node: tree_sitter::Node<'a>,
-            name: &'a str,
-        ) -> Option<tree_sitter::Node<'a>> {
-            if node.kind() == "method_declaration" {
-                let mut c = node.walk();
-                for child in node.children(&mut c) {
-                    if child.kind() == "identifier" {
-                        if child.utf8_text(name.as_bytes()).unwrap_or("") == name
-                            || node.utf8_text(name.as_bytes()).is_ok()
-                        {
-                            // just return the block
-                        }
-                    }
-                }
-            }
-            let mut c = node.walk();
-            for child in node.children(&mut c) {
-                if let Some(n) = find_block(child, name) {
-                    return Some(n);
-                }
-            }
-            None
-        }
 
         // Just print everything under agentmain's block
         fn print_flat(node: tree_sitter::Node, src: &str, out: &mut String) {

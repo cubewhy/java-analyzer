@@ -93,18 +93,31 @@ impl CompletionEngine {
         {
             let resolver = TypeResolver::new(index);
             let chain = parse_chain_from_expr(receiver_expr);
-            let resolved = if chain.is_empty() {
-                resolver.resolve(
+            let resolved = if looks_like_array_access(receiver_expr) {
+                resolve_array_access_type(
                     receiver_expr,
                     &ctx.local_variables,
                     ctx.enclosing_internal_name.as_ref(),
+                    &resolver,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                    index,
                 )
             } else {
-                resolver.resolve_chain(
-                    &chain,
-                    &ctx.local_variables,
-                    ctx.enclosing_internal_name.as_ref(),
-                )
+                let chain = parse_chain_from_expr(receiver_expr);
+                if chain.is_empty() {
+                    resolver.resolve(
+                        receiver_expr,
+                        &ctx.local_variables,
+                        ctx.enclosing_internal_name.as_ref(),
+                    )
+                } else {
+                    resolver.resolve_chain(
+                        &chain,
+                        &ctx.local_variables,
+                        ctx.enclosing_internal_name.as_ref(),
+                    )
+                }
             };
 
             // If the result is a simple name (without '/'), it needs to be further parsed into an internal name.
@@ -157,6 +170,32 @@ impl CompletionEngine {
     }
 }
 
+fn looks_like_array_access(expr: &str) -> bool {
+    expr.contains('[') && expr.trim_end().ends_with(']')
+}
+
+fn resolve_array_access_type(
+    expr: &str,
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    existing_imports: &[String],
+    enclosing_package: Option<&str>,
+    index: &GlobalIndex,
+) -> Option<Arc<str>> {
+    let bracket = expr.rfind('[')?;
+    if !expr.trim_end().ends_with(']') {
+        return None;
+    }
+    let array_expr = expr[..bracket].trim();
+    if array_expr.is_empty() {
+        return None;
+    }
+    // resolve the array variable's type
+    let array_type = resolver.resolve(array_expr, locals, enclosing_internal)?;
+    element_type_of_array(&array_type)
+}
+
 fn resolve_var_init_expr(
     expr: &str,
     locals: &[LocalVar],
@@ -177,6 +216,19 @@ fn resolve_var_init_expr(
             enclosing_package,
             index,
         );
+    }
+
+    // Array element access: "arr[idx]" → element type of arr
+    if let Some(array_type) = resolve_array_access_type(
+        expr,
+        locals,
+        enclosing_internal,
+        resolver,
+        existing_imports,
+        enclosing_package,
+        index,
+    ) {
+        return Some(array_type);
     }
 
     // Method call chain: "receiver.method(args)" or "method(args)"
@@ -360,6 +412,36 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
         }
     }
     segments
+}
+
+pub(crate) fn element_type_of_array(array_internal: &str) -> Option<Arc<str>> {
+    // JVM descriptor: "[Ljava/lang/String;" → "java/lang/String"
+    if let Some(stripped) = array_internal.strip_prefix('[') {
+        return match stripped.chars().next()? {
+            'L' => {
+                let inner = stripped[1..].split(';').next()?;
+                let simple = inner.split('<').next()?;
+                Some(Arc::from(simple))
+            }
+            '[' => Some(Arc::from(stripped)), // multi-dim array
+            _ => None,                        // primitive
+        };
+    }
+    // Source form: "String[]" or "java/lang/String[]"
+    if let Some(base) = array_internal.strip_suffix("[]") {
+        let base = base.trim();
+        if base.is_empty() {
+            return None;
+        }
+        match base {
+            "int" | "long" | "short" | "byte" | "char" | "float" | "double" | "boolean" => {
+                return None;
+            }
+            _ => {}
+        }
+        return Some(Arc::from(base));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -986,6 +1068,192 @@ mod tests {
             results.iter().any(|c| c.label.as_ref() == "func"),
             "getMain2().| should complete with func from Main2: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_var_array_element_type_resolved() {
+        use crate::completion::context::{CursorLocation, LocalVar};
+        use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "a".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("args"),
+                    type_internal: Arc::from("String[]"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("a"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("args[0]".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        let a_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "a")
+            .unwrap();
+        assert_eq!(
+            a_var.type_internal.as_ref(),
+            "String",
+            "var a = args[0] should resolve to String, got: {}",
+            a_var.type_internal
+        );
+    }
+
+    #[test]
+    fn test_var_primitive_array_element_not_resolved() {
+        // int[] — element type is primitive, no member completion, should stay unresolved
+        let mut idx = GlobalIndex::new();
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "x".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("nums"),
+                    type_internal: Arc::from("int[]"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("x"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("nums[0]".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        let x_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "x")
+            .unwrap();
+        // primitive element — should not crash, type stays unresolved (still "var" or unchanged)
+        assert_ne!(
+            x_var.type_internal.as_ref(),
+            "int[]",
+            "element type of int[] should not be int[]"
+        );
+    }
+
+    #[test]
+    fn test_enrich_context_array_access_receiver() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("length"),
+                descriptor: Arc::from("()I"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "b[0]".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("b"),
+                type_internal: Arc::from("String[]"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+            assert_eq!(
+                receiver_type.as_deref(),
+                Some("java/lang/String"),
+                "b[0] should resolve to java/lang/String"
+            );
+        }
+    }
+
+    #[test]
+    fn test_element_type_source_form() {
+        assert_eq!(element_type_of_array("String[]").as_deref(), Some("String"));
+        assert_eq!(
+            element_type_of_array("java/lang/String[]").as_deref(),
+            Some("java/lang/String")
+        );
+        assert_eq!(element_type_of_array("int[]"), None);
+        assert_eq!(element_type_of_array("double[]"), None);
+    }
+
+    #[test]
+    fn test_element_type_descriptor_form() {
+        assert_eq!(
+            element_type_of_array("[Ljava/lang/String;").as_deref(),
+            Some("java/lang/String")
+        );
+        assert_eq!(element_type_of_array("[I"), None);
+        assert_eq!(
+            element_type_of_array("[[Ljava/lang/String;").as_deref(),
+            Some("[Ljava/lang/String;")
         );
     }
 }
