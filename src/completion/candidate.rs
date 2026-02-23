@@ -30,6 +30,7 @@ pub enum CandidateKind {
         defining_class: Arc<str>,
     },
     Keyword,
+    Annotation,
 }
 
 #[derive(Debug, Clone, Serialize)]

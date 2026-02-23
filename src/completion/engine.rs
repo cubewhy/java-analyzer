@@ -14,6 +14,7 @@ use super::{
 };
 use crate::completion::LocalVar;
 use crate::completion::import_utils::resolve_simple_to_internal;
+use crate::completion::providers::annotation::AnnotationProvider;
 use crate::completion::providers::expression::ExpressionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
@@ -38,7 +39,8 @@ impl CompletionEngine {
                 Box::new(ExpressionProvider), // expression/type position: class name
                 Box::new(ImportProvider),     // import statement
                 Box::new(KeywordProvider),    // Keyword (triggered only upon input)
-                Box::new(SnippetProvider),    // Snippets
+                Box::new(AnnotationProvider),
+                Box::new(SnippetProvider), // Snippets
             ],
         }
     }

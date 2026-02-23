@@ -1,6 +1,7 @@
 use super::{candidate::CompletionCandidate, context::CompletionContext};
 use crate::index::GlobalIndex;
 
+pub mod annotation;
 pub mod constructor;
 pub mod expression;
 pub mod import;

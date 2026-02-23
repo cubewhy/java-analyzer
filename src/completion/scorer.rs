@@ -124,6 +124,7 @@ impl Scorer {
             ClassName => 8.0,
             Package => 6.0,
             Keyword => 5.0,
+            Annotation => 3.0,
             Snippet => 2.0,
         }
     }
