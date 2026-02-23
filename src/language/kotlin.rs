@@ -1,14 +1,15 @@
+use ropey::Rope;
 use std::sync::Arc;
 use tracing::debug;
 use tree_sitter::{Node, Parser, Query};
 
 use super::Language;
-use super::java::line_col_to_offset;
 use super::ts_utils::{capture_text, run_query};
 use crate::completion::{
     CompletionCandidate, CompletionContext,
     context::{CursorLocation, LocalVar},
 };
+use crate::language::rope_utils::rope_line_col_to_offset;
 
 #[derive(Debug)]
 pub struct KotlinLanguage;
@@ -37,14 +38,16 @@ impl Language for KotlinLanguage {
         character: u32,
         trigger_char: Option<char>,
     ) -> Option<CompletionContext> {
-        let offset = line_col_to_offset(source, line, character)?;
+        let rope = Rope::from_str(source);
+        let offset = rope_line_col_to_offset(&rope, line, character)?;
         debug!(line, character, trigger = ?trigger_char, "kotlin: parsing context");
 
         let mut parser = self.make_parser();
         let tree = parser.parse(source, None)?;
         let root = tree.root_node();
-
-        Some(KotlinContextExtractor::new(source, offset).extract(root, trigger_char))
+        Some(
+            KotlinContextExtractor::new_with_rope(source, offset, rope).extract(root, trigger_char),
+        )
     }
 
     fn post_process_candidates(
@@ -74,14 +77,26 @@ struct KotlinContextExtractor<'s> {
     source: &'s str,
     bytes: &'s [u8],
     offset: usize,
+    rope: Rope,
 }
 
 impl<'s> KotlinContextExtractor<'s> {
+    #[cfg(test)]
     fn new(source: &'s str, offset: usize) -> Self {
         Self {
             source,
             bytes: source.as_bytes(),
             offset,
+            rope: Rope::from(source),
+        }
+    }
+
+    fn new_with_rope(source: &'s str, offset: usize, rope: Rope) -> Self {
+        Self {
+            source,
+            bytes: source.as_bytes(),
+            offset,
+            rope,
         }
     }
 
@@ -251,10 +266,14 @@ impl<'s> KotlinContextExtractor<'s> {
     }
 
     fn fallback_location(&self, _trigger_char: Option<char>) -> (CursorLocation, String) {
-        let prefix_text = &self.source[..self.offset];
-        let last_line = prefix_text.lines().last().unwrap_or("").trim();
-        let normalized = last_line.replace("?.", ".");
+        let line_idx = self
+            .rope
+            .byte_to_line(self.offset.min(self.source.len().saturating_sub(1)));
+        let line_byte_start = self.rope.line_to_byte(line_idx);
+        let safe_offset = self.offset.max(line_byte_start).min(self.source.len());
+        let last_line = self.source[line_byte_start..safe_offset].trim();
 
+        let normalized = last_line.replace("?.", ".");
         if let Some(dot_pos) = last_meaningful_dot(&normalized) {
             let receiver = normalized[..dot_pos].trim();
             let member_prefix = normalized[dot_pos + 1..].to_string();

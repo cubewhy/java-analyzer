@@ -64,6 +64,8 @@ pub fn find_method_by_offset(root: Node, offset: usize) -> Option<Node> {
 
 #[cfg(test)]
 mod tests {
+    use crate::language::rope_utils::line_col_to_offset;
+
     use super::*;
     use tree_sitter::Parser;
 
@@ -76,7 +78,7 @@ mod tests {
     }
 
     fn offset_of(src: &str, line: u32, col: u32) -> usize {
-        crate::language::java::line_col_to_offset(src, line, col).unwrap()
+        line_col_to_offset(src, line, col).unwrap()
     }
 
     /// Returns (start_line, end_line) of the found method, or None

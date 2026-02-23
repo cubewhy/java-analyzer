@@ -68,23 +68,22 @@ pub async fn handle_completion(
 
     // Convert to LSP format (limit the number to avoid an explosion)
     const MAX_ITEMS: usize = 100;
-    // 在 handle_completion 里，candidate_to_lsp 之前
     let items: Vec<CompletionItem> = candidates
         .iter()
         .take(MAX_ITEMS)
         .map(|c| {
             let mut item = candidate_to_lsp(c, &doc.content);
-            // import 场景：用 textEdit 替换整行 import 前缀
+            // Import scenario: Replace the entire line with the import prefix using textEdit
             if matches!(
                 ctx.location,
                 crate::completion::context::CursorLocation::Import { .. }
-            ) {
-                if let Some(edit) = make_import_text_edit(c, &doc.content, position) {
-                    item.text_edit = Some(edit);
-                    item.insert_text = None;
-                    item.insert_text_format = None;
-                }
+            ) && let Some(edit) = make_import_text_edit(c, &doc.content, position)
+            {
+                item.text_edit = Some(edit);
+                item.insert_text = None;
+                item.insert_text_format = None;
             }
+
             item
         })
         .collect();
@@ -108,12 +107,10 @@ fn make_import_text_edit(
     source: &str,
     position: tower_lsp::lsp_types::Position,
 ) -> Option<tower_lsp::lsp_types::CompletionTextEdit> {
-    use tower_lsp::lsp_types::*;
-
-    // 找当前行
+    // Find the current line
     let line_str = source.lines().nth(position.line as usize)?;
 
-    // 找 "import " 之后的内容起始列
+    // Find the starting column of the content after "import"
     let import_prefix = "import ";
     let start_char = if let Some(pos) = line_str.find(import_prefix) {
         (pos + import_prefix.len()) as u32
@@ -121,14 +118,14 @@ fn make_import_text_edit(
         return None;
     };
 
-    // 结束列：到分号或行末（不含分号）
+    // End of column: to the semicolon or the end of the line (excluding the semicolon)
     let end_char = line_str
         .find(';')
         .map(|p| p as u32)
         .unwrap_or(line_str.len() as u32);
 
-    // insert_text 是 FQN（如 "org.cubewhy.RealMain"）
-    // 替换 import 后的整段文本
+    // insert_text is an FQN (e.g., "org.cubewhy.RealMain")
+    // Replace the entire text after import
     Some(CompletionTextEdit::Edit(TextEdit {
         range: Range {
             start: Position {

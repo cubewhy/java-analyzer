@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::completion::{CompletionCandidate, CompletionContext};
 use tree_sitter::Parser;
 
+pub(crate) mod rope_utils;
 pub(crate) mod ts_utils;
 
 pub mod java;

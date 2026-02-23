@@ -1,8 +1,13 @@
 use tower_lsp::lsp_types::*;
 
-use crate::completion::{
-    candidate::{CandidateKind, CompletionCandidate},
-    import_utils::{extract_imports_from_source, extract_package_from_source, is_import_needed},
+use crate::{
+    completion::{
+        candidate::{CandidateKind, CompletionCandidate},
+        import_utils::{
+            extract_imports_from_source, extract_package_from_source, is_import_needed,
+        },
+    },
+    language::rope_utils::line_col_to_offset,
 };
 
 /// Convert internal completion candidates to LSP CompletionItem
@@ -114,7 +119,7 @@ fn map_kind(kind: &CandidateKind) -> CompletionItemKind {
 
 /// LSP Position -> Byte Offset within File (Unicode based)
 pub fn lsp_pos_to_offset(source: &str, pos: Position) -> Option<usize> {
-    crate::language::java::line_col_to_offset(source, pos.line, pos.character)
+    line_col_to_offset(source, pos.line, pos.character)
 }
 
 #[cfg(test)]

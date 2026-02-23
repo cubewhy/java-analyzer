@@ -5,6 +5,7 @@ use crate::completion::{
     CompletionContext,
     context::{CursorLocation, LocalVar},
 };
+use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::ts_utils::find_method_by_offset;
 use ropey::Rope;
 use std::sync::Arc;
@@ -38,11 +39,12 @@ impl Language for JavaLanguage {
         character: u32,
         trigger_char: Option<char>,
     ) -> Option<CompletionContext> {
-        let offset = line_col_to_offset(source, line, character)?;
+        let rope = Rope::from_str(source);
+        let offset = rope_line_col_to_offset(&rope, line, character)?;
         debug!(line, character, trigger = ?trigger_char, "java: parsing context");
 
         // Comment checking is performed once at the outermost layer and will not be repeated thereafter.
-        if is_cursor_in_comment(source, offset) {
+        if is_cursor_in_comment_with_rope(source, &rope, offset) {
             return Some(CompletionContext::new(
                 CursorLocation::Unknown,
                 "",
@@ -56,7 +58,7 @@ impl Language for JavaLanguage {
 
         let mut parser = self.make_parser();
         let tree = parser.parse(source, None)?;
-        let extractor = JavaContextExtractor::new(source, offset);
+        let extractor = JavaContextExtractor::new_with_rope(source, offset, rope);
         Some(extractor.extract(tree.root_node(), trigger_char))
     }
 }
@@ -69,12 +71,22 @@ struct JavaContextExtractor<'s> {
 }
 
 impl<'s> JavaContextExtractor<'s> {
+    #[cfg(test)]
     fn new(source: &'s str, offset: usize) -> Self {
         Self {
             source,
             bytes: source.as_bytes(),
             offset,
             rope: Rope::from_str(source),
+        }
+    }
+
+    fn new_with_rope(source: &'s str, offset: usize, rope: Rope) -> Self {
+        Self {
+            source,
+            bytes: source.as_bytes(),
+            offset,
+            rope,
         }
     }
 
@@ -265,10 +277,12 @@ impl<'s> JavaContextExtractor<'s> {
 
     /// The content from the beginning of the current line to the cursor (after trimming).
     fn current_line_prefix_trimmed(&self) -> &str {
-        // rope.byte_to_line 是 O(log n)
-        let line_idx = self.rope.byte_to_line(self.offset);
+        let line_idx = self
+            .rope
+            .byte_to_line(self.offset.min(self.source.len().saturating_sub(1)));
         let line_byte_start = self.rope.line_to_byte(line_idx);
-        self.source[line_byte_start..self.offset].trim()
+        let safe_offset = self.offset.max(line_byte_start).min(self.source.len());
+        self.source[line_byte_start..safe_offset].trim()
     }
 
     fn maybe_member_access_from_text(&self, text: String) -> (CursorLocation, String) {
@@ -959,10 +973,10 @@ fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> 
 }
 
 /// Check if offset is inside a single-line comment (//) or a block comment (/* */).
-pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
+pub fn is_cursor_in_comment_with_rope(source: &str, rope: &Rope, offset: usize) -> bool {
     let before = &source[..offset];
 
-    // Determinate block comment
+    // Block comment 检测（维持原状）
     let last_open = before.rfind("/*");
     let last_close = before.rfind("*/");
     if let Some(open) = last_open {
@@ -973,10 +987,17 @@ pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
         }
     }
 
-    let rope = Rope::from_str(source);
+    // 单行注释检测：用 Rope 实现 O(log n) 行首定位
     let line_idx = rope.byte_to_line(offset.min(source.len().saturating_sub(1)));
     let line_byte_start = rope.line_to_byte(line_idx);
-    is_in_line_comment(&source[line_byte_start..offset])
+    let safe_offset = offset.max(line_byte_start).min(source.len());
+
+    is_in_line_comment(&source[line_byte_start..safe_offset])
+}
+
+pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
+    let rope = Rope::from_str(source);
+    is_cursor_in_comment_with_rope(source, &rope, offset)
 }
 
 /// Check if a line of text (the part before the cursor) is in a comment.
@@ -1011,33 +1032,6 @@ fn is_in_line_comment(line: &str) -> bool {
     false
 }
 
-pub fn line_col_to_offset(source: &str, line: u32, character: u32) -> Option<usize> {
-    let rope = Rope::from_str(source);
-    let line = line as usize;
-    let character = character as usize;
-
-    if line >= rope.len_lines() {
-        return None;
-    }
-
-    let line_byte_start = rope.line_to_byte(line);
-    let line_slice = rope.line(line);
-
-    // 按 UTF-16 单元累积，找到对应的行内字节偏移
-    let mut utf16_units = 0usize;
-    let mut byte_offset_in_line = 0usize;
-
-    for ch in line_slice.chars() {
-        if utf16_units >= character {
-            break;
-        }
-        utf16_units += ch.len_utf16();
-        byte_offset_in_line += ch.len_utf8();
-    }
-
-    Some(line_byte_start + byte_offset_in_line)
-}
-
 pub fn java_type_to_internal(ty: &str) -> String {
     match ty {
         "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "void" => {
@@ -1050,7 +1044,7 @@ pub fn java_type_to_internal(ty: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::completion::context::CursorLocation;
+    use crate::{completion::context::CursorLocation, language::rope_utils::line_col_to_offset};
 
     fn at(src: &str, line: u32, col: u32) -> CompletionContext {
         JavaLanguage
@@ -1175,14 +1169,6 @@ mod tests {
         let ctx = at(src, 2, 10);
         assert!(ctx.existing_imports.iter().any(|i| i.contains("List")));
         assert!(ctx.existing_imports.iter().any(|i| i.contains("Map")));
-    }
-
-    #[test]
-    fn test_line_col_to_offset() {
-        let src = "hello\nworld";
-        assert_eq!(line_col_to_offset(src, 0, 5), Some(5));
-        assert_eq!(line_col_to_offset(src, 1, 3), Some(9));
-        assert_eq!(line_col_to_offset(src, 5, 0), None);
     }
 
     #[test]

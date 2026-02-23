@@ -481,10 +481,10 @@ impl GlobalIndex {
             };
             // Enqueue super + interfaces before pushing meta,
             // so we process in BFS order (subclass first)
-            if let Some(ref super_name) = meta.super_name {
-                if !super_name.is_empty() {
-                    queue.push_back(super_name.clone());
-                }
+            if let Some(ref super_name) = meta.super_name
+                && !super_name.is_empty()
+            {
+                queue.push_back(super_name.clone());
             }
             for iface in &meta.interfaces {
                 if !iface.is_empty() {
