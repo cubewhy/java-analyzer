@@ -21,6 +21,7 @@ impl CompletionProvider for LocalVarProvider {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
+            CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
             _ => return vec![],
         };
 
@@ -198,6 +199,31 @@ mod tests {
             results.is_empty(),
             "LocalVarProvider should not return locals for MemberAccess: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_location() {
+        let mut idx = GlobalIndex::new();
+        let ctx = CompletionContext::new(
+            CursorLocation::TypeAnnotation {
+                prefix: "aV".to_string(),
+            },
+            "aV",
+            vec![LocalVar {
+                name: Arc::from("aVar"),
+                type_internal: Arc::from("java/lang/String"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        let results = LocalVarProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "aVar"),
+            "should complete locals inside TypeAnnotation context due to parsing ambiguity"
         );
     }
 }

@@ -360,20 +360,27 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn parse_last_line(&self, last_line: &str) -> Option<(CursorLocation, String)> {
-        // constructor: "new Foo" / "new "
+        // 1. Get the statement fragment (right side of assignments, etc.)
         let stmt_fragment = last_line
             .rsplit([';', '{', '='])
             .next()
             .unwrap_or(last_line)
-            .trim();
+            .trim_start(); // Keep trailing space for accurate prefix matching
 
-        let new_rest = stmt_fragment.strip_prefix("new ").or_else(|| {
-            if stmt_fragment == "new" {
-                Some("")
-            } else {
-                None
-            }
-        });
+        // 2. Extract current typed expression (e.g. inner part of unclosed parens)
+        let current_expr = get_current_expr(stmt_fragment).trim_start();
+
+        let mut clean_expr = current_expr;
+        if clean_expr.starts_with("return ") {
+            clean_expr = clean_expr["return ".len()..].trim_start();
+        } else if clean_expr.starts_with("throw ") {
+            clean_expr = clean_expr["throw ".len()..].trim_start();
+        }
+
+        // constructor: "new Foo" / "new "
+        let new_rest = clean_expr
+            .strip_prefix("new ")
+            .or_else(|| if clean_expr == "new" { Some("") } else { None });
 
         if let Some(rest) = new_rest
             && !has_chained_dot(rest)
@@ -389,10 +396,10 @@ impl<'s> JavaContextExtractor<'s> {
             ));
         }
 
-        // dot access
-        if let Some(dot_pos) = last_meaningful_dot(last_line) {
-            let receiver = last_line[..dot_pos].trim();
-            let member_pfx = last_line[dot_pos + 1..].to_string();
+        // dot access (must only search inside the CURRENT inner expression)
+        if let Some(dot_pos) = last_meaningful_dot(current_expr) {
+            let receiver = current_expr[..dot_pos].trim();
+            let member_pfx = current_expr[dot_pos + 1..].to_string();
             let is_type = receiver.chars().next().is_some_and(|c| c.is_uppercase());
             return Some(if is_type {
                 (
@@ -413,6 +420,7 @@ impl<'s> JavaContextExtractor<'s> {
                 )
             });
         }
+
         None
     }
 
@@ -910,32 +918,30 @@ fn last_meaningful_dot(s: &str) -> Option<usize> {
 
 /// "foo(arg1, aV" → "aV"
 fn extract_arg_prefix(last_line: &str) -> String {
+    get_current_expr(last_line).trim().to_string()
+}
+
+/// Retrieves the substring of the currently typed expression within unmatched (, [, { and commas
+fn get_current_expr(last_line: &str) -> &str {
     let mut depth = 0i32;
-    let mut last_open = None;
-    for (i, c) in last_line.char_indices() {
+    for (i, c) in last_line.char_indices().rev() {
         match c {
-            '(' => {
-                depth += 1;
-                if depth == 1 {
-                    last_open = Some(i);
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' => {
+                depth -= 1;
+                if depth < 0 {
+                    return &last_line[i + c.len_utf8()..];
                 }
             }
-            ')' => {
-                depth -= 1;
+            ',' => {
+                if depth == 0 {
+                    return &last_line[i + c.len_utf8()..];
+                }
             }
             _ => {}
         }
     }
-    let inside = match last_open {
-        Some(pos) if depth > 0 => &last_line[pos + 1..],
-        _ => last_line,
-    };
-    inside
-        .rfind(',')
-        .map(|p| &inside[p + 1..])
-        .unwrap_or(inside)
-        .trim()
-        .to_string()
+    last_line
 }
 
 /// Returns true if `rest` (the part after "new ") contains a method chain dot.
@@ -2138,5 +2144,60 @@ mod tests {
         let extractor = JavaContextExtractor::new(src, offset);
         let prefix = extractor.current_line_prefix_trimmed();
         assert_eq!(prefix, "items");
+    }
+
+    #[test]
+    fn test_assignment_rhs_is_expression() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                Agent.inst = 
+            }
+        }
+    "#};
+        let line = 3u32;
+        let raw = src.lines().nth(3).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(&ctx.location, CursorLocation::Expression { prefix } if prefix.is_empty()),
+            "rhs of assignment should be Expression{{prefix: \"\"}}, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_incomplete_method_argument_is_expression() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                proxy.run(
+            }
+        }
+    "#};
+        let line = 3u32;
+        let raw = src.lines().nth(3).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+        match &ctx.location {
+            CursorLocation::Expression { prefix } | CursorLocation::MethodArgument { prefix } => {
+                assert!(prefix.is_empty(), "prefix should be empty");
+            }
+            _ => panic!(
+                "Expected Expression or MethodArgument, got {:?}",
+                ctx.location
+            ),
+        }
+    }
+
+    #[test]
+    fn test_get_current_expr_logic() {
+        assert_eq!(get_current_expr("proxy.run("), "");
+        assert_eq!(get_current_expr("proxy.run(a"), "a");
+        assert_eq!(get_current_expr("proxy.run(a, "), " ");
+        assert_eq!(get_current_expr("proxy.run(a, b"), " b");
+        assert_eq!(get_current_expr("foo(bar(a), b"), " b");
+        assert_eq!(get_current_expr("foo(bar(a)"), "bar(a)");
+        assert_eq!(get_current_expr("return new Foo"), "return new Foo");
     }
 }
