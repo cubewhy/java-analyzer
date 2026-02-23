@@ -173,6 +173,18 @@ impl<'s> JavaContextExtractor<'s> {
         let mut current = node;
         loop {
             match current.kind() {
+                "marker_annotation" | "annotation" => {
+                    let name_node = current.child_by_field_name("name");
+                    let prefix = name_node
+                        .map(|n| self.cursor_truncated_text(n))
+                        .unwrap_or_default();
+                    return (
+                        CursorLocation::Annotation {
+                            prefix: prefix.clone(),
+                        },
+                        prefix,
+                    );
+                }
                 "import_declaration" => return self.handle_import(current),
                 "method_invocation" => return self.handle_member_access(current),
                 "field_access" => return self.handle_member_access(current),
@@ -267,6 +279,18 @@ impl<'s> JavaContextExtractor<'s> {
             .next_back()
             .unwrap_or("")
             .to_string();
+
+        // Annotation
+        let prefix_len = current_line.len().saturating_sub(query.len());
+        if current_line[..prefix_len].trim_end().ends_with('@') {
+            return (
+                CursorLocation::Annotation {
+                    prefix: query.clone(),
+                },
+                query,
+            );
+        }
+
         (
             CursorLocation::Expression {
                 prefix: query.clone(),
@@ -290,6 +314,18 @@ impl<'s> JavaContextExtractor<'s> {
         if let Some(result) = self.parse_last_line(line) {
             return result;
         }
+
+        // Annotation
+        let prefix_len = line.len().saturating_sub(text.len());
+        if line[..prefix_len].trim_end().ends_with('@') {
+            return (
+                CursorLocation::Annotation {
+                    prefix: text.clone(),
+                },
+                text,
+            );
+        }
+
         (
             CursorLocation::Expression {
                 prefix: text.clone(),
