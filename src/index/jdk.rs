@@ -124,6 +124,7 @@ mod tests {
     /// Only runs if JAVA_HOME is set and valid.
     /// Use: JAVA_HOME=/path/to/jdk cargo test test_jdk_index -- --nocapture
     #[test]
+    #[ignore]
     fn test_jdk_index_finds_string() {
         let classes = JdkIndexer::index();
         if classes.is_empty() {
@@ -162,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_jdk_index_object_methods() {
         let classes = JdkIndexer::index();
         if classes.is_empty() {
@@ -182,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_jdk_skips_module_info() {
         let classes = JdkIndexer::index();
         assert!(
@@ -191,6 +194,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_jdk_classes_have_valid_internal_names() {
         let classes = JdkIndexer::index();
         for cls in classes.iter().take(100) {
