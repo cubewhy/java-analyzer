@@ -420,27 +420,22 @@ pub(crate) fn element_type_of_array(array_internal: &str) -> Option<Arc<str>> {
         return match stripped.chars().next()? {
             'L' => {
                 let inner = stripped[1..].split(';').next()?;
-                let simple = inner.split('<').next()?;
-                Some(Arc::from(simple))
+                Some(Arc::from(inner.split('<').next()?))
             }
-            '[' => Some(Arc::from(stripped)), // multi-dim array
-            _ => None,                        // primitive
+            '[' => Some(Arc::from(stripped)),
+            _ => None,
         };
     }
+
     // Source form: "String[]" or "java/lang/String[]"
     if let Some(base) = array_internal.strip_suffix("[]") {
         let base = base.trim();
-        if base.is_empty() {
-            return None;
-        }
         match base {
-            "int" | "long" | "short" | "byte" | "char" | "float" | "double" | "boolean" => {
-                return None;
-            }
-            _ => {}
+            "" => return None,
+            _ => return Some(Arc::from(base)),
         }
-        return Some(Arc::from(base));
     }
+
     None
 }
 
@@ -1250,7 +1245,7 @@ mod tests {
             element_type_of_array("[Ljava/lang/String;").as_deref(),
             Some("java/lang/String")
         );
-        assert_eq!(element_type_of_array("[I"), None);
+        assert_eq!(element_type_of_array("[I").as_deref(), Some("int"));
         assert_eq!(
             element_type_of_array("[[Ljava/lang/String;").as_deref(),
             Some("[Ljava/lang/String;")
