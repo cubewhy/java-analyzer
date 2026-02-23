@@ -117,10 +117,20 @@ impl<'s> JavaContextExtractor<'s> {
             .and_then(|n| find_ancestor(n, "class_declaration"))
             .and_then(|cls| cls.child_by_field_name("body"))
             .map(|body| self.extract_class_members_from_body(body))
+            .or_else(|| {
+                // Fallback: find top-level ERROR node anywhere under program
+                let error_node = find_top_error_node(root)?;
+                let mut members = Vec::new();
+                self.collect_members_from_node(error_node, &mut members);
+                let snapshot = members.clone();
+                members.extend(self.parse_partial_methods_from_error(error_node, &snapshot));
+                Some(members)
+            })
             .unwrap_or_default();
         let enclosing_class_member = cursor_node
             .and_then(|n| find_ancestor(n, "method_declaration"))
             .or_else(|| find_method_by_offset(root, self.offset))
+            .or_else(|| find_enclosing_method_in_error(root, self.offset))
             .and_then(|m| self.parse_method_node(m));
         let char_after_cursor = self.source[self.offset..]
             .chars()
@@ -682,6 +692,19 @@ impl<'s> JavaContextExtractor<'s> {
             {
                 *result = Some(Arc::from(name));
             }
+            // Handle top-level ERROR: find `class` keyword followed by identifier
+            if node.kind() == "ERROR" {
+                let mut cursor = node.walk();
+                let children: Vec<Node> = node.children(&mut cursor).collect();
+                for i in 0..children.len().saturating_sub(1) {
+                    if children[i].kind() == "class"
+                        && children[i + 1].kind() == "identifier"
+                        && let Ok(name) = children[i + 1].utf8_text(bytes)
+                    {
+                        *result = Some(Arc::from(name));
+                    }
+                }
+            }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 dfs(child, offset, bytes, result);
@@ -740,22 +763,221 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract_class_members_from_body(&self, body: Node) -> Vec<CurrentClassMember> {
-        let mut cursor = body.walk();
         let mut members = Vec::new();
-        for child in body.children(&mut cursor) {
+        self.collect_members_from_node(body, &mut members);
+        members
+    }
+
+    fn collect_members_from_node(&self, node: Node, members: &mut Vec<CurrentClassMember>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
             match child.kind() {
                 "method_declaration" => {
                     if let Some(m) = self.parse_method_node(child) {
                         members.push(m);
                     }
+                    if let Some(block) = child.child_by_field_name("body") {
+                        let mut bc = block.walk();
+                        let block_children: Vec<Node> = block.children(&mut bc).collect();
+                        let mut i = 0;
+                        while i < block_children.len() {
+                            let bc = block_children[i];
+                            if bc.kind() == "ERROR" {
+                                if let Some(m) = self.parse_method_node(bc) {
+                                    members.push(m);
+                                }
+                                members.extend(self.parse_field_node(bc));
+                            } else if bc.kind() == "local_variable_declaration" {
+                                // Check if next sibling is ERROR starting with `(` —
+                                // this means tree-sitter misread a method declaration as a variable declaration
+                                let next = block_children.get(i + 1);
+                                if let Some(next_node) = next
+                                    && next_node.kind() == "ERROR"
+                                    && self.source[next_node.start_byte()..next_node.end_byte()]
+                                        .trim_start()
+                                        .starts_with('(')
+                                {
+                                    if let Some(m) = self.parse_misread_method(bc, *next_node) {
+                                        members.push(m);
+                                        i += 1; // skip the ERROR node too
+                                    }
+                                }
+                            }
+                            i += 1;
+                        }
+                    }
                 }
                 "field_declaration" => {
                     members.extend(self.parse_field_node(child));
                 }
+                "ERROR" => {
+                    self.collect_members_from_node(child, members);
+                    let snapshot = members.clone();
+                    members.extend(self.parse_partial_methods_from_error(child, &snapshot));
+                }
                 _ => {}
             }
         }
-        members
+
+        // If the node itself is ERROR (top-level), also parse its scattered children
+        if node.kind() == "ERROR" {
+            let snapshot = members.clone();
+            members.extend(self.parse_partial_methods_from_error(node, &snapshot));
+        }
+    }
+
+    fn parse_partial_methods_from_error(
+        &self,
+        error_node: Node,
+        already_found: &[CurrentClassMember],
+    ) -> Vec<CurrentClassMember> {
+        let found_names: std::collections::HashSet<&str> =
+            already_found.iter().map(|m| m.name.as_ref()).collect();
+
+        let mut cursor = error_node.walk();
+        let children: Vec<Node> = error_node.children(&mut cursor).collect();
+        let mut result = Vec::new();
+
+        for (param_pos, _) in children
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.kind() == "formal_parameters")
+        {
+            // method name: nearest identifier before formal_parameters
+            let name = match children[..param_pos]
+                .iter()
+                .rev()
+                .find(|n| n.kind() == "identifier")
+            {
+                Some(n) => self.node_text(*n),
+                None => continue,
+            };
+            if name == "<init>" || name == "<clinit>" || found_names.contains(name) {
+                continue;
+            }
+            let modifiers_node = children[..param_pos]
+                .iter()
+                .rev()
+                .find(|n| n.kind() == "modifiers");
+            let is_static = modifiers_node
+                .map(|n| self.node_text(*n).contains("static"))
+                .unwrap_or(false);
+            let is_private = modifiers_node
+                .map(|n| self.node_text(*n).contains("private"))
+                .unwrap_or(false);
+            let ret_type = children[..param_pos]
+                .iter()
+                .rev()
+                .find(|n| {
+                    matches!(
+                        n.kind(),
+                        "void_type"
+                            | "integral_type"
+                            | "floating_point_type"
+                            | "boolean_type"
+                            | "type_identifier"
+                            | "array_type"
+                            | "generic_type"
+                    )
+                })
+                .map(|n| self.node_text(*n))
+                .unwrap_or("void");
+            let params = self.node_text(children[param_pos]);
+            result.push(CurrentClassMember {
+                name: Arc::from(name),
+                is_method: true,
+                is_static,
+                is_private,
+                descriptor: Arc::from(
+                    crate::index::source::build_java_descriptor(params, ret_type).as_str(),
+                ),
+            });
+        }
+        result
+    }
+
+    /// Scan ERROR nodes inside a method block for swallowed class members
+    fn collect_members_from_error_in_block(
+        &self,
+        block: Node,
+        members: &mut Vec<CurrentClassMember>,
+    ) {
+        let mut cursor = block.walk();
+        for child in block.children(&mut cursor) {
+            if child.kind() == "ERROR" {
+                if let Some(m) = self.parse_method_node(child) {
+                    members.push(m);
+                } else {
+                    members.extend(self.parse_field_node(child));
+                }
+            }
+        }
+    }
+
+    /// tree-sitter sometimes parses `private static Object test() {` as
+    /// local_variable_declaration("private static Object test") + ERROR("() {")
+    /// This method reconstructs the method member from these two nodes.
+    fn parse_misread_method(
+        &self,
+        decl_node: Node,
+        error_node: Node,
+    ) -> Option<CurrentClassMember> {
+        // Extract modifiers, type, name from local_variable_declaration
+        let mut is_static = false;
+        let mut is_private = false;
+        let mut ret_type = "void";
+        let mut name: Option<&str> = None;
+
+        let mut wc = decl_node.walk();
+        for c in decl_node.named_children(&mut wc) {
+            match c.kind() {
+                "modifiers" => {
+                    let t = self.node_text(c);
+                    is_static = t.contains("static");
+                    is_private = t.contains("private");
+                }
+                "type_identifier"
+                | "void_type"
+                | "integral_type"
+                | "floating_point_type"
+                | "boolean_type"
+                | "array_type"
+                | "generic_type" => {
+                    ret_type = self.node_text(c);
+                }
+                "variable_declarator" => {
+                    // name is the identifier inside variable_declarator
+                    let mut vc = c.walk();
+                    for vchild in c.children(&mut vc) {
+                        if vchild.kind() == "identifier" {
+                            name = Some(self.node_text(vchild));
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let name = name.filter(|n| *n != "<init>" && *n != "<clinit>")?;
+
+        // Extract formal_parameters from the ERROR node
+        let mut ec = error_node.walk();
+        let params = error_node
+            .children(&mut ec)
+            .find(|c| c.kind() == "formal_parameters")
+            .map(|c| self.node_text(c))
+            .unwrap_or("()");
+
+        Some(CurrentClassMember {
+            name: Arc::from(name),
+            is_method: true,
+            is_static,
+            is_private,
+            descriptor: Arc::from(
+                crate::index::source::build_java_descriptor(params, ret_type).as_str(),
+            ),
+        })
     }
 
     fn parse_method_node(&self, node: Node) -> Option<CurrentClassMember> {
@@ -884,7 +1106,15 @@ impl<'s> JavaContextExtractor<'s> {
     }
 }
 
-// ── Free functions ────────────────────────────────────────────────────────────
+fn find_top_error_node(root: Node) -> Option<Node> {
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() == "ERROR" {
+            return Some(child);
+        }
+    }
+    None
+}
 
 fn build_internal_name(package: &Option<Arc<str>>, class: &Option<Arc<str>>) -> Option<Arc<str>> {
     match (package, class) {
@@ -1031,6 +1261,29 @@ fn get_initializer_text(type_node: Node, bytes: &[u8]) -> Option<String> {
         return init.utf8_text(bytes).ok().map(|s| s.to_string());
     }
     None
+}
+
+fn find_enclosing_method_in_error(root: Node, offset: usize) -> Option<Node> {
+    // When the file is a top-level ERROR, method_declaration nodes may still
+    // exist as direct children of the ERROR node
+    fn dfs<'a>(node: Node<'a>, offset: usize, result: &mut Option<Node<'a>>) {
+        if node.start_byte() > offset {
+            return;
+        }
+        if node.kind() == "method_declaration"
+            && node.start_byte() <= offset
+            && node.end_byte() >= offset
+        {
+            *result = Some(node);
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            dfs(child, offset, result);
+        }
+    }
+    let mut result = None;
+    dfs(root, offset, &mut result);
+    result
 }
 
 fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> {
@@ -2329,6 +2582,506 @@ mod tests {
             ),
             "getMain2().| via injection should give MemberAccess, got {:?}",
             ctx.location
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_agent_error_case() {
+        let src = indoc::indoc! {r#"
+    class Agent {
+        static Object inst;
+        private static Object test() { return null; }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+    }
+    "#};
+
+        // Snapshot the raw AST
+        fn node_to_string(node: tree_sitter::Node, src: &str, indent: usize) -> String {
+            let pad = " ".repeat(indent * 2);
+            let text: String = src[node.start_byte()..node.end_byte()]
+                .chars()
+                .take(40)
+                .collect();
+            let mut s = format!(
+                "{}{} [{}-{}] {:?}\n",
+                pad,
+                node.kind(),
+                node.start_byte(),
+                node.end_byte(),
+                text
+            );
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                s.push_str(&node_to_string(child, src, indent + 1));
+            }
+            s
+        }
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let ast = node_to_string(tree.root_node(), src, 0);
+        insta::assert_snapshot!("agent_error_ast", ast);
+
+        // Snapshot the extraction result
+        let line = 7u32;
+        let raw = src.lines().nth(7).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+
+        let mut members: Vec<String> = ctx
+            .current_class_members
+            .keys()
+            .map(|k| {
+                let m = &ctx.current_class_members[k];
+                format!(
+                    "{} static={} private={} method={}",
+                    k, m.is_static, m.is_private, m.is_method
+                )
+            })
+            .collect();
+        members.sort();
+        insta::assert_snapshot!("agent_error_members", members.join("\n"));
+        insta::assert_snapshot!("agent_error_location", format!("{:?}", ctx.location));
+        insta::assert_snapshot!(
+            "agent_error_enclosing",
+            format!("{:?}", ctx.enclosing_class)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_partial_method_extraction() {
+        let src = indoc::indoc! {r#"
+    class Agent {
+        static Object inst;
+        private static Object test() { return null; }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+    }
+    "#};
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+
+        // root is program, child(0) is ERROR
+        let error_node = root.child(0).unwrap();
+        assert_eq!(error_node.kind(), "ERROR");
+
+        let rope = ropey::Rope::from_str(src);
+        let extractor = super::JavaContextExtractor::new_with_rope(src, 0, rope);
+
+        // Snapshot direct children kinds
+        let mut cursor = error_node.walk();
+        let children_info: Vec<String> = error_node
+            .children(&mut cursor)
+            .map(|c| {
+                format!(
+                    "{} {:?}",
+                    c.kind(),
+                    &src[c.start_byte()..c.end_byte().min(c.start_byte() + 30)]
+                )
+            })
+            .collect();
+        insta::assert_snapshot!("error_children", children_info.join("\n"));
+
+        // Snapshot what parse_partial_methods_from_error returns
+        let snapshot: Vec<CurrentClassMember> = vec![];
+        let partial = extractor.parse_partial_methods_from_error(error_node, &snapshot);
+        let mut result: Vec<String> = partial
+            .iter()
+            .map(|m| format!("{} static={} private={}", m.name, m.is_static, m.is_private))
+            .collect();
+        result.sort();
+        insta::assert_snapshot!("partial_methods", result.join("\n"));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_real_agent_case() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void premain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            new Object().run();
+        }
+        private static Object test() { return null; }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+    }
+    "#};
+
+        let line = 13u32;
+        let raw = src.lines().nth(13).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+
+        let mut members: Vec<String> = ctx
+            .current_class_members
+            .keys()
+            .map(|k| {
+                let m = &ctx.current_class_members[k];
+                format!(
+                    "{} static={} private={} method={}",
+                    k, m.is_static, m.is_private, m.is_method
+                )
+            })
+            .collect();
+        members.sort();
+        insta::assert_snapshot!("real_agent_members", members.join("\n"));
+        insta::assert_snapshot!("real_agent_location", format!("{:?}", ctx.location));
+        insta::assert_snapshot!("real_agent_enclosing", format!("{:?}", ctx.enclosing_class));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_real_agent_root() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void premain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            new Object().run();
+        }
+        private static Object test() { return null; }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+    }
+    "#};
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+
+        // Just snapshot top-level structure (2 levels deep)
+        let mut top = String::new();
+        let mut rc = root.walk();
+        for child in root.children(&mut rc) {
+            top.push_str(&format!(
+                "{} [{}-{}]\n",
+                child.kind(),
+                child.start_byte(),
+                child.end_byte()
+            ));
+            let mut cc = child.walk();
+            for grandchild in child.children(&mut cc) {
+                top.push_str(&format!(
+                    "  {} [{}-{}]\n",
+                    grandchild.kind(),
+                    grandchild.start_byte(),
+                    grandchild.end_byte()
+                ));
+            }
+        }
+        insta::assert_snapshot!("real_agent_root", top);
+    }
+
+    #[test]
+    fn test_class_members_visible_when_whole_file_is_error() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void premain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            new Object().run();
+        }
+        private static Object test() { return null; }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+    }
+    "#};
+        let line = 13u32;
+        let raw = src.lines().nth(13).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            ctx.current_class_members.contains_key("test"),
+            "test() should be visible, members: {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.current_class_members.contains_key("agentmain"),
+            "agentmain() should be visible, members: {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.current_class_members.contains_key("premain"),
+            "premain() should be visible, members: {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(ctx.enclosing_class.as_deref(), Some("Agent"));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_test_after_agentmain() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void premain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            new Object().run();
+        }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+        private static Object test() { return null; }
+    }
+    "#};
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let root = tree.root_node();
+
+        let mut top = String::new();
+        let mut rc = root.walk();
+        for child in root.children(&mut rc) {
+            top.push_str(&format!(
+                "{} [{}-{}]\n",
+                child.kind(),
+                child.start_byte(),
+                child.end_byte()
+            ));
+            let mut cc = child.walk();
+            for grandchild in child.children(&mut cc) {
+                top.push_str(&format!(
+                    "  {} [{}-{}] {:?}\n",
+                    grandchild.kind(),
+                    grandchild.start_byte(),
+                    grandchild.end_byte(),
+                    &src[grandchild.start_byte()
+                        ..grandchild.end_byte().min(grandchild.start_byte() + 30)]
+                ));
+            }
+        }
+        insta::assert_snapshot!(top);
+
+        let line = 12u32;
+        let raw = src.lines().nth(12).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+        let mut members: Vec<String> = ctx
+            .current_class_members
+            .keys()
+            .map(|k| k.to_string())
+            .collect();
+        members.sort();
+        insta::assert_snapshot!(members.join("\n"));
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_class_body_structure() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void premain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            new Object().run();
+        }
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+        private static Object test() { return null; }
+    }
+    "#};
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+
+        fn print_node(node: tree_sitter::Node, src: &str, indent: usize, out: &mut String) {
+            let pad = " ".repeat(indent * 2);
+            let text: String = src[node.start_byte()..node.end_byte()]
+                .chars()
+                .take(30)
+                .collect();
+            out.push_str(&format!(
+                "{}{} [{}-{}] {:?}\n",
+                pad,
+                node.kind(),
+                node.start_byte(),
+                node.end_byte(),
+                text
+            ));
+            if indent < 4 {
+                // 只展开4层
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    print_node(child, src, indent + 1, out);
+                }
+            }
+        }
+
+        let mut out = String::new();
+        print_node(tree.root_node(), src, 0, &mut out);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    #[ignore]
+    fn test_snapshot_agentmain_block() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+        private static Object test() { return null; }
+    }
+    "#};
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+
+        fn find_block<'a>(
+            node: tree_sitter::Node<'a>,
+            name: &'a str,
+        ) -> Option<tree_sitter::Node<'a>> {
+            if node.kind() == "method_declaration" {
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    if child.kind() == "identifier" {
+                        if child.utf8_text(name.as_bytes()).unwrap_or("") == name
+                            || node.utf8_text(name.as_bytes()).is_ok()
+                        {
+                            // just return the block
+                        }
+                    }
+                }
+            }
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                if let Some(n) = find_block(child, name) {
+                    return Some(n);
+                }
+            }
+            None
+        }
+
+        // Just print everything under agentmain's block
+        fn print_flat(node: tree_sitter::Node, src: &str, out: &mut String) {
+            let text: String = src[node.start_byte()..node.end_byte()]
+                .chars()
+                .take(30)
+                .collect();
+            out.push_str(&format!(
+                "{} [{}-{}] {:?}\n",
+                node.kind(),
+                node.start_byte(),
+                node.end_byte(),
+                text
+            ));
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                out.push_str(&format!(
+                    "  {} [{}-{}] {:?}\n",
+                    child.kind(),
+                    child.start_byte(),
+                    child.end_byte(),
+                    &src[child.start_byte()..child.end_byte().min(child.start_byte() + 25)]
+                ));
+            }
+        }
+
+        // Find agentmain block by offset range [292-453] from previous snapshot
+        let block = tree
+            .root_node()
+            .named_descendant_for_byte_range(292, 293)
+            .unwrap();
+        // walk up to block
+        let mut cur = block;
+        while cur.kind() != "block" {
+            cur = cur.parent().unwrap();
+        }
+
+        let mut out = String::new();
+        print_flat(cur, src, &mut out);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn test_class_members_visible_when_error_node_present() {
+        let src = indoc::indoc! {r#"
+    package org.cubewhy.relx;
+    public class Agent {
+        private static Object inst;
+        public static void agentmain(String args, Object inst) throws Exception {
+            Agent.inst = inst;
+            var proxy = new Object();
+            proxy.run();
+            Agent.inst = 
+        }
+        private static Object test() { return null; }
+    }
+    "#};
+        let line = 7u32;
+        let raw = src.lines().nth(7).unwrap();
+        let col = raw.len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            ctx.current_class_members.contains_key("test"),
+            "test() should be extracted even when misread as local_variable_declaration, members: {:?}",
+            ctx.current_class_members.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.current_class_members.get("test").unwrap().is_static,
+            "test() should be marked static"
         );
     }
 }
