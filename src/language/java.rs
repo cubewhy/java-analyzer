@@ -160,7 +160,9 @@ impl<'s> JavaContextExtractor<'s> {
         // Case 1: cursor right after `new` keyword (bare `new` or `new `)
         if trimmed.ends_with("new") {
             let after = self.source[self.offset..].trim_start();
-            if after.is_empty() || !after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            let next_meaningful = after.chars().next();
+            let is_continuation = next_meaningful.is_some_and(|c| c.is_alphanumeric() || c == '_');
+            if !is_continuation {
                 return self.inject_at(self.offset, self.offset, &format!(" {SENTINEL}()"));
             }
         }
@@ -3224,6 +3226,50 @@ mod tests {
         assert!(
             matches!(&ctx.location, CursorLocation::VariableName { type_name } if type_name == "String"),
             "var name location should carry type 'String', got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_new_followed_by_comment_is_constructor() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            new // comment
+        }
+    }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("new ").map(|c| (i as u32, c as u32 + 4)))
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(&ctx.location, CursorLocation::ConstructorCall { .. }),
+            "new followed by comment should give ConstructorCall, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_new_at_end_of_line_is_constructor() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            new
+        }
+    }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("new").map(|c| (i as u32, c as u32 + 3)))
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(&ctx.location, CursorLocation::ConstructorCall { .. }),
+            "new at end of line should give ConstructorCall, got {:?}",
             ctx.location
         );
     }
