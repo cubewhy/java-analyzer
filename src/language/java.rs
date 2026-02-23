@@ -485,21 +485,6 @@ impl<'s> JavaContextExtractor<'s> {
             .map(|n| self.node_text(n).to_string())
             .unwrap_or_default();
 
-        if let Some(recv) = receiver_node {
-            let recv_text = self.node_text(recv);
-            if recv_text.chars().next().is_some_and(|c| c.is_uppercase())
-                && node.kind() == "field_access"
-            {
-                return (
-                    CursorLocation::StaticAccess {
-                        class_internal_name: Arc::from(recv_text.replace('.', "/").as_str()),
-                        member_prefix: member_prefix.clone(),
-                    },
-                    member_prefix,
-                );
-            }
-        }
-
         (
             CursorLocation::MemberAccess {
                 receiver_type: None,
@@ -1153,13 +1138,6 @@ fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocation {
             receiver_type,
             member_prefix: strip_sentinel(&member_prefix),
             receiver_expr: strip_sentinel(&receiver_expr),
-        },
-        CursorLocation::StaticAccess {
-            class_internal_name,
-            member_prefix,
-        } => CursorLocation::StaticAccess {
-            class_internal_name,
-            member_prefix: strip_sentinel(&member_prefix),
         },
         CursorLocation::ConstructorCall {
             class_prefix,
@@ -2586,7 +2564,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_agent_error_case() {
         let src = indoc::indoc! {r#"
     class Agent {
@@ -2658,7 +2635,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_partial_method_extraction() {
         let src = indoc::indoc! {r#"
     class Agent {
@@ -2713,7 +2689,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_real_agent_case() {
         let src = indoc::indoc! {r#"
     package org.cubewhy.relx;
@@ -2756,7 +2731,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_real_agent_root() {
         let src = indoc::indoc! {r#"
     package org.cubewhy.relx;
@@ -2848,7 +2822,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_test_after_agentmain() {
         let src = indoc::indoc! {r#"
     package org.cubewhy.relx;
@@ -2912,7 +2885,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_class_body_structure() {
         let src = indoc::indoc! {r#"
     package org.cubewhy.relx;
@@ -2967,7 +2939,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn test_snapshot_agentmain_block() {
         let src = indoc::indoc! {r#"
     package org.cubewhy.relx;
@@ -3082,6 +3053,90 @@ mod tests {
         assert!(
             ctx.current_class_members.get("test").unwrap().is_static,
             "test() should be marked static"
+        );
+    }
+
+    #[test]
+    fn test_chained_method_call_dot_is_member_access() {
+        // RealMain.getInstance().| → MemberAccess, not StaticAccess
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            RealMain.getInstance().
+        }
+    }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("getInstance().").map(|c| (i as u32, c as u32 + 14)))
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, member_prefix, .. }
+                if receiver_expr == "RealMain.getInstance()" && member_prefix.is_empty()
+            ),
+            "RealMain.getInstance().| should be MemberAccess, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_chained_method_call_dot_with_prefix_is_member_access() {
+        // RealMain.getInstance().ge| → MemberAccess{prefix="ge"}
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            RealMain.getInstance().ge
+        }
+    }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| {
+                l.find("getInstance().ge")
+                    .map(|c| (i as u32, c as u32 + 16))
+            })
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, member_prefix, .. }
+                if receiver_expr == "RealMain.getInstance()" && member_prefix == "ge"
+            ),
+            "RealMain.getInstance().ge| should be MemberAccess{{prefix=ge}}, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_uppercase_receiver_method_invocation_is_member_access() {
+        // Uppercase.method().| — receiver is method_invocation, not identifier
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            Uppercase.method().
+        }
+    }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("method().").map(|c| (i as u32, c as u32 + 9)))
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, .. }
+                if receiver_expr == "Uppercase.method()"
+            ),
+            "Uppercase.method().| should be MemberAccess, got {:?}",
+            ctx.location
         );
     }
 }

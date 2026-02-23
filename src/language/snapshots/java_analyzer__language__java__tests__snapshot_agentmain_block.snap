@@ -1,0 +1,14 @@
+---
+source: src/language/java.rs
+expression: out
+---
+block [155-316] "{\n        Agent.inst = inst;\n "
+  { [155-156] "{"
+  expression_statement [165-183] "Agent.inst = inst;"
+  local_variable_declaration [192-217] "var proxy = new Object();"
+  expression_statement [226-238] "proxy.run();"
+  ERROR [247-266] "Agent.inst = \n    }"
+  local_variable_declaration [271-297] "private static Object tes"
+  ERROR [297-301] "() {"
+  return_statement [302-314] "return null;"
+  } [315-316] "}"

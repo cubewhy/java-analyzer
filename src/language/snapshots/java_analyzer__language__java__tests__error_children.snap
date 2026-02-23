@@ -1,0 +1,22 @@
+---
+source: src/language/java.rs
+expression: "children_info.join(\"\\n\")"
+---
+class "class"
+identifier "Agent"
+{ "{"
+field_declaration "static Object inst;"
+method_declaration "private static Object test() {"
+modifiers "public static"
+void_type "void"
+identifier "agentmain"
+formal_parameters "(String args, Object inst)"
+throws "throws Exception"
+{ "{"
+expression_statement "Agent.inst = inst;"
+local_variable_declaration "var proxy = new Object();"
+expression_statement "proxy.run();"
+field_access "Agent.inst"
+= "="
+} "}"
+} "}"

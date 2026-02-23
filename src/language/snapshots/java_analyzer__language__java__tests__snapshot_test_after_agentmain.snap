@@ -1,0 +1,13 @@
+---
+source: src/language/java.rs
+expression: top
+---
+package_declaration [0-25]
+  package [0-7] "package"
+  scoped_identifier [8-24] "org.cubewhy.relx"
+  ; [24-25] ";"
+class_declaration [26-455]
+  modifiers [26-32] "public"
+  class [33-38] "class"
+  identifier [39-44] "Agent"
+  class_body [45-455] "{\n    private static Object in"

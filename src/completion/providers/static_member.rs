@@ -25,6 +25,15 @@ impl CompletionProvider for StaticMemberProvider {
                 class_internal_name,
                 member_prefix,
             } => (class_internal_name.as_ref(), member_prefix.as_str()),
+
+            CursorLocation::MemberAccess {
+                receiver_expr,
+                member_prefix,
+                receiver_type: None,
+            } if is_likely_static_receiver(receiver_expr, ctx) => {
+                (receiver_expr.as_str(), member_prefix.as_str())
+            }
+
             _ => return vec![],
         };
 
@@ -200,6 +209,23 @@ fn is_self_class_by_simple_name(class_name_raw: &str, ctx: &CompletionContext) -
     ctx.enclosing_class
         .as_deref()
         .is_some_and(|enc| enc == class_name_raw)
+}
+
+fn is_likely_static_receiver(expr: &str, ctx: &CompletionContext) -> bool {
+    if expr == "this" {
+        return false;
+    }
+    if expr.contains('(') || expr.contains('.') {
+        return false;
+    }
+    if ctx
+        .local_variables
+        .iter()
+        .any(|lv| lv.name.as_ref() == expr)
+    {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -632,6 +658,55 @@ mod tests {
             !ctx.has_paren_after_cursor(),
             "no paren after cursor, got {:?}",
             ctx.char_after_cursor
+        );
+    }
+
+    #[test]
+    fn test_lowercase_class_name_static_access_via_provider() {
+        use crate::completion::providers::CompletionProvider;
+        use crate::completion::providers::static_member::StaticMemberProvider;
+        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex};
+        use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("myClass"),
+            internal_name: Arc::from("myClass"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![FieldSummary {
+                name: Arc::from("FIELD"),
+                descriptor: Arc::from("I"),
+                access_flags: ACC_PUBLIC | ACC_STATIC,
+                is_synthetic: false,
+            }],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        // Parser 产生 MemberAccess，enrich 后 receiver_type 仍为 None（不是局部变量）
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "FIELD".to_string(),
+                receiver_expr: "myClass".to_string(),
+            },
+            "FIELD",
+            vec![], // no locals named myClass
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        let results = StaticMemberProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "FIELD"),
+            "lowercase class name static field should be found via provider, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
     }
 }

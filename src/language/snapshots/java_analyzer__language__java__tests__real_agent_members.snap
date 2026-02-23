@@ -1,0 +1,8 @@
+---
+source: src/language/java.rs
+expression: "members.join(\"\\n\")"
+---
+agentmain static=true private=false method=true
+inst static=true private=true method=false
+premain static=true private=false method=true
+test static=true private=true method=true

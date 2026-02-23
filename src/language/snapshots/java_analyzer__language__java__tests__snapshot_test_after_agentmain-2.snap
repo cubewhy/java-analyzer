@@ -1,0 +1,8 @@
+---
+source: src/language/java.rs
+expression: "members.join(\"\\n\")"
+---
+agentmain
+inst
+premain
+test

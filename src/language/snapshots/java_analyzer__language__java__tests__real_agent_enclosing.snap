@@ -1,0 +1,5 @@
+---
+source: src/language/java.rs
+expression: "format!(\"{:?}\", ctx.enclosing_class)"
+---
+Some("Agent")

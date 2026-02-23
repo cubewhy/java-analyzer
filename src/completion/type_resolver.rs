@@ -39,6 +39,16 @@ impl<'idx> TypeResolver<'idx> {
             return Some(Arc::from(expr));
         }
 
+        // Simple name fallback: RealMain → org/cubewhy/RealMain
+        if let Some(meta) = self
+            .index
+            .get_classes_by_simple_name(expr)
+            .into_iter()
+            .next()
+        {
+            return Some(Arc::clone(&meta.internal_name));
+        }
+
         // Literal checks should be placed last, with strict numeric prefix validation.
         if expr.parse::<i64>().is_ok() {
             return Some(Arc::from("int"));
@@ -447,8 +457,10 @@ pub fn parse_return_type_from_descriptor(descriptor: &str) -> Option<Arc<str>> {
 
 #[cfg(test)]
 mod tests {
+    use rust_asm::constants::ACC_PUBLIC;
+
     use super::*;
-    use crate::index::GlobalIndex;
+    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
 
     fn make_resolver() -> (GlobalIndex, Vec<LocalVar>) {
         let idx = GlobalIndex::new();
@@ -727,6 +739,67 @@ mod tests {
             result.as_deref(),
             Some("Main2"),
             "bare method call should resolve via enclosing class"
+        );
+    }
+
+    #[test]
+    fn test_resolve_simple_class_name_via_index() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy")),
+            name: Arc::from("RealMain"),
+            internal_name: Arc::from("org/cubewhy/RealMain"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let r = TypeResolver::new(&idx);
+        // Simple name lookup should resolve to full internal name
+        assert_eq!(
+            r.resolve("RealMain", &[], None).as_deref(),
+            Some("org/cubewhy/RealMain")
+        );
+    }
+
+    #[test]
+    fn test_resolve_chain_with_imported_class_receiver() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy")),
+            name: Arc::from("RealMain"),
+            internal_name: Arc::from("org/cubewhy/RealMain"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("getInstance"),
+                descriptor: Arc::from("()Lorg/cubewhy/RealMain;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("org/cubewhy/RealMain")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let r = TypeResolver::new(&idx);
+        // "RealMain.getInstance()" → [variable("RealMain"), method("getInstance", 0)]
+        let chain = crate::completion::engine::parse_chain_from_expr("RealMain.getInstance()");
+        let result = r.resolve_chain(&chain, &[], None);
+        assert_eq!(
+            result.as_deref(),
+            Some("org/cubewhy/RealMain"),
+            "RealMain.getInstance() should resolve via simple name lookup + method return type"
         );
     }
 }
