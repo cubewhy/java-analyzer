@@ -99,6 +99,10 @@
             JAVA_HOME = pkgs.jdk17.home;
           };
 
+          packages = with pkgs; [
+            cargo-insta
+          ];
+
           #: custom options end }}}
         };
       });

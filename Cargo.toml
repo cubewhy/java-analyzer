@@ -28,3 +28,4 @@ ropey = "1.6.1"
 
 [dev-dependencies]
 tempfile = "3.25.0"
+insta = { version = "1", features = ["ron"] }
