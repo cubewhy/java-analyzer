@@ -31,6 +31,7 @@ pub enum CandidateKind {
     },
     Keyword,
     Annotation,
+    NameSuggestion,
 }
 
 #[derive(Debug, Clone, Serialize)]

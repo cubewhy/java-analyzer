@@ -41,6 +41,8 @@ pub enum CursorLocation {
     Expression { prefix: String },
     /// `@Override|` -> 补全注解类
     Annotation { prefix: String },
+    /// Variable name position: `String |name|` — suggest variable names based on type
+    VariableName { type_name: String },
     /// Unrecognized location
     Unknown,
 }

@@ -355,7 +355,9 @@ impl<'s> JavaContextExtractor<'s> {
                         );
                     }
                     if self.is_in_name_position(node, ancestor) {
-                        return (CursorLocation::Unknown, String::new());
+                        // 提取类型名用于变量名建议
+                        let type_name = self.extract_type_from_decl(ancestor);
+                        return (CursorLocation::VariableName { type_name }, String::new());
                     }
                     let text = self.cursor_truncated_text(node);
                     let clean = strip_sentinel(&text);
@@ -364,6 +366,31 @@ impl<'s> JavaContextExtractor<'s> {
                             prefix: clean.clone(),
                         },
                         clean,
+                    );
+                }
+                "formal_parameter" => {
+                    if self.is_in_formal_param_name_position(node, ancestor) {
+                        let type_name = ancestor
+                            .child_by_field_name("type")
+                            .map(|n| {
+                                self.node_text(n)
+                                    .split('<')
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string()
+                            })
+                            .unwrap_or_default();
+                        return (CursorLocation::VariableName { type_name }, String::new());
+                    }
+
+                    // type position
+                    let text = self.cursor_truncated_text(node);
+                    return (
+                        CursorLocation::TypeAnnotation {
+                            prefix: text.clone(),
+                        },
+                        text,
                     );
                 }
                 "argument_list" => {
@@ -389,6 +416,29 @@ impl<'s> JavaContextExtractor<'s> {
             },
             clean,
         )
+    }
+
+    fn extract_type_from_decl(&self, decl_node: Node) -> String {
+        let mut walker = decl_node.walk();
+        for child in decl_node.named_children(&mut walker) {
+            if child.kind() == "modifiers" {
+                continue;
+            }
+            return self
+                .node_text(child)
+                .split('<')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+        }
+        String::new()
+    }
+
+    fn is_in_formal_param_name_position(&self, id_node: Node, param_node: Node) -> bool {
+        param_node
+            .child_by_field_name("name")
+            .is_some_and(|n| n.id() == id_node.id())
     }
 
     fn handle_argument_list(&self, node: Node) -> (CursorLocation, String) {
@@ -1148,6 +1198,7 @@ fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocation {
         CursorLocation::TypeAnnotation { prefix } => CursorLocation::TypeAnnotation {
             prefix: strip_sentinel(&prefix),
         },
+        CursorLocation::VariableName { type_name } => CursorLocation::VariableName { type_name },
         other => other,
     }
 }
@@ -1827,30 +1878,6 @@ mod tests {
                 .iter()
                 .map(|v| v.name.as_ref())
                 .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_var_name_position_is_unknown() {
-        // `String aCopy` — The cursor should not be completed when the variable name aCopy is on it.
-        let src = indoc::indoc! {r#"
-        class A {
-            public static void main() {
-                String aCopy
-            }
-        }
-    "#};
-        let line = 2u32;
-        let raw = src.lines().nth(2).unwrap();
-        // Place the cursor in the middle of "aCopy" to ensure that the tree-sitter positions the cursor_node to the identifier "aCopy".
-        let acopy_start = raw.find("aCopy").unwrap() as u32;
-        let col = acopy_start + 2; // "aC|opy"
-
-        let ctx = at(src, line, col);
-        assert!(
-            matches!(&ctx.location, CursorLocation::Unknown),
-            "var name position should be Unknown, got {:?}",
-            ctx.location
         );
     }
 
@@ -3101,6 +3128,102 @@ mod tests {
                 if receiver_expr == "Uppercase.method()"
             ),
             "Uppercase.method().| should be MemberAccess, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_formal_param_type_position_is_type_annotation() {
+        let src = indoc::indoc! {r#"
+    class A {
+        public static void main(String[] args) {}
+    }
+    "#};
+        let line = 1u32;
+        let raw = src.lines().nth(1).unwrap();
+        let col = raw.find("String").unwrap() as u32 + 3; // cursor mid "String"
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(ctx.location, CursorLocation::TypeAnnotation { .. }),
+            "cursor on param type should be TypeAnnotation, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_formal_param_name_position_is_variable_name() {
+        let src = indoc::indoc! {r#"
+    class A {
+        public static void main(String[] args) {}
+    }
+    "#};
+        let line = 1u32;
+        let raw = src.lines().nth(1).unwrap();
+        let args_col = raw.find("args").unwrap() as u32 + 2;
+        let ctx = at(src, line, args_col);
+        assert!(
+            matches!(ctx.location, CursorLocation::VariableName { .. }),
+            "cursor on param name should be VariableName, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_formal_param_name_has_type_name() {
+        let src = indoc::indoc! {r#"
+    class A {
+        public static void main(String[] args) {}
+    }
+    "#};
+        let line = 1u32;
+        let raw = src.lines().nth(1).unwrap();
+        let args_col = raw.find("args").unwrap() as u32 + 2;
+        let ctx = at(src, line, args_col);
+        assert!(
+            matches!(&ctx.location, CursorLocation::VariableName { type_name } if type_name == "String[]"),
+            "param name location should carry type 'String[]', got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_var_name_position_is_variable_name() {
+        let src = indoc::indoc! {r#"
+    class A {
+        public static void main() {
+            String aCopy
+        }
+    }
+    "#};
+        let line = 2u32;
+        let raw = src.lines().nth(2).unwrap();
+        let acopy_start = raw.find("aCopy").unwrap() as u32;
+        let col = acopy_start + 2;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(ctx.location, CursorLocation::VariableName { .. }),
+            "var name position should be VariableName, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_var_name_position_has_type_name() {
+        let src = indoc::indoc! {r#"
+    class A {
+        public static void main() {
+            String aCopy
+        }
+    }
+    "#};
+        let line = 2u32;
+        let raw = src.lines().nth(2).unwrap();
+        let acopy_start = raw.find("aCopy").unwrap() as u32;
+        let col = acopy_start + 2;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(&ctx.location, CursorLocation::VariableName { type_name } if type_name == "String"),
+            "var name location should carry type 'String', got {:?}",
             ctx.location
         );
     }

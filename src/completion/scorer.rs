@@ -126,6 +126,7 @@ impl Scorer {
             Keyword => 5.0,
             Annotation => 3.0,
             Snippet => 2.0,
+            NameSuggestion => 1.0,
         }
     }
 }

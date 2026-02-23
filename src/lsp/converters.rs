@@ -115,6 +115,7 @@ fn map_kind(kind: &CandidateKind) -> CompletionItemKind {
         CandidateKind::Constructor { .. } => CompletionItemKind::CONSTRUCTOR,
         CandidateKind::Keyword => CompletionItemKind::KEYWORD,
         CandidateKind::Annotation => CompletionItemKind::EVENT,
+        CandidateKind::NameSuggestion => CompletionItemKind::VARIABLE,
     }
 }
 

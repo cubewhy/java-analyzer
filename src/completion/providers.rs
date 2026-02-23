@@ -8,6 +8,7 @@ pub mod import;
 pub mod keyword;
 pub mod local_var;
 pub mod member;
+pub mod name_suggestion;
 pub mod package;
 pub mod snippet;
 pub mod static_member;

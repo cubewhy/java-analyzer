@@ -205,29 +205,41 @@ fn params_match(descriptor: &str, arg_types: &[Arc<str>]) -> bool {
         .all(|(desc, arg_ty)| descriptor_matches_type(desc, arg_ty))
 }
 
+/// Converts a singleton descriptor to an internal type name
+pub(crate) fn descriptor_to_type(desc: &str) -> Option<&str> {
+    match desc {
+        "B" => Some("byte"),
+        "C" => Some("char"),
+        "D" => Some("double"),
+        "F" => Some("float"),
+        "I" => Some("int"),
+        "J" => Some("long"),
+        "S" => Some("short"),
+        "Z" => Some("boolean"),
+        "V" => Some("void"),
+        _ if desc.starts_with('L') && desc.ends_with(';') => Some(&desc[1..desc.len() - 1]),
+        _ => None,
+    }
+}
+
 /// Compare a single parameter descriptor against an inferred type internal name.
 fn descriptor_matches_type(desc: &str, ty: &str) -> bool {
-    match desc {
-        "B" => ty == "byte",
-        "C" => ty == "char",
-        "D" => ty == "double",
-        "F" => ty == "float",
-        "I" => ty == "int",
-        "J" => ty == "long",
-        "S" => ty == "short",
-        "Z" => ty == "boolean",
-        _ if desc.starts_with('L') && desc.ends_with(';') => {
-            // Object type: extract internal name
-            let internal = &desc[1..desc.len() - 1];
-            // Match by simple name or full internal name
-            ty == internal
-                || ty
-                    .rsplit('/')
-                    .next()
-                    .is_some_and(|simple| internal.rsplit('/').next() == Some(simple))
-        }
-        _ => false,
+    let Some(resolved_ty) = descriptor_to_type(desc) else {
+        return false;
+    };
+
+    if resolved_ty == ty {
+        return true;
     }
+
+    if desc.starts_with('L') {
+        let s1 = resolved_ty.rsplit('/').next();
+        let s2 = ty.rsplit('/').next();
+
+        return s1.is_some() && s1 == s2;
+    }
+
+    false
 }
 
 fn consume_one_descriptor_type(s: &str) -> (&str, &str) {

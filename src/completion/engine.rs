@@ -16,10 +16,11 @@ use crate::completion::LocalVar;
 use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::providers::annotation::AnnotationProvider;
 use crate::completion::providers::expression::ExpressionProvider;
+use crate::completion::providers::name_suggestion::NameSuggestionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
-use crate::completion::type_resolver::ChainSegment;
+use crate::completion::type_resolver::{ChainSegment, descriptor_to_type};
 use crate::index::GlobalIndex;
 
 pub struct CompletionEngine {
@@ -41,6 +42,7 @@ impl CompletionEngine {
                 Box::new(KeywordProvider),    // Keyword (triggered only upon input)
                 Box::new(AnnotationProvider),
                 Box::new(SnippetProvider), // Snippets
+                Box::new(NameSuggestionProvider),
             ],
         }
     }
@@ -422,7 +424,7 @@ pub(crate) fn element_type_of_array(array_internal: &str) -> Option<Arc<str>> {
                 Some(Arc::from(inner.split('<').next()?))
             }
             '[' => Some(Arc::from(stripped)),
-            _ => None,
+            _ => descriptor_to_type(stripped).map(Arc::from),
         };
     }
 
@@ -1234,8 +1236,8 @@ mod tests {
             element_type_of_array("java/lang/String[]").as_deref(),
             Some("java/lang/String")
         );
-        assert_eq!(element_type_of_array("int[]"), None);
-        assert_eq!(element_type_of_array("double[]"), None);
+        assert_eq!(element_type_of_array("int[]").as_deref(), Some("int"));
+        assert_eq!(element_type_of_array("double[]").as_deref(), Some("double"));
     }
 
     #[test]
