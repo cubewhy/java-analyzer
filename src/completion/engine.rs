@@ -92,7 +92,6 @@ impl CompletionEngine {
             && !receiver_expr.is_empty()
         {
             let resolver = TypeResolver::new(index);
-            let chain = parse_chain_from_expr(receiver_expr);
             let resolved = if looks_like_array_access(receiver_expr) {
                 resolve_array_access_type(
                     receiver_expr,
@@ -179,9 +178,9 @@ fn resolve_array_access_type(
     locals: &[LocalVar],
     enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
-    existing_imports: &[String],
-    enclosing_package: Option<&str>,
-    index: &GlobalIndex,
+    _existing_imports: &[String],
+    _enclosing_package: Option<&str>,
+    _index: &GlobalIndex,
 ) -> Option<Arc<str>> {
     let bracket = expr.rfind('[')?;
     if !expr.trim_end().ends_with(']') {
@@ -804,16 +803,16 @@ mod tests {
         use rust_asm::constants::ACC_PUBLIC;
 
         let mut idx = GlobalIndex::new();
-        for (name, desc, ret) in [
-            (
-                "randomFunction",
-                "(Ljava/lang/String;I)LRandomClass;",
-                "RandomClass",
-            ),
-            ("randomFunction", "(Ljava/lang/String;J)LMain2;", "Main2"),
-        ] {
-            // add to same class — need one add_classes call
-        }
+        // for (name, desc, ret) in [
+        //     (
+        //         "randomFunction",
+        //         "(Ljava/lang/String;I)LRandomClass;",
+        //         "RandomClass",
+        //     ),
+        //     ("randomFunction", "(Ljava/lang/String;J)LMain2;", "Main2"),
+        // ] {
+        //     // add to same class — need one add_classes call
+        // }
         idx.add_classes(vec![ClassMetadata {
             package: None,
             name: Arc::from("NestedClass"),
@@ -1130,7 +1129,7 @@ mod tests {
     #[test]
     fn test_var_primitive_array_element_not_resolved() {
         // int[] — element type is primitive, no member completion, should stay unresolved
-        let mut idx = GlobalIndex::new();
+        let idx = GlobalIndex::new();
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
             CursorLocation::MemberAccess {
