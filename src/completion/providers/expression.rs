@@ -28,10 +28,6 @@ impl CompletionProvider for ExpressionProvider {
             _ => return vec![],
         };
 
-        if prefix.is_empty() {
-            return vec![];
-        }
-
         let prefix_lower = prefix.to_lowercase();
 
         // Package name of the current file (used to determine if it is in the same package)
@@ -42,9 +38,13 @@ impl CompletionProvider for ExpressionProvider {
         // Classes that have already been imported in current context
         let imported = index.resolve_imports(&ctx.existing_imports);
         for meta in &imported {
-            let score = match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
-                Some(s) => s,
-                None => continue,
+            let score = if prefix.is_empty() {
+                0
+            } else {
+                match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
+                    Some(s) => s,
+                    None => continue,
+                }
             };
             let fqn = fqn_of(meta);
             results.push(
@@ -70,9 +70,13 @@ impl CompletionProvider for ExpressionProvider {
                 if imported_internals.contains(&meta.internal_name) {
                     continue;
                 }
-                let score = match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
-                    Some(s) => s,
-                    None => continue,
+                let score = if prefix.is_empty() {
+                    0
+                } else {
+                    match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
+                        Some(s) => s,
+                        None => continue,
+                    }
                 };
                 let fqn = fqn_of(&meta);
                 results.push(
@@ -88,37 +92,39 @@ impl CompletionProvider for ExpressionProvider {
             }
         }
 
-        // Other classes (require auto-import)
-        for meta in index.iter_all_classes() {
-            if imported_internals.contains(&meta.internal_name) {
-                continue;
+        // Other classes (global, require auto-import)
+        if !prefix.is_empty() {
+            for meta in index.iter_all_classes() {
+                if imported_internals.contains(&meta.internal_name) {
+                    continue;
+                }
+                let score = match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let fqn = fqn_of(meta);
+                let candidate = CompletionCandidate::new(
+                    Arc::clone(&meta.name),
+                    meta.name.to_string(),
+                    CandidateKind::ClassName,
+                    self.name(),
+                )
+                .with_detail(fqn.clone())
+                .with_score(40.0 + score as f32 * 0.1);
+
+                let needs_import = is_import_needed(
+                    &fqn,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                );
+                let candidate = if needs_import {
+                    candidate.with_import(fqn)
+                } else {
+                    candidate
+                };
+
+                results.push(candidate);
             }
-            let score = match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
-                Some(s) => s,
-                None => continue,
-            };
-            let fqn = fqn_of(meta);
-            let candidate = CompletionCandidate::new(
-                Arc::clone(&meta.name),
-                meta.name.to_string(),
-                CandidateKind::ClassName,
-                self.name(),
-            )
-            .with_detail(fqn.clone())
-            .with_score(40.0 + score as f32 * 0.1);
-
-            let needs_import = is_import_needed(
-                &fqn,
-                &ctx.existing_imports,
-                ctx.enclosing_package.as_deref(),
-            );
-            let candidate = if needs_import {
-                candidate.with_import(fqn)
-            } else {
-                candidate
-            };
-
-            results.push(candidate);
         }
 
         results
