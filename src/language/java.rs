@@ -1,7 +1,3 @@
-use std::sync::Arc;
-use tracing::debug;
-use tree_sitter::{Node, Parser, Query};
-
 use super::Language;
 use super::ts_utils::{capture_text, run_query};
 use crate::completion::context::CurrentClassMember;
@@ -10,6 +6,9 @@ use crate::completion::{
     context::{CursorLocation, LocalVar},
 };
 use crate::language::ts_utils::find_method_by_offset;
+use std::sync::Arc;
+use tracing::debug;
+use tree_sitter::{Node, Parser, Query};
 
 #[derive(Debug)]
 pub struct JavaLanguage;
@@ -39,11 +38,12 @@ impl Language for JavaLanguage {
         trigger_char: Option<char>,
     ) -> Option<CompletionContext> {
         let offset = line_col_to_offset(source, line, character)?;
-        tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context");
+        debug!(line, character, trigger = ?trigger_char, "java: parsing context");
 
+        // Comment checking is performed once at the outermost layer and will not be repeated thereafter.
         if is_cursor_in_comment(source, offset) {
             return Some(CompletionContext::new(
-                crate::completion::context::CursorLocation::Unknown,
+                CursorLocation::Unknown,
                 "",
                 vec![],
                 None,
@@ -55,11 +55,8 @@ impl Language for JavaLanguage {
 
         let mut parser = self.make_parser();
         let tree = parser.parse(source, None)?;
-        let root = tree.root_node();
-
         let extractor = JavaContextExtractor::new(source, offset);
-        let ctx = extractor.extract(root, trigger_char);
-        Some(ctx)
+        Some(extractor.extract(tree.root_node(), trigger_char))
     }
 }
 
@@ -79,48 +76,24 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract(self, root: Node, trigger_char: Option<char>) -> CompletionContext {
-        // The cursor itself is inside a comment (// line)
-        if is_cursor_in_comment(self.source, self.offset) {
-            return self.empty_context();
-        }
-
-        // Try offset first; if that yields nothing, try offset-1 (handles col-0 case)
         let cursor_node = self.find_cursor_node(root);
 
-        // If the found node is an annotation type (a fallback at the tree-sitter level)
+        // A fallback comment node at the tree-sitter level
         if cursor_node
-            .map(|n| n.kind() == "line_comment" || n.kind() == "block_comment")
+            .map(|n| is_comment_kind(n.kind()))
             .unwrap_or(false)
         {
             return self.empty_context();
         }
 
-        // If the found node is in a comment (the line containing the node start_byte is a comment line), return Unknown.
-        if let Some(node) = cursor_node
-            && self.node_is_in_comment(node)
-        {
-            return self.empty_context();
-        }
-
-        // Also check if the cursor is inside a comment.
-        if is_cursor_in_comment(self.source, self.offset) {
-            return self.empty_context();
-        }
-
         let (location, query) = self.determine_location(cursor_node, trigger_char);
         let local_variables = self.extract_locals(root, cursor_node);
+
         let enclosing_class = self
             .extract_enclosing_class(cursor_node)
             .or_else(|| self.extract_enclosing_class_by_offset(root));
         let enclosing_package = self.extract_package(root);
-
-        // Construct the internal name using the package name + simple class name
-        let enclosing_internal_name = match (&enclosing_package, &enclosing_class) {
-            (Some(pkg), Some(cls)) => Some(Arc::from(format!("{}/{}", pkg, cls).as_str())),
-            (None, Some(cls)) => Some(Arc::clone(cls)),
-            _ => None,
-        };
-
+        let enclosing_internal_name = build_internal_name(&enclosing_package, &enclosing_class);
         let existing_imports = self.extract_imports(root);
 
         let current_class_members = cursor_node
@@ -131,8 +104,8 @@ impl<'s> JavaContextExtractor<'s> {
 
         let enclosing_class_member = cursor_node
             .and_then(|n| find_ancestor(n, "method_declaration"))
-            .or_else(|| find_method_by_offset(root, self.offset)) // ★
-            .and_then(|method| self.extract_method_as_member(method));
+            .or_else(|| find_method_by_offset(root, self.offset))
+            .and_then(|m| self.parse_method_node(m));
 
         let char_after_cursor = self.source[self.offset..]
             .chars()
@@ -152,67 +125,23 @@ impl<'s> JavaContextExtractor<'s> {
         .with_char_after_cursor(char_after_cursor)
     }
 
-    fn node_is_in_comment(&self, node: Node) -> bool {
-        // 检查节点的 kind 是否是注释
-        if node.kind() == "line_comment" || node.kind() == "block_comment" {
-            return true;
-        }
-        // 检查节点 start_byte 所在行是否是注释行
-        let node_start = node.start_byte();
-        if node_start >= self.bytes.len() {
-            return false;
-        }
-        // 找节点开始位置所在行的行首
-        let line_start = self.source[..node_start]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        // 如果节点不在光标所在行（说明 tree-sitter 找到了别的行的节点）
-        let cursor_line_start = self.source[..self.offset]
-            .rfind('\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        if line_start != cursor_line_start {
-            // 节点在不同行，说明光标所在位置没有有效节点，检查光标行
-            return false; // 由外层 is_cursor_in_comment 处理
-        }
-        false
-    }
-
-    fn empty_context(&self) -> CompletionContext {
-        CompletionContext::new(
-            crate::completion::context::CursorLocation::Unknown,
-            "",
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-        )
-    }
-
     fn find_cursor_node<'tree>(&self, root: Node<'tree>) -> Option<Node<'tree>> {
-        let node = root.named_descendant_for_byte_range(self.offset.saturating_sub(1), self.offset);
-        if let Some(n) = node {
-            if n.kind() == "line_comment" || n.kind() == "block_comment" {
-                return None;
-            }
-            // 节点的范围必须包含光标（end_byte >= offset）
-            // 如果节点在光标之前结束，说明找到的是相邻节点
-            if n.end_byte() < self.offset {
-                return None;
-            }
+        // 优先：[offset-1, offset)
+        if let Some(n) =
+            root.named_descendant_for_byte_range(self.offset.saturating_sub(1), self.offset)
+            && !is_comment_kind(n.kind())
+            && n.end_byte() >= self.offset
+        {
             return Some(n);
         }
-        if self.offset < self.bytes.len() {
-            let n = root.named_descendant_for_byte_range(self.offset, self.offset + 1);
-            if let Some(n) = n {
-                if n.kind() == "line_comment" || n.kind() == "block_comment" {
-                    return None;
-                }
-                return Some(n);
-            }
+        // Back: [offset, offset+1), handles the case at the beginning of the line.
+        if self.offset < self.bytes.len()
+            && let Some(n) = root.named_descendant_for_byte_range(self.offset, self.offset + 1)
+            && !is_comment_kind(n.kind())
+        {
+            return Some(n);
         }
+
         None
     }
 
@@ -221,11 +150,6 @@ impl<'s> JavaContextExtractor<'s> {
         cursor_node: Option<Node>,
         trigger_char: Option<char>,
     ) -> (CursorLocation, String) {
-        // 光标在注释里
-        if is_cursor_in_comment(self.source, self.offset) {
-            return (CursorLocation::Unknown, String::new());
-        }
-
         let node = match cursor_node {
             Some(n) => n,
             None => return self.fallback_location(trigger_char),
@@ -238,78 +162,9 @@ impl<'s> JavaContextExtractor<'s> {
                 "method_invocation" => return self.handle_member_access(current),
                 "field_access" => return self.handle_member_access(current),
                 "object_creation_expression" => return self.handle_constructor(current),
-                "argument_list" => {
-                    let prefix_text = &self.source[..self.offset];
-                    let last_line = prefix_text.lines().last().unwrap_or("").trim();
-                    let prefix = extract_arg_prefix(last_line);
-                    return (
-                        CursorLocation::MethodArgument {
-                            prefix: prefix.clone(),
-                        },
-                        prefix,
-                    );
-                }
+                "argument_list" => return self.handle_argument_list(current),
                 "identifier" | "type_identifier" => {
-                    let mut ancestor = current;
-                    loop {
-                        ancestor = match ancestor.parent() {
-                            Some(p) => p,
-                            None => break,
-                        };
-                        match ancestor.kind() {
-                            "field_access" | "method_invocation" => {
-                                return self.handle_member_access(ancestor);
-                            }
-                            "import_declaration" => return self.handle_import(ancestor),
-                            "object_creation_expression" => {
-                                return self.handle_constructor(ancestor);
-                            }
-                            "local_variable_declaration" => {
-                                if self.is_in_type_position(current, ancestor) {
-                                    let text = self.cursor_truncated_text(current);
-                                    return (
-                                        CursorLocation::TypeAnnotation {
-                                            prefix: text.clone(),
-                                        },
-                                        text,
-                                    );
-                                }
-                                // Check if it is in the variable name position (the name field of variable_declarator)
-                                if self.is_in_name_position(current, ancestor) {
-                                    // Variable name not fully padded
-                                    return (CursorLocation::Unknown, String::new());
-                                }
-                                // Other locations (initialization expressions) -> Expression
-                                let text = self.cursor_truncated_text(current);
-                                return self.maybe_member_access_from_text(text);
-                            }
-                            "argument_list" => {
-                                if let Some(parent) = current.parent()
-                                    && parent.kind() == "method_invocation"
-                                {
-                                    let open_paren_offset = current.start_byte();
-                                    // When the cursor is before or just on '(', it completes member names, not parameters.
-                                    if self.offset <= open_paren_offset {
-                                        return self.handle_member_access(parent);
-                                    }
-                                }
-                                let prefix_text = &self.source[..self.offset];
-                                let last_line = prefix_text.lines().last().unwrap_or("").trim();
-                                let prefix = extract_arg_prefix(last_line);
-                                return (
-                                    CursorLocation::MethodArgument {
-                                        prefix: prefix.clone(),
-                                    },
-                                    prefix,
-                                );
-                            }
-                            "block" | "class_body" | "program" => break,
-                            _ => {}
-                        }
-                    }
-                    // Truncate to cursor position
-                    let text = self.cursor_truncated_text(current);
-                    return self.maybe_member_access_from_text(text);
+                    return self.handle_identifier(current, trigger_char);
                 }
                 _ => {}
             }
@@ -321,24 +176,111 @@ impl<'s> JavaContextExtractor<'s> {
         self.fallback_location(trigger_char)
     }
 
-    /// Whether the cursor is located at the position of the variable name in the variable declaration.
-    fn is_in_name_position(&self, id_node: Node, decl_node: Node) -> bool {
-        // The first named child of variable_declarator is name
-        let mut wc = decl_node.walk();
-        for declarator in decl_node.named_children(&mut wc) {
-            if declarator.kind() != "variable_declarator" {
-                continue;
-            }
-            if let Some(name_node) = declarator.child_by_field_name("name")
-                && name_node.id() == id_node.id()
-            {
-                return true;
+    fn handle_identifier(
+        &self,
+        node: Node,
+        _trigger_char: Option<char>,
+    ) -> (CursorLocation, String) {
+        let mut ancestor = node;
+        loop {
+            ancestor = match ancestor.parent() {
+                Some(p) => p,
+                None => break,
+            };
+            match ancestor.kind() {
+                "field_access" | "method_invocation" => {
+                    return self.handle_member_access(ancestor);
+                }
+                "import_declaration" => return self.handle_import(ancestor),
+                "object_creation_expression" => return self.handle_constructor(ancestor),
+                "local_variable_declaration" => {
+                    if self.is_in_type_position(node, ancestor) {
+                        let text = self.cursor_truncated_text(node);
+                        return (
+                            CursorLocation::TypeAnnotation {
+                                prefix: text.clone(),
+                            },
+                            text,
+                        );
+                    }
+                    if self.is_in_name_position(node, ancestor) {
+                        return (CursorLocation::Unknown, String::new());
+                    }
+                    let text = self.cursor_truncated_text(node);
+                    return self.maybe_member_access_from_text(text);
+                }
+                "argument_list" => {
+                    // If the cursor is before '(', it will complete the method name instead of the parameters.
+                    if let Some(parent) = node.parent()
+                        && parent.kind() == "method_invocation"
+                        && self.offset <= ancestor.start_byte()
+                    {
+                        return self.handle_member_access(parent);
+                    }
+                    return self.handle_argument_list(ancestor);
+                }
+                "block" | "class_body" | "program" => break,
+                _ => {}
             }
         }
-        false
+        let text = self.cursor_truncated_text(node);
+        self.maybe_member_access_from_text(text)
     }
 
-    /// Retrieves the node text, but only the cursor position (handles the case where the cursor is in the middle of the identifier).
+    fn handle_argument_list(&self, _node: Node) -> (CursorLocation, String) {
+        let prefix = self.current_line_prefix_trimmed();
+        let prefix = extract_arg_prefix(prefix);
+        (
+            CursorLocation::MethodArgument {
+                prefix: prefix.clone(),
+            },
+            prefix,
+        )
+    }
+
+    fn fallback_location(&self, _trigger_char: Option<char>) -> (CursorLocation, String) {
+        let current_line = self.current_line_prefix_trimmed();
+
+        if is_in_line_comment(current_line) {
+            return (CursorLocation::Unknown, String::new());
+        }
+        if let Some(result) = self.parse_last_line(current_line) {
+            return result;
+        }
+        let query = current_line
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .next_back()
+            .unwrap_or("")
+            .to_string();
+        (
+            CursorLocation::Expression {
+                prefix: query.clone(),
+            },
+            query,
+        )
+    }
+
+    /// The content from the beginning of the current line to the cursor (after trimming).
+    // Use `rfind('\n')` instead of `lines().last()` to avoid Rust discarding trailing blank lines.
+    fn current_line_prefix_trimmed(&self) -> &str {
+        let before = &self.source[..self.offset];
+        let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        before[line_start..].trim()
+    }
+
+    fn maybe_member_access_from_text(&self, text: String) -> (CursorLocation, String) {
+        let line = self.current_line_prefix_trimmed();
+        if let Some(result) = self.parse_last_line(line) {
+            return result;
+        }
+        (
+            CursorLocation::Expression {
+                prefix: text.clone(),
+            },
+            text,
+        )
+    }
+
     fn cursor_truncated_text(&self, node: Node) -> String {
         let start = node.start_byte();
         let end = node.end_byte().min(self.offset);
@@ -348,32 +290,30 @@ impl<'s> JavaContextExtractor<'s> {
         self.source[start..end].to_string()
     }
 
-    /// Whether the cursor is located at the type declaration position of the variable.
-    fn is_in_type_position(&self, id_node: Node, decl_node: Node) -> bool {
-        // The first named non-modifier child node of local_variable_declaration is the type
-        let mut walker = decl_node.walk();
-        for child in decl_node.named_children(&mut walker) {
-            if child.kind() == "modifiers" {
-                continue;
-            }
-            // First non-modifier named child node
-            return child.id() == id_node.id();
-        }
-        false
+    fn node_text(&self, node: Node) -> &str {
+        node.utf8_text(self.bytes).unwrap_or("")
     }
 
-    /// Core heuristic: given the trimmed last line before cursor,
-    /// return (CursorLocation, query) or None if no pattern matched.
-    /// Caller supplies the final fallback.
+    fn empty_context(&self) -> CompletionContext {
+        CompletionContext::new(
+            CursorLocation::Unknown,
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        )
+    }
+
     fn parse_last_line(&self, last_line: &str) -> Option<(CursorLocation, String)> {
-        // ── constructor: "new Foo" / "new " ──────────────────────────────────
+        // constructor: "new Foo" / "new "
         let stmt_fragment = last_line
             .rsplit([';', '{', '='])
             .next()
             .unwrap_or(last_line)
             .trim();
 
-        // Match both "new Foo" and "new" (trailing space trimmed away)
         let new_rest = stmt_fragment.strip_prefix("new ").or_else(|| {
             if stmt_fragment == "new" {
                 Some("")
@@ -382,26 +322,21 @@ impl<'s> JavaContextExtractor<'s> {
             }
         });
 
-        // Only treat as ConstructorCall if there's no dot after the constructor
-        // "new Foo"      → ConstructorCall ✓
-        // "new Foo()"    → ConstructorCall ✓
-        // "new Foo()."   → skip, let dot-access handle it ✗
-        if let Some(rest) = new_rest {
-            // let has_dot_after_ctor = rest.contains(')') && rest.trim_end().ends_with('.');
-            // more precisely: if rest contains "(..." and after closing paren there's a dot
-            if !has_chained_dot(rest) {
-                let class_prefix = rest.split('(').next().unwrap_or(rest).trim().to_string();
-                let expected_type = self.infer_expected_type_from_text(last_line);
-                return Some((
-                    CursorLocation::ConstructorCall {
-                        class_prefix: class_prefix.clone(),
-                        expected_type,
-                    },
-                    class_prefix,
-                ));
-            }
+        if let Some(rest) = new_rest
+            && !has_chained_dot(rest)
+        {
+            let class_prefix = rest.split('(').next().unwrap_or(rest).trim().to_string();
+            let expected_type = self.infer_expected_type_from_text(last_line);
+            return Some((
+                CursorLocation::ConstructorCall {
+                    class_prefix: class_prefix.clone(),
+                    expected_type,
+                },
+                class_prefix,
+            ));
         }
-        // ── dot access ────────────────────────────────────────────────────────
+
+        // dot access
         if let Some(dot_pos) = last_meaningful_dot(last_line) {
             let receiver = last_line[..dot_pos].trim();
             let member_pfx = last_line[dot_pos + 1..].to_string();
@@ -425,57 +360,7 @@ impl<'s> JavaContextExtractor<'s> {
                 )
             });
         }
-
         None
-    }
-
-    /// When tree-sitter fails to recognize field_access, use text heuristics to determine it.
-    fn maybe_member_access_from_text(&self, text: String) -> (CursorLocation, String) {
-        let prefix_text = &self.source[..self.offset];
-        let line_start = prefix_text.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let last_line = prefix_text[line_start..].trim();
-
-        if let Some(result) = self.parse_last_line(last_line) {
-            return result;
-        }
-        (
-            CursorLocation::Expression {
-                prefix: text.clone(),
-            },
-            text,
-        )
-    }
-
-    fn fallback_location(&self, _trigger_char: Option<char>) -> (CursorLocation, String) {
-        if is_cursor_in_comment(self.source, self.offset) {
-            return (CursorLocation::Unknown, String::new());
-        }
-
-        let prefix_text = &self.source[..self.offset];
-
-        let line_start = prefix_text.rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let current_line = prefix_text[line_start..].trim();
-
-        if is_in_line_comment(current_line) {
-            return (CursorLocation::Unknown, String::new());
-        }
-
-        if let Some(result) = self.parse_last_line(current_line) {
-            return result;
-        }
-
-        let query = current_line
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .next_back()
-            .unwrap_or("")
-            .to_string();
-
-        (
-            CursorLocation::Expression {
-                prefix: query.clone(),
-            },
-            query,
-        )
     }
 
     fn handle_import(&self, node: Node) -> (CursorLocation, String) {
@@ -491,22 +376,12 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn handle_member_access(&self, node: Node) -> (CursorLocation, String) {
-        // Structure of field_access / method_invocation:
-        // Java field_access:  identifier "." identifier
-        // Java method_invocation: ... "." identifier arguments
-        // Child nodes do not have a field name; the field name needs to be retrieved by position.
-
-        // Take the last identifier/type_identifier as member_prefix
         let mut walker = node.walk();
         let children: Vec<Node> = node.children(&mut walker).collect();
 
-        let dot_pos = children.iter().position(|n| n.kind() == ".");
-
-        // Find the first identifier after "."
-        let dot_pos = match dot_pos {
+        let dot_pos = match children.iter().position(|n| n.kind() == ".") {
             Some(p) => p,
             None => {
-                // Find the method name identifier (the first identifier child node)
                 let name_node = children
                     .iter()
                     .find(|n| n.kind() == "identifier" || n.kind() == "type_identifier");
@@ -526,29 +401,26 @@ impl<'s> JavaContextExtractor<'s> {
             .iter()
             .find(|n| n.kind() == "identifier" || n.kind() == "type_identifier");
 
-        // Truncate member_prefix with the cursor
         let member_prefix = match member_node {
             Some(mn) => {
-                let node_start = mn.start_byte();
-                let node_end = mn.end_byte();
-                if self.offset <= node_start {
+                let s = mn.start_byte();
+                let e = mn.end_byte();
+                if self.offset <= s {
                     String::new()
-                } else if self.offset < node_end {
-                    self.source[node_start..self.offset].to_string()
+                } else if self.offset < e {
+                    self.source[s..self.offset].to_string()
                 } else {
                     self.node_text(*mn).to_string()
                 }
             }
             None => {
-                let prefix_text = &self.source[..self.offset];
-                let last_line = prefix_text.lines().last().unwrap_or("");
-                last_meaningful_dot(last_line.trim())
-                    .map(|p| last_line.trim()[p + 1..].to_string())
+                let line = self.current_line_prefix_trimmed();
+                last_meaningful_dot(line)
+                    .map(|p| line[p + 1..].to_string())
                     .unwrap_or_default()
             }
         };
 
-        // Take the part before "." as the receiver
         let receiver_node = if dot_pos > 0 {
             Some(children[dot_pos - 1])
         } else {
@@ -560,12 +432,12 @@ impl<'s> JavaContextExtractor<'s> {
 
         if let Some(recv) = receiver_node {
             let recv_text = self.node_text(recv);
-            let is_type = recv_text.chars().next().is_some_and(|c| c.is_uppercase());
-            if is_type && node.kind() == "field_access" {
-                let internal = recv_text.replace('.', "/");
+            if recv_text.chars().next().is_some_and(|c| c.is_uppercase())
+                && node.kind() == "field_access"
+            {
                 return (
                     CursorLocation::StaticAccess {
-                        class_internal_name: Arc::from(internal.as_str()),
+                        class_internal_name: Arc::from(recv_text.replace('.', "/").as_str()),
                         member_prefix: member_prefix.clone(),
                     },
                     member_prefix,
@@ -599,22 +471,56 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn infer_expected_type_from_lhs(&self, node: Node) -> Option<String> {
-        // Walk up to local_variable_declaration
         let decl = find_ancestor(node, "local_variable_declaration")?;
-        // The first non-modifier named child is the type
         let mut walker = decl.walk();
         for child in decl.named_children(&mut walker) {
             if child.kind() == "modifiers" {
                 continue;
             }
             let ty = self.node_text(child);
-            // Strip generics: List<String> → List
             let simple = ty.split('<').next()?.trim();
             if !simple.is_empty() {
                 return Some(simple.to_string());
             }
         }
         None
+    }
+
+    fn infer_expected_type_from_text(&self, line: &str) -> Option<String> {
+        let lhs = line.split('=').next()?.trim();
+        let first_token = lhs.split_whitespace().next()?;
+        let simple = first_token.split('<').next()?.trim();
+        if simple.chars().next().is_some_and(|c| c.is_uppercase()) {
+            Some(simple.to_string())
+        } else {
+            None
+        }
+    }
+
+    fn is_in_name_position(&self, id_node: Node, decl_node: Node) -> bool {
+        let mut wc = decl_node.walk();
+        for declarator in decl_node.named_children(&mut wc) {
+            if declarator.kind() != "variable_declarator" {
+                continue;
+            }
+            if let Some(name_node) = declarator.child_by_field_name("name")
+                && name_node.id() == id_node.id()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_in_type_position(&self, id_node: Node, decl_node: Node) -> bool {
+        let mut walker = decl_node.walk();
+        for child in decl_node.named_children(&mut walker) {
+            if child.kind() == "modifiers" {
+                continue;
+            }
+            return child.id() == id_node.id();
+        }
+        false
     }
 
     fn extract_locals(&self, root: Node, cursor_node: Option<Node>) -> Vec<LocalVar> {
@@ -624,11 +530,11 @@ impl<'s> JavaContextExtractor<'s> {
             .unwrap_or(root);
 
         let query_src = r#"
-        (local_variable_declaration
-            type: (_) @type
-            declarator: (variable_declarator
-                name: (identifier) @name))
-    "#;
+            (local_variable_declaration
+                type: (_) @type
+                declarator: (variable_declarator
+                    name: (identifier) @name))
+        "#;
         let q = match Query::new(&tree_sitter_java::LANGUAGE.into(), query_src) {
             Ok(q) => q,
             Err(e) => {
@@ -636,27 +542,21 @@ impl<'s> JavaContextExtractor<'s> {
                 return vec![];
             }
         };
-
         let type_idx = q.capture_index_for_name("type").unwrap();
         let name_idx = q.capture_index_for_name("name").unwrap();
 
-        let raw_results = run_query(&q, search_root, self.bytes, None);
-
-        let mut vars: Vec<LocalVar> = raw_results
+        let mut vars: Vec<LocalVar> = run_query(&q, search_root, self.bytes, None)
             .into_iter()
             .filter_map(|captures| {
                 let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
                 let name_node = captures.iter().find(|(idx, _)| *idx == name_idx)?.1;
-
-                // Manual filtering: The declaration must precede the cursor (using the start position of the type node)
                 if ty_node.start_byte() >= self.offset {
                     return None;
                 }
 
                 let ty = ty_node.utf8_text(self.bytes).ok()?;
                 let name = name_node.utf8_text(self.bytes).ok()?;
-
-                tracing::debug!(
+                debug!(
                     ty,
                     name,
                     start = ty_node.start_byte(),
@@ -665,33 +565,23 @@ impl<'s> JavaContextExtractor<'s> {
                 );
 
                 let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
-                let raw_ty = if raw_ty == "var" {
-                    // Try constructor first (no index needed)
-                    match infer_type_from_initializer(ty_node, self.bytes) {
-                        Some(t) => {
-                            // Return a LocalVar with the inferred type directly
-                            return Some(LocalVar {
-                                name: Arc::from(name),
-                                type_internal: Arc::from(java_type_to_internal(&t).as_str()),
-                                init_expr: None,
-                            });
-                        }
-                        None => {
-                            // Cannot infer statically — store the init expression for later resolution
-                            let init_text = get_initializer_text(ty_node, self.bytes);
-                            return Some(LocalVar {
-                                name: Arc::from(name),
-                                type_internal: Arc::from("var"), // placeholder
-                                init_expr: init_text,
-                            });
-                        }
-                    }
-                } else {
-                    raw_ty.to_string()
-                };
+                if raw_ty == "var" {
+                    return Some(match infer_type_from_initializer(ty_node, self.bytes) {
+                        Some(t) => LocalVar {
+                            name: Arc::from(name),
+                            type_internal: Arc::from(java_type_to_internal(&t).as_str()),
+                            init_expr: None,
+                        },
+                        None => LocalVar {
+                            name: Arc::from(name),
+                            type_internal: Arc::from("var"),
+                            init_expr: get_initializer_text(ty_node, self.bytes),
+                        },
+                    });
+                }
                 Some(LocalVar {
                     name: Arc::from(name),
-                    type_internal: Arc::from(java_type_to_internal(&raw_ty).as_str()),
+                    type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
                     init_expr: None,
                 })
             })
@@ -709,18 +599,13 @@ impl<'s> JavaContextExtractor<'s> {
             Some(m) => m,
             None => return vec![],
         };
-
         let query_src = r#"
-            (formal_parameter
-                type: (_) @type
-                name: (identifier) @name)
+            (formal_parameter type: (_) @type name: (identifier) @name)
         "#;
-
         let q = match Query::new(&tree_sitter_java::LANGUAGE.into(), query_src) {
             Ok(q) => q,
             Err(_) => return vec![],
         };
-
         let type_idx = q.capture_index_for_name("type").unwrap();
         let name_idx = q.capture_index_for_name("name").unwrap();
 
@@ -746,7 +631,6 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract_enclosing_class_by_offset(&self, root: Node) -> Option<Arc<str>> {
-        // Find the innermost class_declaration containing self.offset
         let mut result: Option<Arc<str>> = None;
         fn dfs<'a>(node: Node<'a>, offset: usize, bytes: &[u8], result: &mut Option<Arc<str>>) {
             if node.start_byte() > offset || node.end_byte() <= offset {
@@ -758,7 +642,6 @@ impl<'s> JavaContextExtractor<'s> {
             {
                 *result = Some(Arc::from(name));
             }
-
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 dfs(child, offset, bytes, result);
@@ -769,17 +652,18 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract_imports(&self, root: Node) -> Vec<String> {
-        let query_src = r#"(import_declaration) @import"#;
-        let q = match Query::new(&tree_sitter_java::LANGUAGE.into(), query_src) {
+        let q = match Query::new(
+            &tree_sitter_java::LANGUAGE.into(),
+            r#"(import_declaration) @import"#,
+        ) {
             Ok(q) => q,
             Err(_) => return vec![],
         };
         let idx = q.capture_index_for_name("import").unwrap();
-
         run_query(&q, root, self.bytes, None)
             .into_iter()
-            .filter_map(|captures| {
-                let text = capture_text(&captures, idx, self.bytes)?;
+            .filter_map(|caps| {
+                let text = capture_text(&caps, idx, self.bytes)?;
                 let cleaned = text
                     .trim_start_matches("import")
                     .trim()
@@ -796,14 +680,16 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn extract_package(&self, root: Node) -> Option<Arc<str>> {
-        let q_src = r#"(package_declaration) @pkg"#;
-        let q = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src).ok()?;
+        let q = Query::new(
+            &tree_sitter_java::LANGUAGE.into(),
+            r#"(package_declaration) @pkg"#,
+        )
+        .ok()?;
         let idx = q.capture_index_for_name("pkg")?;
         let results = run_query(&q, root, self.bytes, None);
         let text = results
             .first()
             .and_then(|caps| capture_text(caps, idx, self.bytes))?;
-        // "package org.cubewhy;" → "org/cubewhy"
         let pkg = text
             .trim_start_matches("package")
             .trim()
@@ -813,127 +699,36 @@ impl<'s> JavaContextExtractor<'s> {
         Some(Arc::from(pkg.as_str()))
     }
 
-    /// Extract all methods and fields directly from the class_body AST (full text, not limited by cursor)
+    /// Extract all members (methods + fields) from class_body
     fn extract_class_members_from_body(&self, body: Node) -> Vec<CurrentClassMember> {
         let mut members = Vec::new();
         let mut cursor = body.walk();
-
         for child in body.children(&mut cursor) {
             match child.kind() {
                 "method_declaration" => {
-                    // Extract method name and modifiers
-                    let mut name: Option<&str> = None;
-                    let mut is_static = false;
-                    let mut is_private = false;
-                    let mut ret_type = "void";
-                    let mut params = "()";
-
-                    let mut wc = child.walk();
-                    for c in child.children(&mut wc) {
-                        match c.kind() {
-                            "modifiers" => {
-                                let t = self.node_text(c);
-                                is_static = t.contains("static");
-                                is_private = t.contains("private");
-                            }
-                            "identifier" if name.is_none() => {
-                                name = Some(self.node_text(c));
-                            }
-                            "void_type"
-                            | "integral_type"
-                            | "floating_point_type"
-                            | "boolean_type"
-                            | "type_identifier"
-                            | "array_type"
-                            | "generic_type" => {
-                                ret_type = self.node_text(c);
-                            }
-                            "formal_parameters" => {
-                                params = self.node_text(c);
-                            }
-                            _ => {}
-                        }
-                    }
-                    if let Some(n) = name
-                        && n != "<init>"
-                        && n != "<clinit>"
-                    {
-                        members.push(CurrentClassMember {
-                            name: Arc::from(n),
-                            is_method: true,
-                            is_static,
-                            is_private,
-                            descriptor: Arc::from(
-                                crate::index::source::build_java_descriptor(params, ret_type)
-                                    .as_str(),
-                            ),
-                        });
+                    if let Some(m) = self.parse_method_node(child) {
+                        members.push(m);
                     }
                 }
                 "field_declaration" => {
-                    let mut is_static = false;
-                    let mut is_private = false;
-                    let mut field_type = "Object";
-                    let mut names = Vec::new();
-
-                    let mut wc = child.walk();
-                    for c in child.children(&mut wc) {
-                        match c.kind() {
-                            "modifiers" => {
-                                let t = self.node_text(c);
-                                is_static = t.contains("static");
-                                is_private = t.contains("private");
-                            }
-                            "void_type"
-                            | "integral_type"
-                            | "floating_point_type"
-                            | "boolean_type"
-                            | "type_identifier"
-                            | "array_type"
-                            | "generic_type" => {
-                                field_type = self.node_text(c);
-                            }
-                            "variable_declarator" => {
-                                let mut vc = c.walk();
-                                for vchild in c.children(&mut vc) {
-                                    if vchild.kind() == "identifier" {
-                                        names.push(self.node_text(vchild).to_string());
-                                        break;
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    for n in names {
-                        members.push(CurrentClassMember {
-                            name: Arc::from(n.as_str()),
-                            is_method: false,
-                            is_static,
-                            is_private,
-                            descriptor: Arc::from(
-                                crate::index::source::java_type_to_descriptor(field_type).as_str(),
-                            ),
-                        });
-                    }
+                    members.extend(self.parse_field_node(child));
                 }
                 _ => {}
             }
         }
-
         members
     }
 
-    /// Resolve a single method_declaration node into CurrentClassMember
-    fn extract_method_as_member(&self, method: Node) -> Option<CurrentClassMember> {
+    /// parse a single method_declaration node -> CurrentClassMember
+    fn parse_method_node(&self, node: Node) -> Option<CurrentClassMember> {
         let mut name: Option<&str> = None;
         let mut is_static = false;
         let mut is_private = false;
         let mut ret_type = "void";
         let mut params = "()";
 
-        let mut wc = method.walk();
-        for c in method.children(&mut wc) {
+        let mut wc = node.walk();
+        for c in node.children(&mut wc) {
             match c.kind() {
                 "modifiers" => {
                     let t = self.node_text(c);
@@ -959,7 +754,7 @@ impl<'s> JavaContextExtractor<'s> {
             }
         }
 
-        let name = name?;
+        let name = name.filter(|n| *n != "<init>" && *n != "<clinit>")?;
         Some(CurrentClassMember {
             name: Arc::from(name),
             is_method: true,
@@ -971,37 +766,127 @@ impl<'s> JavaContextExtractor<'s> {
         })
     }
 
-    fn node_text(&self, node: Node) -> &str {
-        node.utf8_text(self.bytes).unwrap_or("")
-    }
+    /// Parse a single field_declaration node -> Vec<CurrentClassMember> (multiple fields can be declared on one line)
+    fn parse_field_node(&self, node: Node) -> Vec<CurrentClassMember> {
+        let mut is_static = false;
+        let mut is_private = false;
+        let mut field_type = "Object";
+        let mut names = Vec::new();
 
-    /// Cheap text heuristic to extract the LHS declared type from a line like
-    /// `"    String a = new "` or `"    List<Integer> items = new "`.
-    /// Returns `None` if the pattern is not recognised.
-    fn infer_expected_type_from_text(&self, line: &str) -> Option<String> {
-        // Split on '=' — take the LHS
-        let lhs = line.split('=').next()?.trim();
-        // lhs is like "String a" or "List<Integer> items" or "    String a"
-        // Take the first whitespace-separated token (the type)
-        let first_token = lhs.split_whitespace().next()?;
-        // Strip generics: "List<Integer>" → "List"
-        let simple = first_token.split('<').next()?.trim();
-        // Must start with uppercase — otherwise it's a keyword / modifier
-        if simple.chars().next().is_some_and(|c| c.is_uppercase()) {
-            Some(simple.to_string())
-        } else {
-            None
+        let mut wc = node.walk();
+        for c in node.children(&mut wc) {
+            match c.kind() {
+                "modifiers" => {
+                    let t = self.node_text(c);
+                    is_static = t.contains("static");
+                    is_private = t.contains("private");
+                }
+                "void_type"
+                | "integral_type"
+                | "floating_point_type"
+                | "boolean_type"
+                | "type_identifier"
+                | "array_type"
+                | "generic_type" => {
+                    field_type = self.node_text(c);
+                }
+                "variable_declarator" => {
+                    let mut vc = c.walk();
+                    for vchild in c.children(&mut vc) {
+                        if vchild.kind() == "identifier" {
+                            names.push(self.node_text(vchild).to_string());
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        names
+            .into_iter()
+            .map(|name| CurrentClassMember {
+                name: Arc::from(name.as_str()),
+                is_method: false,
+                is_static,
+                is_private,
+                descriptor: Arc::from(
+                    crate::index::source::java_type_to_descriptor(field_type).as_str(),
+                ),
+            })
+            .collect()
+    }
+}
+
+/// Internal name construction: package + class → "pkg/Class
+fn build_internal_name(package: &Option<Arc<str>>, class: &Option<Arc<str>>) -> Option<Arc<str>> {
+    match (package, class) {
+        (Some(pkg), Some(cls)) => Some(Arc::from(format!("{}/{}", pkg, cls).as_str())),
+        (None, Some(cls)) => Some(Arc::clone(cls)),
+        _ => None,
+    }
+}
+
+/// Is the node kind a comment?
+fn is_comment_kind(kind: &str) -> bool {
+    kind == "line_comment" || kind == "block_comment"
+}
+
+fn find_ancestor<'a>(mut node: Node<'a>, kind: &str) -> Option<Node<'a>> {
+    loop {
+        node = node.parent()?;
+        if node.kind() == kind {
+            return Some(node);
         }
     }
 }
 
+fn last_meaningful_dot(s: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut last = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '<' => depth += 1,
+            ')' | ']' | '>' => depth -= 1,
+            '.' if depth == 0 => last = Some(i),
+            _ => {}
+        }
+    }
+    last
+}
+
+/// "foo(arg1, aV" → "aV"
+fn extract_arg_prefix(last_line: &str) -> String {
+    let mut depth = 0i32;
+    let mut last_open = None;
+    for (i, c) in last_line.char_indices() {
+        match c {
+            '(' => {
+                depth += 1;
+                if depth == 1 {
+                    last_open = Some(i);
+                }
+            }
+            ')' => {
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    let inside = match last_open {
+        Some(pos) if depth > 0 => &last_line[pos + 1..],
+        _ => last_line,
+    };
+    inside
+        .rfind(',')
+        .map(|p| &inside[p + 1..])
+        .unwrap_or(inside)
+        .trim()
+        .to_string()
+}
+
 /// Returns true if `rest` (the part after "new ") contains a method chain dot.
-/// e.g. "Foo()."  → true
-///      "Foo(a)." → true
-///      "Foo"     → false
-///      "Foo()"   → false
 fn has_chained_dot(rest: &str) -> bool {
-    // Find the closing paren that matches the first open paren
     let mut depth = 0i32;
     let mut after_close = false;
     for c in rest.chars() {
@@ -1036,9 +921,6 @@ fn get_initializer_text(type_node: Node, bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Given the type node of a `var` declaration, walk up to the
-/// `local_variable_declaration` and extract the RHS constructor type.
-/// "var nc = new NestedClass()" → Some("NestedClass")
 fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> {
     let decl = type_node.parent()?;
     if decl.kind() != "local_variable_declaration" {
@@ -1059,13 +941,9 @@ fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> 
                     return Some(simple.to_string());
                 }
             }
-            // tree-sitter sometimes parses "new Foo()" as method_invocation
-            // when there's no package declaration (grammar ambiguity).
-            // Fall back to text heuristic.
             _ => {
                 let text = init.utf8_text(bytes).ok()?;
-                let text = text.trim();
-                if let Some(rest) = text.strip_prefix("new ") {
+                if let Some(rest) = text.trim().strip_prefix("new ") {
                     let class_name = rest.split('(').next()?.split('<').next()?.trim();
                     if !class_name.is_empty() {
                         return Some(class_name.to_string());
@@ -1077,64 +955,56 @@ fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> 
     None
 }
 
-/// 从当前行提取方法参数位置的前缀
-/// "foo(arg1, aV" → "aV"
-/// "foo(arg1, )"  → ""  (光标在 ')' 前的空白)
-/// "foo("          → ""
-fn extract_arg_prefix(last_line: &str) -> String {
-    // 找最后一个未闭合的 '('
-    let mut depth = 0i32;
-    let mut last_open = None;
-    for (i, c) in last_line.char_indices() {
+/// Check if offset is inside a single-line comment (//) or a block comment (/* */).
+pub fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
+    let before = &source[..offset];
+
+    // Block comment detection
+    let last_open = before.rfind("/*");
+    let last_close = before.rfind("*/");
+    if let Some(open) = last_open {
+        match last_close {
+            None => return true,
+            Some(close) if open > close => return true,
+            _ => {}
+        }
+    }
+
+    // Single-line comment detection: Only view the line where the cursor is located
+    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    is_in_line_comment(&before[line_start..])
+}
+
+/// Check if a line of text (the part before the cursor) is in a comment.
+fn is_in_line_comment(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
         match c {
-            '(' => {
-                depth += 1;
-                if depth == 1 {
-                    last_open = Some(i);
+            '\\' => {
+                escaped = true;
+            }
+            '"' if !in_char => {
+                in_string = !in_string;
+            }
+            '\'' if !in_string => {
+                in_char = !in_char;
+            }
+            '/' if !in_string && !in_char => {
+                if chars.peek() == Some(&'/') {
+                    return true;
                 }
             }
-            ')' => {
-                depth -= 1;
-            }
             _ => {}
         }
     }
-    let inside = match last_open {
-        Some(pos) if depth > 0 => &last_line[pos + 1..],
-        _ => {
-            // 括号已闭合或找不到，取整行
-            last_line
-        }
-    };
-    // 取最后一个逗号之后的内容
-    let after_comma = match inside.rfind(',') {
-        Some(pos) => &inside[pos + 1..],
-        None => inside,
-    };
-    after_comma.trim().to_string()
-}
-
-fn find_ancestor<'a>(mut node: Node<'a>, kind: &str) -> Option<Node<'a>> {
-    loop {
-        node = node.parent()?;
-        if node.kind() == kind {
-            return Some(node);
-        }
-    }
-}
-
-fn last_meaningful_dot(s: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    let mut last = None;
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' | '[' | '<' => depth += 1,
-            ')' | ']' | '>' => depth -= 1,
-            '.' if depth == 0 => last = Some(i),
-            _ => {}
-        }
-    }
-    last
+    false
 }
 
 pub fn line_col_to_offset(source: &str, line: u32, character: u32) -> Option<usize> {
@@ -1165,71 +1035,12 @@ pub fn line_col_to_offset(source: &str, line: u32, character: u32) -> Option<usi
 }
 
 pub fn java_type_to_internal(ty: &str) -> String {
-    // Primitive types and their common aliases — these are never in the class index
     match ty {
         "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "void" => {
             ty.to_string()
         }
-        // Everything else: convert dot-notation to slash-notation.
-        // Resolution of simple names (String, List, etc.) should go through
-        // resolve_simple_to_internal which uses the index + imports.
         other => other.replace('.', "/"),
     }
-}
-
-/// 检测 offset 是否在单行注释（//）或块注释（/* */）内
-fn is_cursor_in_comment(source: &str, offset: usize) -> bool {
-    // 只看 offset 之前的内容
-    let before = &source[..offset];
-
-    // 检查块注释：找最后一个 /* 和最后一个 */
-    // 如果最后一个 /* 在最后一个 */ 之后，说明在块注释内
-    let last_open = before.rfind("/*");
-    let last_close = before.rfind("*/");
-    if let Some(open) = last_open {
-        match last_close {
-            None => return true,                        // /* 没有闭合
-            Some(close) if open > close => return true, // 最近的 /* 在最近的 */ 之后
-            _ => {}
-        }
-    }
-
-    // 检查单行注释：当前行是否有 //（且不在字符串内）
-    let line_start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let current_line = &before[line_start..];
-    is_in_line_comment(current_line)
-}
-
-/// 检查当前行（光标前的部分）是否处于 // 注释中（简单处理，不考虑字符串内的 //）
-fn is_in_line_comment(line: &str) -> bool {
-    let mut chars = line.chars().peekable();
-    let mut in_string = false;
-    let mut in_char = false;
-    let mut escaped = false;
-    while let Some(c) = chars.next() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match c {
-            '\\' => {
-                escaped = true;
-            }
-            '"' if !in_char => {
-                in_string = !in_string;
-            }
-            '\'' if !in_string => {
-                in_char = !in_char;
-            }
-            '/' if !in_string && !in_char => {
-                if chars.peek() == Some(&'/') {
-                    return true;
-                }
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -1821,8 +1632,6 @@ mod tests {
         );
     }
 
-    // ── infer_expected_type_from_lhs (via handle_constructor) ─────────────
-
     #[test]
     fn test_constructor_expected_type_string() {
         let src = indoc::indoc! {r#"
@@ -1921,8 +1730,6 @@ mod tests {
             ctx.location
         );
     }
-
-    // ── infer_expected_type_from_text unit tests ───────────────────────────
 
     #[test]
     fn test_infer_type_from_text_simple() {
@@ -2039,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_new_without_dot_still_constructor() {
-        // new RandomClass| → ConstructorCall (not affected by fix)
+        // new RandomClass| -> ConstructorCall (not affected by fix)
         let src = indoc::indoc! {r#"
         class A {
             void f() {
@@ -2181,7 +1988,7 @@ mod tests {
     #[test]
     fn test_cursor_in_line_comment_returns_unknown() {
         let src = "// some random comments\n\npublic class ExampleClass {}";
-        // 光标在注释行末尾
+        // Cursor at the end of the comment line
         let col = "// some random comments".len() as u32;
         let ctx = JavaLanguage
             .parse_completion_context(src, 0, col, None)
@@ -2196,7 +2003,7 @@ mod tests {
     #[test]
     fn test_cursor_on_empty_line_after_comment_is_expression() {
         let src = "// some random comments\n\npublic class ExampleClass {}";
-        // 光标在第1行（空行）
+        // The cursor is on line 1 (empty line).
         let ctx = JavaLanguage
             .parse_completion_context(src, 1, 0, None)
             .unwrap();
@@ -2257,9 +2064,9 @@ mod tests {
 
     #[test]
     fn test_empty_line_after_comment_is_not_unknown() {
-        // 空行紧跟注释行，光标在空行，不应该被判为注释
+        // A blank line immediately following a comment line, with the cursor on the blank line, should not be interpreted as a comment.
         let src = "// some random comments\n\npublic class ExampleClass {}";
-        // line=1 是空行
+        // line=1 is a blank line
         let ctx = at(src, 1, 0);
         assert!(
             !matches!(ctx.location, CursorLocation::Unknown),
@@ -2271,7 +2078,7 @@ mod tests {
     #[test]
     fn test_cursor_inside_comment_is_unknown() {
         let src = "// some random comments\n\npublic class ExampleClass {}";
-        // line=0, col 在注释中间
+        // line=0, col is in the middle of the comment
         let col = "// some random".len() as u32;
         let ctx = at(src, 0, col);
         assert!(
