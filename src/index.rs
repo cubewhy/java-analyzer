@@ -2,11 +2,11 @@ use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 use rayon::prelude::*;
 use rust_asm::class_reader::AttributeInfo;
-use rust_asm::{class_reader::ClassReader, nodes::ClassNode};
+use rust_asm::class_reader::ClassReader;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
@@ -221,17 +221,19 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
     })
 }
 
-fn resolve_signature_from_cp(cn: &ClassNode, signature_index: u16) -> Option<Arc<str>> {
-    // CpInfo is an enum; the UTF-8 variant stores strings.
-    cn.constant_pool
-        .get(signature_index as usize)
-        .and_then(|cp| {
-            if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
-                Some(Arc::from(s.as_str()))
-            } else {
-                None
-            }
-        })
+fn intern_str(s: &str) -> Arc<str> {
+    static POOL: OnceLock<Mutex<std::collections::HashSet<Arc<str>>>> = OnceLock::new();
+    let mut pool = POOL
+        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap();
+    if let Some(arc) = pool.get(s) {
+        Arc::clone(arc)
+    } else {
+        let arc: Arc<str> = Arc::from(s);
+        pool.insert(Arc::clone(&arc));
+        arc
+    }
 }
 
 pub struct GlobalIndex {
@@ -262,16 +264,40 @@ impl GlobalIndex {
 
     pub fn add_classes(&mut self, classes: Vec<ClassMetadata>) {
         let injector = self.fuzzy_matcher.injector();
-        for class in classes {
+        for mut class in classes {
+            class.name = intern_str(&class.name);
+            class.internal_name = intern_str(&class.internal_name);
+            if let Some(pkg) = &class.package {
+                class.package = Some(intern_str(pkg));
+            }
+            for m in &mut class.methods {
+                m.name = intern_str(&m.name);
+                m.descriptor = intern_str(&m.descriptor);
+                if let Some(rt) = &m.return_type {
+                    m.return_type = Some(intern_str(rt));
+                }
+                if let Some(gs) = &m.generic_signature {
+                    m.generic_signature = Some(intern_str(gs));
+                }
+            }
+            for f in &mut class.fields {
+                f.name = intern_str(&f.name);
+                f.descriptor = intern_str(&f.descriptor);
+            }
+            if let ClassOrigin::Jar(j) = &class.origin {
+                class.origin = ClassOrigin::Jar(intern_str(j));
+            } else if let ClassOrigin::SourceFile(s) = &class.origin {
+                class.origin = ClassOrigin::SourceFile(intern_str(s));
+            }
+
             let internal = Arc::clone(&class.internal_name);
             let simple = Arc::clone(&class.name);
             let pkg = class.package.clone();
             let origin = class.origin.clone();
-
             let rc = Arc::new(class);
+
             self.exact_match
                 .insert(Arc::clone(&internal), Arc::clone(&rc));
-
             self.simple_name_index
                 .entry(Arc::clone(&simple))
                 .or_default()
