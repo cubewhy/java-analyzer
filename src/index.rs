@@ -389,6 +389,13 @@ impl GlobalIndex {
         self.package_index.contains_key(normalized.as_str())
     }
 
+    pub fn has_classes_in_package(&self, pkg: &str) -> bool {
+        let normalized = pkg.replace('.', "/");
+        self.package_index
+            .get(normalized.as_str())
+            .is_some_and(|v| !v.is_empty())
+    }
+
     /// 先按内部名精确查，失败时按简单名回退（处理 source 解析时只有简单名的继承关系）
     pub fn resolve_class_name(&self, name: &str) -> Option<Arc<ClassMetadata>> {
         if let Some(c) = self.get_class(name) {
@@ -1167,5 +1174,17 @@ class Main {
             methods.iter().any(|m| m.name.as_ref() == "run"),
             "run() from Runnable should be inherited via simple-name fallback"
         );
+    }
+
+    #[test]
+    fn test_has_classes_in_package() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_class(
+            "java/lang",
+            "String",
+            ClassOrigin::Unknown,
+        )]);
+        assert!(!idx.has_classes_in_package("java"));
+        assert!(idx.has_classes_in_package("java/lang"));
     }
 }

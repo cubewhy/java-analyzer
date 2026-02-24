@@ -29,16 +29,54 @@ impl CompletionProvider for ImportProvider {
         // "org.cubewhy.Ma" → Search by package path + simple name
 
         if prefix.contains('.') {
-            // Package path: split into pkg_prefix + simple_prefix
             let last_dot = prefix.rfind('.').unwrap();
             let pkg_prefix = &prefix[..last_dot];
             let simple_prefix = &prefix[last_dot + 1..];
-            search_by_package_and_name(index, pkg_prefix, simple_prefix)
+            let internal_pkg = pkg_prefix.replace('.', "/");
+
+            // pkg_prefix 下有类 → simple_prefix 是类名前缀
+            // pkg_prefix 下没有类 → simple_prefix 是子包前缀，整个 prefix 是包路径前缀
+            if index.has_classes_in_package(&internal_pkg) {
+                search_by_package_and_name(index, pkg_prefix, simple_prefix)
+            } else {
+                search_by_package_prefix(index, prefix)
+            }
         } else {
-            // Simple name search
             search_by_simple_name(index, prefix)
         }
     }
+}
+
+fn search_by_package_prefix(index: &GlobalIndex, prefix: &str) -> Vec<CompletionCandidate> {
+    let internal_prefix = prefix.replace('.', "/");
+    let internal_prefix = internal_prefix.trim_end_matches('/');
+    if internal_prefix.len() < 2 {
+        return vec![];
+    }
+    tracing::debug!(
+        internal_prefix = internal_prefix,
+        "search_by_package_prefix"
+    );
+
+    let results: Vec<_> = index
+        .iter_all_classes()
+        .filter(|meta| {
+            meta.package
+                .as_ref()
+                .is_some_and(|p| p.as_ref().starts_with(internal_prefix))
+        })
+        .take(50)
+        // TODO: Intellij IDEA don't use this method to filter results
+        .map(make_import_candidate)
+        .collect();
+
+    tracing::debug!(
+        count = results.len(),
+        internal_prefix,
+        "search_by_package_prefix result"
+    );
+
+    results
 }
 
 /// Fuzzy search by simple name
@@ -95,12 +133,12 @@ fn search_by_package_and_name(
 fn make_import_candidate(meta: &Arc<crate::index::ClassMetadata>) -> CompletionCandidate {
     let fqn = fqn_of_meta(meta);
     CompletionCandidate::new(
-        Arc::clone(&meta.name),
+        Arc::from(fqn.as_str()),
         fqn.clone(),
         CandidateKind::ClassName,
         "import",
     )
-    .with_detail(fqn)
+    .with_detail(meta.name.to_string())
 }
 
 #[cfg(test)]
@@ -157,7 +195,9 @@ mod tests {
         let mut idx = make_index();
         let results = ImportProvider.provide(&import_ctx("Re"), &mut idx);
         assert!(
-            results.iter().any(|c| c.label.as_ref() == "RealMain"),
+            results
+                .iter()
+                .any(|c| c.label.as_ref() == "org.cubewhy.RealMain"),
             "Re should match RealMain: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
@@ -169,7 +209,7 @@ mod tests {
         let results = ImportProvider.provide(&import_ctx("Re"), &mut idx);
         let r = results
             .iter()
-            .find(|c| c.label.as_ref() == "RealMain")
+            .find(|c| c.label.as_ref() == "org.cubewhy.RealMain")
             .unwrap();
         assert_eq!(
             r.insert_text, "org.cubewhy.RealMain",
@@ -181,33 +221,16 @@ mod tests {
     fn test_package_prefix_matches_classes_in_pkg() {
         let mut idx = make_index();
         let results = ImportProvider.provide(&import_ctx("org.cubewhy.Ma"), &mut idx);
-        assert!(results.iter().any(|c| c.label.as_ref() == "Main"));
         assert!(
-            !results.iter().any(|c| c.label.as_ref() == "RealMain"),
-            "RealMain doesn't start with 'Ma'"
+            results
+                .iter()
+                .any(|c| c.label.as_ref() == "org.cubewhy.Main")
         );
-    }
-
-    #[test]
-    fn test_package_prefix_dot_only_lists_all_in_pkg() {
-        // "org.cubewhy." → all classes in org.cubewhy
-        let mut idx = make_index();
-        let results = ImportProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
-        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
-        assert!(labels.contains(&"Main"), "{:?}", labels);
-        assert!(labels.contains(&"RealMain"), "{:?}", labels);
-    }
-
-    #[test]
-    fn test_package_prefix_includes_subpackage_classes() {
-        // "org.cubewhy." の実装は pkg == "org/cubewhy" OR starts_with("org/cubewhy/")
-        let mut idx = make_index();
-        let results = ImportProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
-        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
-            labels.contains(&"StringUtil"),
-            "subpackage class should appear: {:?}",
-            labels
+            !results
+                .iter()
+                .any(|c| c.label.as_ref() == "org.cubewhy.RealMain"),
+            "RealMain doesn't start with 'Ma'"
         );
     }
 
@@ -229,11 +252,34 @@ mod tests {
     }
 
     #[test]
+    fn test_package_prefix_dot_only_lists_all_in_pkg() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
+        assert!(labels.contains(&"org.cubewhy.RealMain"), "{:?}", labels);
+    }
+
+    #[test]
+    fn test_package_prefix_includes_subpackage_classes() {
+        let mut idx = make_index();
+        let results = ImportProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
+        let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(
+            labels.contains(&"org.cubewhy.utils.StringUtil"),
+            "subpackage class should appear: {:?}",
+            labels
+        );
+    }
+
+    #[test]
     fn test_case_insensitive_match() {
         let mut idx = make_index();
         let results = ImportProvider.provide(&import_ctx("real"), &mut idx);
         assert!(
-            results.iter().any(|c| c.label.as_ref() == "RealMain"),
+            results
+                .iter()
+                .any(|c| c.label.as_ref() == "org.cubewhy.RealMain"),
             "should match case-insensitively: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
@@ -245,12 +291,60 @@ mod tests {
         let results = ImportProvider.provide(&import_ctx("ArrayList"), &mut idx);
         let r = results
             .iter()
-            .find(|c| c.label.as_ref() == "ArrayList")
+            .find(|c| c.label.as_ref() == "java.util.ArrayList")
             .unwrap();
         assert_eq!(r.insert_text, "java.util.ArrayList");
         assert!(
             !r.insert_text.contains('/'),
             "FQN should use dots not slashes"
+        );
+    }
+
+    #[test]
+    fn test_import_subpackage_prefix() {
+        let mut idx2 = GlobalIndex::new();
+        idx2.add_classes(vec![
+            make_cls("java/lang", "String"),
+            make_cls("java/lang", "Integer"),
+            make_cls("java/util", "ArrayList"),
+        ]);
+        let results = ImportProvider.provide(&import_ctx("java.l"), &mut idx2);
+        assert!(
+            results
+                .iter()
+                .any(|c| c.label.as_ref() == "java.lang.String"),
+            "java.l should match java/lang classes: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(
+            results
+                .iter()
+                .all(|c| c.label.as_ref() != "java.util.ArrayList"),
+            "java.l should not match java/util classes"
+        );
+    }
+
+    #[test]
+    fn test_import_full_package_then_class_prefix() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_cls("java/util", "ArrayList"),
+            make_cls("java/util", "HashMap"),
+            make_cls("java/lang", "String"),
+        ]);
+        let results = ImportProvider.provide(&import_ctx("java.util.A"), &mut idx);
+        assert!(
+            results
+                .iter()
+                .any(|c| c.label.as_ref() == "java.util.ArrayList"),
+            "java.util.A should match ArrayList: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(
+            results
+                .iter()
+                .all(|c| c.label.as_ref() != "java.lang.String"),
+            "java.util.A should not match String"
         );
     }
 }

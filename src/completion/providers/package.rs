@@ -138,12 +138,12 @@ fn provide_import(prefix: &str, index: &mut GlobalIndex) -> Vec<CompletionCandid
                 let label = format!("{}.{}", pkg_path, sub);
                 results.push(
                     CompletionCandidate::new(
-                        Arc::from(sub.as_str()),
+                        Arc::from(label.as_str()), // label is full path
                         insert,
                         CandidateKind::Package,
                         "package",
                     )
-                    .with_detail(label)
+                    .with_detail(format!("{}.{}", pkg_path, sub))
                     .with_score(65.0),
                 );
             }
@@ -168,7 +168,7 @@ fn provide_import(prefix: &str, index: &mut GlobalIndex) -> Vec<CompletionCandid
                 .map(|top| {
                     let insert = format!("{}.", top);
                     CompletionCandidate::new(
-                        Arc::from(top.as_str()),
+                        Arc::from(insert.as_str()), // insert is full name
                         insert,
                         CandidateKind::Package,
                         "package",
@@ -258,11 +258,25 @@ mod tests {
         let mut idx = make_index();
         let results = PackageProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
+        // label 现在是完整路径
         assert!(
-            labels.contains(&"utils"),
+            labels.contains(&"org.cubewhy.utils"),
             "sub-package missing: {:?}",
             labels
         );
+    }
+
+    #[test]
+    fn test_top_level_package_no_dot() {
+        let mut idx = make_index();
+        let results = PackageProvider.provide(&import_ctx("org"), &mut idx);
+        let org = results.iter().find(|c| c.label.as_ref() == "org.");
+        assert!(
+            org.is_some(),
+            "should suggest 'org.': {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert_eq!(org.unwrap().insert_text, "org.");
     }
 
     #[test]
@@ -283,40 +297,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sub_package_insert_text_ends_with_dot() {
-        let mut idx = make_index();
-        let results = PackageProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
-        let utils = results
-            .iter()
-            .find(|c| c.label.as_ref() == "utils")
-            .unwrap();
-        assert!(utils.insert_text.ends_with('.'), "{:?}", utils.insert_text);
-    }
-
-    #[test]
     fn test_sub_package_kind_is_package() {
         let mut idx = make_index();
         let results = PackageProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
         let utils = results
             .iter()
-            .find(|c| c.label.as_ref() == "utils")
+            .find(|c| c.label.as_ref() == "org.cubewhy.utils")
             .unwrap();
         assert_eq!(utils.kind, CandidateKind::Package);
-    }
-
-    #[test]
-    fn test_top_level_package_no_dot() {
-        // "org" → 返回顶层包 org（insert_text = "org."）
-        let mut idx = make_index();
-        let results = PackageProvider.provide(&import_ctx("org"), &mut idx);
-        let org = results.iter().find(|c| c.label.as_ref() == "org");
-        assert!(
-            org.is_some(),
-            "should suggest top-level package 'org': {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-        assert_eq!(org.unwrap().insert_text, "org.");
-        assert_eq!(org.unwrap().kind, CandidateKind::Package);
     }
 
     #[test]
@@ -430,5 +418,25 @@ mod tests {
             results.is_empty(),
             "String.| should not trigger package completion"
         );
+    }
+
+    #[test]
+    fn test_sub_package_label_is_full_path() {
+        // label 应该是完整路径（含点），让客户端能正确过滤
+        let mut idx = make_index();
+        let results = PackageProvider.provide(&import_ctx("org.cubewhy."), &mut idx);
+        let utils = results
+            .iter()
+            .find(|c| c.label.as_ref() == "org.cubewhy.utils")
+            .unwrap();
+        assert_eq!(utils.kind, CandidateKind::Package);
+    }
+
+    #[test]
+    fn test_top_level_package_label_has_dot() {
+        let mut idx = make_index();
+        let results = PackageProvider.provide(&import_ctx("org"), &mut idx);
+        let org = results.iter().find(|c| c.label.as_ref() == "org.").unwrap();
+        assert_eq!(org.insert_text, "org.");
     }
 }

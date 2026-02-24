@@ -83,6 +83,8 @@ pub async fn handle_completion(
                 item.insert_text = None;
                 item.insert_text_format = None;
             }
+            // TODO: it's a mess
+            item.filter_text = Some(c.insert_text.clone());
 
             item
         })

@@ -1416,6 +1416,9 @@ fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocation {
             prefix: strip_sentinel(&prefix),
         },
         CursorLocation::VariableName { type_name } => CursorLocation::VariableName { type_name },
+        CursorLocation::Import { prefix } => CursorLocation::Import {
+            prefix: strip_sentinel(&prefix),
+        },
         other => other,
     }
 }
@@ -3688,5 +3691,26 @@ mod tests {
         let mut ast = String::new();
         dump(tree2.root_node(), &injected, 0, &mut ast);
         insta::assert_snapshot!("injected_v2_ast", ast);
+    }
+
+    #[test]
+    fn test_injection_import_without_semicolon() {
+        let src = indoc::indoc! {r#"
+        import java.l
+        class A {}
+        "#};
+        // 模拟光标在 'java.l' 后面
+        let line = 0u32;
+        let col = 13u32;
+        let ctx = at(src, line, col);
+
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.l"
+            ),
+            "__KIRO__ should be stripped from import prefix, got {:?}",
+            ctx.location
+        );
     }
 }
