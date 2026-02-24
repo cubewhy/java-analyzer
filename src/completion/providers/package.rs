@@ -78,10 +78,6 @@ fn is_package_like(prefix: &str) -> bool {
 }
 
 fn provide_import(prefix: &str, index: &mut GlobalIndex) -> Vec<CompletionCandidate> {
-    if prefix.is_empty() {
-        return vec![];
-    }
-
     match prefix.rfind('.') {
         Some(dot_pos) => {
             // "org.cubewhy." 或 "org.cubewhy.Ma"
