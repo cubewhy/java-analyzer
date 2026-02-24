@@ -1,0 +1,10 @@
+---
+source: src/language/java.rs
+expression: injected
+---
+class A {
+    void f() {
+        java.util.A__KIRO__;
+    }
+}
+;

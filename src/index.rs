@@ -384,6 +384,11 @@ impl GlobalIndex {
         result
     }
 
+    pub fn has_package(&self, pkg: &str) -> bool {
+        let normalized = pkg.replace('.', "/");
+        self.package_index.contains_key(normalized.as_str())
+    }
+
     /// 先按内部名精确查，失败时按简单名回退（处理 source 解析时只有简单名的继承关系）
     pub fn resolve_class_name(&self, name: &str) -> Option<Arc<ClassMetadata>> {
         if let Some(c) = self.get_class(name) {

@@ -132,6 +132,32 @@ impl CompletionEngine {
                     index,
                 ),
             };
+
+            // receiver_expr 是已知包名 -> 转成 Import
+            let import_location: Option<(CursorLocation, String)> =
+                if let CursorLocation::MemberAccess {
+                    receiver_type,
+                    receiver_expr,
+                    member_prefix,
+                } = &ctx.location
+                    && receiver_type.is_none()
+                {
+                    let pkg_normalized = receiver_expr.replace('.', "/");
+                    if index.has_package(&pkg_normalized) {
+                        let prefix = format!("{}.{}", receiver_expr, member_prefix);
+                        let query = member_prefix.clone();
+                        Some((CursorLocation::Import { prefix }, query))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+            if let Some((loc, query)) = import_location {
+                ctx.location = loc;
+                ctx.query = query;
+            }
         }
 
         // Resolve `var` local variables
@@ -1250,6 +1276,82 @@ mod tests {
         assert_eq!(
             element_type_of_array("[[Ljava/lang/String;").as_deref(),
             Some("[Ljava/lang/String;")
+        );
+    }
+
+    #[test]
+    fn test_package_path_becomes_import_location() {
+        use crate::completion::engine::CompletionEngine;
+        use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/util")),
+            name: Arc::from("ArrayList"),
+            internal_name: Arc::from("java/util/ArrayList"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "ArrayL".to_string(),
+                receiver_expr: "java.util".to_string(),
+            },
+            "ArrayL",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.util.ArrayL"
+            ),
+            "java.util receiver with known package should become Import, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_unknown_receiver_stays_member_access() {
+        use crate::completion::engine::CompletionEngine;
+        use crate::index::GlobalIndex;
+
+        let idx = GlobalIndex::new();
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "foo".to_string(),
+                receiver_expr: "unknownPkg".to_string(),
+            },
+            "foo",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        assert!(
+            matches!(&ctx.location, CursorLocation::MemberAccess { .. }),
+            "unknown receiver should stay MemberAccess"
         );
     }
 }

@@ -28,6 +28,10 @@ impl CompletionProvider for ExpressionProvider {
             _ => return vec![],
         };
 
+        if prefix.contains('.') {
+            return vec![];
+        }
+
         let prefix_lower = prefix.to_lowercase();
 
         // Package name of the current file (used to determine if it is in the same package)

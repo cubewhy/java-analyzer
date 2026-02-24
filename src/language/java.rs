@@ -218,7 +218,16 @@ impl<'s> JavaContextExtractor<'s> {
             self.inject_at(self.offset, self.offset, &format!("{SENTINEL};"))
         } else {
             let prefix = &self.source[replace_start..replace_end];
-            self.inject_at(replace_start, replace_end, &format!("{prefix}{SENTINEL}"))
+            // cursor 在 scoped_type_identifier 里（如 java.util.A）-> 加分号变成表达式语句
+            let in_scoped_type = cursor_node.is_some_and(|n| {
+                find_ancestor(n, "scoped_type_identifier").is_some()
+                    || n.kind() == "scoped_type_identifier"
+            });
+            if in_scoped_type {
+                self.inject_at(replace_start, replace_end, &format!("{prefix}{SENTINEL};"))
+            } else {
+                self.inject_at(replace_start, replace_end, &format!("{prefix}{SENTINEL}"))
+            }
         }
     }
 
@@ -248,6 +257,12 @@ impl<'s> JavaContextExtractor<'s> {
 
         let sentinel_node =
             new_root.named_descendant_for_byte_range(sentinel_offset, sentinel_end)?;
+
+        tracing::debug!(
+            injected_source = injected_source,
+            sentinel_node_kind = sentinel_node.kind(),
+            "inject_and_determine"
+        );
 
         if sentinel_node.kind() == "identifier" || sentinel_node.kind() == "type_identifier" {
             let tmp = JavaContextExtractor {
@@ -376,9 +391,15 @@ impl<'s> JavaContextExtractor<'s> {
                         );
                     }
                     if self.is_in_name_position(node, ancestor) {
-                        // 提取类型名用于变量名建议
                         let type_name = self.extract_type_from_decl(ancestor);
                         return (CursorLocation::VariableName { type_name }, String::new());
+                    }
+                    if self.is_in_type_subtree(node, ancestor) {
+                        // 取光标前的文本作为 prefix，但只取最后一段（点后面的部分）
+                        let text = self.cursor_truncated_text(node);
+                        let clean = strip_sentinel(&text);
+                        // 触发注入路径来正确识别
+                        return (CursorLocation::Unknown, String::new());
                     }
                     let text = self.cursor_truncated_text(node);
                     let clean = strip_sentinel(&text);
@@ -437,6 +458,32 @@ impl<'s> JavaContextExtractor<'s> {
             },
             clean,
         )
+    }
+
+    fn is_in_type_subtree(&self, id_node: Node, decl_node: Node) -> bool {
+        // 找到 decl_node 的类型子节点，检查 id_node 是否在其后代里
+        let mut walker = decl_node.walk();
+        for child in decl_node.named_children(&mut walker) {
+            if child.kind() == "modifiers" {
+                continue;
+            }
+            // 第一个非 modifiers 子节点是类型节点
+            return self.is_descendant_of(id_node, child);
+        }
+        false
+    }
+
+    fn is_descendant_of(&self, node: Node, ancestor: Node) -> bool {
+        let mut cur = node;
+        loop {
+            if cur.id() == ancestor.id() {
+                return true;
+            }
+            match cur.parent() {
+                Some(p) => cur = p,
+                None => return false,
+            }
+        }
     }
 
     fn extract_type_from_decl(&self, decl_node: Node) -> String {
@@ -3534,5 +3581,112 @@ mod tests {
                 .map(|v| v.name.as_ref())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_fqn_type_in_var_decl_triggers_import() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            java.util.A
+        }
+    }
+    "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("java.util.A").map(|c| (i as u32, c as u32 + 11)))
+            .unwrap();
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix.contains("java.util")
+            ) || matches!(
+                &ctx.location,
+                CursorLocation::MemberAccess { receiver_expr, .. } if receiver_expr.contains("java.util")
+            ),
+            "java.util.A should give Import or MemberAccess with java.util receiver, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_snapshot_fqn_type_injection() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            java.util.A
+        }
+    }
+    "#};
+        let offset = src.find("java.util.A").unwrap() + 11;
+        let rope = ropey::Rope::from_str(src);
+        let extractor = JavaContextExtractor::new_with_rope(src, offset, rope);
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let cursor_node = extractor.find_cursor_node(tree.root_node());
+
+        let injected = extractor.build_injected_source(cursor_node);
+        insta::assert_snapshot!(injected);
+    }
+
+    #[test]
+    fn test_snapshot_fqn_type_injection_v2() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            java.util.A
+        }
+    }
+    "#};
+        let offset = src.find("java.util.A").unwrap() + 11;
+        let rope = ropey::Rope::from_str(src);
+        let extractor = JavaContextExtractor::new_with_rope(src, offset, rope);
+
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+        let cursor_node = extractor.find_cursor_node(tree.root_node());
+
+        let injected = extractor.build_injected_source(cursor_node);
+        insta::assert_snapshot!("injected_v2", injected);
+
+        // 同时 snapshot 注入后的 AST
+        let mut parser2 = tree_sitter::Parser::new();
+        parser2
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree2 = parser2.parse(&injected, None).unwrap();
+
+        fn dump(node: tree_sitter::Node, src: &str, indent: usize, out: &mut String) {
+            let pad = "  ".repeat(indent);
+            let text: String = src[node.start_byte()..node.end_byte()]
+                .chars()
+                .take(40)
+                .collect();
+            out.push_str(&format!(
+                "{}{} [{}-{}] {:?}\n",
+                pad,
+                node.kind(),
+                node.start_byte(),
+                node.end_byte(),
+                text
+            ));
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                dump(child, src, indent + 1, out);
+            }
+        }
+
+        let mut ast = String::new();
+        dump(tree2.root_node(), &injected, 0, &mut ast);
+        insta::assert_snapshot!("injected_v2_ast", ast);
     }
 }
