@@ -536,13 +536,34 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn handle_import(&self, node: Node) -> (CursorLocation, String) {
-        let text = self.node_text(node);
-        let prefix = text
+        // 只取节点文本从开头到光标位置
+        let up_to_cursor = &self.source[node.start_byte()..self.offset];
+
+        tracing::debug!(
+            node_kind = node.kind(),
+            node_start = node.start_byte(),
+            node_end = node.end_byte(),
+            offset = self.offset,
+            up_to_cursor = up_to_cursor,
+            "handle_import raw"
+        );
+
+        // 拍平多行：去掉换行和多余空白
+        let flat: String = up_to_cursor
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // 截断行内注释（// 之后的内容）
+        let without_comment = flat.find("//").map(|p| &flat[..p]).unwrap_or(&flat);
+
+        let prefix = without_comment
             .trim_start_matches("import")
             .trim()
             .trim_end_matches(';')
             .trim()
             .to_string();
+
         let query = prefix.rsplit('.').next().unwrap_or("").to_string();
         (CursorLocation::Import { prefix }, query)
     }
@@ -3710,6 +3731,66 @@ mod tests {
                 CursorLocation::Import { prefix } if prefix == "java.l"
             ),
             "__KIRO__ should be stripped from import prefix, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_prefix_does_not_include_next_line() {
+        let src = indoc::indoc! {r#"
+        import org.cubewhy.
+        // some comment
+        class A {}
+    "#};
+        let line = 0u32;
+        let col = src.lines().next().unwrap().len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "org.cubewhy."
+            ),
+            "import prefix should not bleed into next line, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_multiline_prefix_flattened() {
+        let src = indoc::indoc! {r#"
+        import
+            org.cubewhy.
+        class A {}
+    "#};
+        // 光标在 org.cubewhy. 末尾
+        let line = 1u32;
+        let col = src.lines().nth(1).unwrap().len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "org.cubewhy."
+            ),
+            "multiline import should be flattened, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_with_inline_comment_ignored() {
+        let src = indoc::indoc! {r#"
+        import org.; // some comment
+        class A {}
+    "#};
+        let line = 0u32;
+        let col = src.lines().next().unwrap().find(';').unwrap() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "org."
+            ),
+            "inline comment should be stripped from import prefix, got {:?}",
             ctx.location
         );
     }

@@ -109,29 +109,43 @@ fn make_import_text_edit(
     source: &str,
     position: tower_lsp::lsp_types::Position,
 ) -> Option<tower_lsp::lsp_types::CompletionTextEdit> {
-    // Find the current line
-    let line_str = source.lines().nth(position.line as usize)?;
+    let lines: Vec<&str> = source.lines().collect();
+    let current_line = lines.get(position.line as usize)?;
 
-    // Find the starting column of the content after "import"
-    let import_prefix = "import ";
-    let start_char = if let Some(pos) = line_str.find(import_prefix) {
-        (pos + import_prefix.len()) as u32
+    // 找包含 import 关键字的行（当前行或往上找）
+    let import_line_idx = if current_line.trim_start().starts_with("import") {
+        position.line as usize
     } else {
-        return None;
+        (0..position.line as usize)
+            .rev()
+            .find(|&i| lines[i].trim_start().starts_with("import"))?
     };
 
-    // End of column: to the semicolon or the end of the line (excluding the semicolon)
-    let end_char = line_str
-        .find(';')
-        .map(|p| p as u32)
-        .unwrap_or(line_str.len() as u32);
+    // 如果 import 和包名在同一行，替换 import 后面的内容
+    // 如果不在同一行（换行 import），只替换当前行（包名行）
+    let (start_line, start_char) = if import_line_idx == position.line as usize {
+        // 同行：从 "import " 后开始
+        let import_line_str = lines[import_line_idx];
+        let import_kw_pos = import_line_str.find("import")?;
+        let start = (import_kw_pos + "import".len() + 1) as u32;
+        (import_line_idx as u32, start)
+    } else {
+        // 换行：只替换当前行，从行首非空白处开始
+        let indent = current_line.len() - current_line.trim_start().len();
+        (position.line, indent as u32)
+    };
 
-    // insert_text is an FQN (e.g., "org.cubewhy.RealMain")
-    // Replace the entire text after import
+    // 结束位置：当前行去掉分号和注释后的末尾
+    let end_char = current_line
+        .find(';')
+        .or_else(|| current_line.find("//"))
+        .map(|p| p as u32)
+        .unwrap_or(current_line.len() as u32);
+
     Some(CompletionTextEdit::Edit(TextEdit {
         range: Range {
             start: Position {
-                line: position.line,
+                line: start_line,
                 character: start_char,
             },
             end: Position {
