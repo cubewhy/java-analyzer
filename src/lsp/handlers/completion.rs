@@ -3,8 +3,8 @@ use tower_lsp::lsp_types::*;
 use tracing::debug;
 
 use super::super::converters::candidate_to_lsp;
-use crate::completion::CandidateKind;
 use crate::completion::engine::CompletionEngine;
+use crate::completion::{CandidateKind, CursorLocation};
 use crate::language::LanguageRegistry;
 use crate::workspace::Workspace;
 
@@ -88,9 +88,14 @@ pub async fn handle_completion(
                     item.insert_text_format = None;
                 }
                 item.filter_text = Some(c.insert_text.clone());
-            } else if c.kind == CandidateKind::Package {
-                // Package 候选在非 import 场景下也需要 textEdit，
-                // 否则 VSCode 只插入截断后的短名，导致重复
+            } else if matches!(c.kind, CandidateKind::Package | CandidateKind::ClassName)
+                && matches!(
+                    ctx.location,
+                    CursorLocation::Expression { .. }
+                        | CursorLocation::TypeAnnotation { .. }
+                        | CursorLocation::MemberAccess { .. }
+                )
+            {
                 if let Some(edit) = make_package_text_edit(&c.insert_text, &doc.content, position) {
                     item.text_edit = Some(edit);
                     item.insert_text = None;
@@ -137,6 +142,14 @@ fn make_package_text_edit(
         .unwrap_or(0) as u32;
 
     let end_char = position.character;
+
+    tracing::debug!(
+        insert_text,
+        before_cursor,
+        start_char,
+        end_char,
+        "make_package_text_edit"
+    );
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: Range {
