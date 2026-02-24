@@ -78,7 +78,7 @@ pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> 
 
 fn index_jar_uncached(path: &Path) -> anyhow::Result<Vec<ClassMetadata>> {
     let jar_str = Arc::from(path.to_string_lossy().as_ref());
-    let file = std::fs::File::open(&path)?;
+    let file = std::fs::File::open(path)?;
     let mut archive = ZipArchive::new(std::io::BufReader::new(file))?;
 
     // 收集所有文件内容（class、java、kt）
