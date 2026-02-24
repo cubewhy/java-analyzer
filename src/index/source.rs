@@ -8,7 +8,10 @@ use tree_sitter::{Node, Parser, Query};
 use super::{
     ClassMetadata, ClassOrigin, FieldSummary, MethodSummary, parse_return_type_from_descriptor,
 };
-use crate::language::ts_utils::{capture_text, run_query};
+use crate::{
+    index::intern_str,
+    language::ts_utils::{capture_text, run_query},
+};
 
 /// Parse the source file string and return all classes defined within it.
 pub fn parse_source_str(source: &str, lang: &str, origin: ClassOrigin) -> Vec<ClassMetadata> {
@@ -117,11 +120,11 @@ fn parse_java_class(
             superclass_node
                 .named_children(&mut superclass_node.walk())
                 .find(|c| c.kind() == "type_identifier")
-                .map(|c| node_text(c, bytes).to_string())
+                .map(|c| intern_str(node_text(c, bytes)))
         });
 
     // interfaces
-    let interfaces = node
+    let interfaces: Vec<Arc<str>> = node
         .child_by_field_name("interfaces")
         .map(|iface_node| {
             let q_src = r#"(type_identifier) @t"#;
@@ -129,7 +132,7 @@ fn parse_java_class(
                 let idx = q.capture_index_for_name("t").unwrap();
                 run_query(&q, iface_node, bytes, None)
                     .into_iter()
-                    .filter_map(|caps| capture_text(&caps, idx, bytes).map(|s| s.to_string()))
+                    .filter_map(|caps| capture_text(&caps, idx, bytes).map(intern_str))
                     .collect()
             } else {
                 vec![]
@@ -515,17 +518,17 @@ fn parse_kotlin_class(
         .and_then(|ds| {
             ds.named_children(&mut ds.walk())
                 .find(|n| n.kind() == "constructor_invocation" || n.kind() == "user_type")
-                .map(|n| node_text(n, bytes).to_string())
+                .map(|n| intern_str(node_text(n, bytes)))
         });
 
     // Interface: entries of type user_type in delegation_specifiers (not the first constructor_invocation)
-    let interfaces: Vec<String> = node
+    let interfaces: Vec<Arc<str>> = node
         .named_children(&mut node.walk())
         .find(|n| n.kind() == "delegation_specifiers")
         .map(|ds| {
             ds.named_children(&mut ds.walk())
                 .filter(|n| n.kind() == "user_type")
-                .map(|n| node_text(n, bytes).to_string())
+                .map(|n| intern_str(node_text(n, bytes)))
                 .collect()
         })
         .unwrap_or_default();
@@ -831,11 +834,11 @@ public class Main {
             "super_name should be 'Parent', not 'extends Parent'"
         );
         assert!(
-            child.interfaces.contains(&"Runnable".to_string()),
+            child.interfaces.contains(&"Runnable".into()),
             "interfaces should contain Runnable"
         );
         assert!(
-            child.interfaces.contains(&"Serializable".to_string()),
+            child.interfaces.contains(&"Serializable".into()),
             "interfaces should contain Serializable"
         );
     }
@@ -851,6 +854,6 @@ public class Main {
             "super_name should be 'Parent' not 'extends Parent', got {:?}",
             child.super_name
         );
-        assert!(child.interfaces.contains(&"Runnable".to_string()));
+        assert!(child.interfaces.contains(&"Runnable".into()));
     }
 }

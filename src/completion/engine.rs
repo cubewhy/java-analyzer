@@ -1043,7 +1043,7 @@ mod tests {
                 package: None,
                 name: Arc::from("Child"),
                 internal_name: Arc::from("Child"),
-                super_name: Some("Parent".to_string()),
+                super_name: Some("Parent".into()),
                 interfaces: vec![],
                 methods: vec![],
                 fields: vec![],

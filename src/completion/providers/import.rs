@@ -1,10 +1,9 @@
 use super::super::{
-    candidate::{CandidateKind, CompletionCandidate},
+    candidate::CompletionCandidate,
     context::{CompletionContext, CursorLocation},
 };
 use super::CompletionProvider;
-use crate::{completion::import_utils::fqn_of_meta, index::GlobalIndex};
-use std::sync::Arc;
+use crate::index::GlobalIndex;
 
 pub struct ImportProvider;
 

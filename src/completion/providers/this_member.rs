@@ -636,7 +636,7 @@ mod tests {
                 package: Some(Arc::from("org/cubewhy")),
                 name: Arc::from("Main2"),
                 internal_name: Arc::from("org/cubewhy/Main2"),
-                super_name: Some("org/cubewhy/BaseClass".to_string()),
+                super_name: Some("org/cubewhy/BaseClass".into()),
                 interfaces: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
@@ -713,7 +713,7 @@ mod tests {
                 package: None,
                 name: Arc::from("Child"),
                 internal_name: Arc::from("Child"),
-                super_name: Some("Base".to_string()),
+                super_name: Some(Arc::from("Base")),
                 interfaces: vec![],
                 methods: vec![],
                 fields: vec![],

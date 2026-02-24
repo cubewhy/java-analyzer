@@ -3,7 +3,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use rayon::prelude::*;
 use rust_asm::class_reader::AttributeInfo;
 use rust_asm::class_reader::ClassReader;
-use std::collections::HashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -23,8 +23,8 @@ pub struct ClassMetadata {
     pub package: Option<Arc<str>>,
     pub name: Arc<str>,
     pub internal_name: Arc<str>,
-    pub super_name: Option<String>,
-    pub interfaces: Vec<String>,
+    pub super_name: Option<Arc<str>>,
+    pub interfaces: Vec<Arc<str>>,
     pub methods: Vec<MethodSummary>,
     pub fields: Vec<FieldSummary>,
     pub access_flags: u16,
@@ -211,8 +211,12 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
         package: package.map(Arc::from),
         name: Arc::from(class_name),
         internal_name,
-        super_name: cn.super_name,
-        interfaces: cn.interfaces,
+        super_name: cn.super_name.map(|str| intern_str(&str)),
+        interfaces: cn
+            .interfaces
+            .iter()
+            .map(|name| intern_str(name.as_str()))
+            .collect(),
         methods,
         fields,
         access_flags: cn.access_flags,
@@ -238,13 +242,13 @@ fn intern_str(s: &str) -> Arc<str> {
 
 pub struct GlobalIndex {
     /// 完整内部名 → ClassMetadata
-    exact_match: HashMap<Arc<str>, Arc<ClassMetadata>>,
+    exact_match: FxHashMap<Arc<str>, Arc<ClassMetadata>>,
     /// 简单类名 → Vec<内部名>（不同包可能同名）
-    simple_name_index: HashMap<Arc<str>, Vec<Arc<str>>>,
+    simple_name_index: FxHashMap<Arc<str>, Vec<Arc<str>>>,
     /// 包名 → Vec<内部名>（用于通配符 import 展开）
-    package_index: HashMap<Arc<str>, Vec<Arc<str>>>,
+    package_index: FxHashMap<Arc<str>, Vec<Arc<str>>>,
     /// 来源 → Vec<内部名>（用于按文件删除）
-    origin_index: HashMap<ClassOrigin, Vec<Arc<str>>>,
+    origin_index: FxHashMap<ClassOrigin, Vec<Arc<str>>>,
     /// fuzzy 匹配器（用简单类名）
     fuzzy_matcher: Nucleo<Arc<str>>,
 }
@@ -254,10 +258,13 @@ impl GlobalIndex {
         let waker = Arc::new(|| {});
 
         Self {
-            exact_match: HashMap::with_capacity(100_000),
-            simple_name_index: HashMap::with_capacity(100_000),
-            package_index: HashMap::with_capacity(10_000),
-            origin_index: HashMap::new(),
+            exact_match: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher::default()),
+            simple_name_index: FxHashMap::with_capacity_and_hasher(
+                100_000,
+                FxBuildHasher::default(),
+            ),
+            package_index: FxHashMap::with_capacity_and_hasher(10_000, FxBuildHasher::default()),
+            origin_index: FxHashMap::default(),
             fuzzy_matcher: Nucleo::new(nucleo::Config::DEFAULT, waker, None, 1),
         }
     }
@@ -474,13 +481,16 @@ impl GlobalIndex {
         // Track seen method signatures to implement shadowing
         let mut seen_methods: std::collections::HashSet<(Arc<str>, Arc<str>)> = Default::default(); // (name, descriptor)
         let mut seen_fields: std::collections::HashSet<Arc<str>> = Default::default();
-        let mut queue: std::collections::VecDeque<String> = Default::default();
-        queue.push_back(class_internal.to_string());
+        let mut queue: std::collections::VecDeque<Arc<str>> = Default::default();
+
+        queue.push_back(Arc::from(class_internal));
+
         while let Some(internal) = queue.pop_front() {
             let meta = match self.resolve_class_name(&internal) {
                 Some(m) => m,
-                None => continue, // not in index (e.g. java/lang/Object without JDK)
+                None => continue,
             };
+
             // Add methods not yet shadowed by a subclass
             for method in &meta.methods {
                 let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
@@ -506,15 +516,15 @@ impl GlobalIndex {
                 }
             }
             // Enqueue super class
-            if let Some(ref super_name) = meta.super_name
-                && !super_name.is_empty()
-            {
-                queue.push_back(super_name.clone());
+            if let Some(ref super_name) = meta.super_name {
+                if !super_name.is_empty() {
+                    queue.push_back(super_name.clone());
+                }
             }
             // Enqueue interfaces
             for iface in &meta.interfaces {
                 if !iface.is_empty() {
-                    queue.push_back(iface.clone());
+                    queue.push_back(Arc::clone(iface));
                 }
             }
         }
@@ -526,9 +536,10 @@ impl GlobalIndex {
     /// Classes not in the index are silently skipped.
     pub fn mro(&self, class_internal: &str) -> Vec<Arc<ClassMetadata>> {
         let mut result = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        queue.push_back(class_internal.to_string());
+        let mut seen: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<Arc<str>> = std::collections::VecDeque::new();
+
+        queue.push_back(Arc::from(class_internal));
         while let Some(internal) = queue.pop_front() {
             if !seen.insert(internal.clone()) {
                 continue; // avoid cycles (e.g. broken index)
@@ -1173,7 +1184,7 @@ class Main {
         let mut parent = make_class("com/example", "Parent", ClassOrigin::Unknown);
         parent.methods.push(make_method("parentMethod", "()V"));
         let mut child = make_class("com/example", "Child", ClassOrigin::Unknown);
-        child.super_name = Some("com/example/Parent".to_string());
+        child.super_name = Some("com/example/Parent".into());
         child.methods.push(make_method("childMethod", "()V"));
         idx.add_classes(vec![parent, child]);
 
@@ -1192,7 +1203,7 @@ class Main {
         iface.methods.push(make_method("run", "()V"));
         let mut child = make_class("com/example", "MyThread", ClassOrigin::Unknown);
         // source 解析只有简单名
-        child.interfaces = vec!["Runnable".to_string()];
+        child.interfaces = vec!["Runnable".into()];
         idx.add_classes(vec![iface, child]);
 
         let (methods, _) = idx.collect_inherited_members("com/example/MyThread");

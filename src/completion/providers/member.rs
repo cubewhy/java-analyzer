@@ -1478,7 +1478,7 @@ public class RandomClass {
                 package: None,
                 name: Arc::from("Main2"),
                 internal_name: Arc::from("Main2"),
-                super_name: Some("BaseClass".to_string()), // 正确的简单名
+                super_name: Some("BaseClass".into()),
                 interfaces: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
@@ -1555,7 +1555,7 @@ public class RandomClass {
                 package: Some(Arc::from("org/cubewhy")),
                 name: Arc::from("Main2"),
                 internal_name: Arc::from("org/cubewhy/Main2"),
-                super_name: Some("org/cubewhy/BaseClass".to_string()),
+                super_name: Some("org/cubewhy/BaseClass".into()),
                 interfaces: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
