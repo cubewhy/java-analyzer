@@ -27,7 +27,6 @@ tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin.git" }
 walkdir = "2.5.0"
 jimage-rs = "0.0.4"
 ropey = "1.6.1"
-rusqlite = { version = "0.38", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3.25.0"
