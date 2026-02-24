@@ -74,8 +74,7 @@ impl Backend {
                 "Indexing JDK",
                 || async {
                     let jdk_classes =
-                        tokio::task::spawn_blocking(|| crate::index::jdk::JdkIndexer::index())
-                            .await;
+                        tokio::task::spawn_blocking(crate::index::jdk::JdkIndexer::index).await;
                     match jdk_classes {
                         Ok(classes) if !classes.is_empty() => {
                             let msg = format!("✓ JDK: {} classes", classes.len());

@@ -8,16 +8,17 @@ use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
 use crate::completion::type_resolver::parse_return_type_from_descriptor;
 
+pub mod cache;
 pub mod codebase;
 pub mod jdk;
 pub mod source;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassMetadata {
     pub package: Option<Arc<str>>,
     pub name: Arc<str>,
@@ -31,14 +32,14 @@ pub struct ClassMetadata {
     pub origin: ClassOrigin,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ClassOrigin {
     Jar(Arc<str>),
     SourceFile(Arc<str>),
     Unknown,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodSummary {
     pub name: Arc<str>,
     pub descriptor: Arc<str>,
@@ -48,7 +49,7 @@ pub struct MethodSummary {
     pub return_type: Option<Arc<str>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldSummary {
     pub name: Arc<str>,
     pub descriptor: Arc<str>,
@@ -57,7 +58,26 @@ pub struct FieldSummary {
 }
 
 pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> {
-    let jar_str = Arc::from(path.as_ref().to_string_lossy().as_ref());
+    let path = path.as_ref();
+    // Try to load from cache
+    if let Some(cached) = cache::load_cached(path) {
+        return Ok(cached);
+    }
+
+    let classes = index_jar_uncached(path)?;
+
+    // save cache
+    let classes_clone = classes.clone();
+    let path_buf = path.to_path_buf();
+    std::thread::spawn(move || {
+        cache::save_cache(&path_buf, &classes_clone);
+    });
+
+    Ok(classes)
+}
+
+fn index_jar_uncached(path: &Path) -> anyhow::Result<Vec<ClassMetadata>> {
+    let jar_str = Arc::from(path.to_string_lossy().as_ref());
     let file = std::fs::File::open(&path)?;
     let mut archive = ZipArchive::new(std::io::BufReader::new(file))?;
 

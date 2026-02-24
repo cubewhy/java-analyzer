@@ -265,10 +265,29 @@ impl<'s> JavaContextExtractor<'s> {
             let clean_loc = strip_sentinel_from_location(loc);
             return Some((clean_loc, clean_q));
         }
+
+        let mut cur = sentinel_node;
+        loop {
+            if cur.kind() == "identifier" || cur.kind() == "type_identifier" {
+                let tmp = JavaContextExtractor {
+                    source: &injected_source,
+                    bytes: injected_source.as_bytes(),
+                    offset: sentinel_end,
+                    rope: Rope::from_str(&injected_source),
+                };
+                let (loc, q) = tmp.determine_location(Some(cur), trigger_char);
+                let clean_q = strip_sentinel(&q);
+                let clean_loc = strip_sentinel_from_location(loc);
+                return Some((clean_loc, clean_q));
+            }
+            cur = cur.parent()?;
+            if cur.kind() == "method_declaration" || cur.kind() == "program" {
+                break;
+            }
+        }
+
         None
     }
-
-    // ── 原有方法（保留，去掉启发式调用）────────────────────────────────────
 
     fn find_cursor_node<'tree>(&self, root: Node<'tree>) -> Option<Node<'tree>> {
         if let Some(n) =
@@ -672,8 +691,91 @@ impl<'s> JavaContextExtractor<'s> {
                 })
             })
             .collect();
+
+        vars.extend(self.extract_misread_var_decls(search_root));
+
         vars.extend(self.extract_params(root, cursor_node));
         vars
+    }
+
+    fn extract_misread_var_decls(&self, root: Node) -> Vec<LocalVar> {
+        let mut result = Vec::new();
+        self.collect_misread_decls(root, &mut result);
+        result
+    }
+
+    fn collect_misread_decls(&self, node: Node, vars: &mut Vec<LocalVar>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            // Pattern: variable_declarator containing assignment_expression
+            // where the declarator's ERROR sibling contains a type keyword
+            if child.kind() == "variable_declarator" {
+                // Look for assignment_expression inside this declarator
+                let mut vc = child.walk();
+                for vchild in child.children(&mut vc) {
+                    if vchild.kind() == "assignment_expression" {
+                        // Left side is the misread variable name
+                        let lhs = vchild.child_by_field_name("left").or_else(|| {
+                            let mut wc = vchild.walk();
+                            vchild.named_children(&mut wc).next()
+                        });
+                        let rhs = vchild.child_by_field_name("right").or_else(|| {
+                            let mut wc = vchild.walk();
+                            vchild.named_children(&mut wc).nth(1)
+                        });
+                        if let (Some(name_node), Some(init_node)) = (lhs, rhs) {
+                            if name_node.kind() != "identifier" {
+                                continue;
+                            }
+                            if name_node.start_byte() >= self.offset {
+                                continue;
+                            }
+                            let name = self.node_text(name_node);
+                            // Find type from ERROR sibling (contains "var" or type_identifier)
+                            let type_name = self.find_type_in_error_sibling(child);
+                            let init_text = self.node_text(init_node).to_string();
+                            let lv = if type_name.as_deref() == Some("var") {
+                                LocalVar {
+                                    name: Arc::from(name),
+                                    type_internal: Arc::from("var"),
+                                    init_expr: Some(init_text),
+                                }
+                            } else {
+                                let raw_ty = type_name.as_deref().unwrap_or("Object");
+                                LocalVar {
+                                    name: Arc::from(name),
+                                    type_internal: Arc::from(
+                                        java_type_to_internal(raw_ty).as_str(),
+                                    ),
+                                    init_expr: None,
+                                }
+                            };
+                            vars.push(lv);
+                        }
+                    }
+                }
+            }
+            self.collect_misread_decls(child, vars);
+        }
+    }
+
+    fn find_type_in_error_sibling(&self, declarator_node: Node) -> Option<String> {
+        // Look inside ERROR children of the declarator for type_identifier
+        let mut cursor = declarator_node.walk();
+        for child in declarator_node.children(&mut cursor) {
+            if child.kind() == "ERROR" {
+                let mut ec = child.walk();
+                for ec_child in child.children(&mut ec) {
+                    if ec_child.kind() == "type_identifier"
+                        || ec_child.kind() == "integral_type"
+                        || ec_child.kind() == "void_type"
+                    {
+                        return Some(self.node_text(ec_child).to_string());
+                    }
+                }
+            }
+        }
+        None
     }
 
     fn extract_params(&self, root: Node, cursor_node: Option<Node>) -> Vec<LocalVar> {
@@ -798,6 +900,72 @@ impl<'s> JavaContextExtractor<'s> {
         let mut members = Vec::new();
         self.collect_members_from_node(body, &mut members);
         members
+    }
+
+    fn extract_locals_from_error_nodes(&self, root: Node) -> Vec<LocalVar> {
+        let mut result = Vec::new();
+        self.collect_locals_in_errors(root, &mut result);
+        result
+    }
+
+    fn collect_locals_in_errors(&self, node: Node, vars: &mut Vec<LocalVar>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "ERROR" {
+                // ERROR 内部可能有 local_variable_declaration
+                let q_src = r#"
+                (local_variable_declaration
+                    type: (_) @type
+                    declarator: (variable_declarator
+                        name: (identifier) @name))
+            "#;
+                if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src) {
+                    let type_idx = q.capture_index_for_name("type").unwrap();
+                    let name_idx = q.capture_index_for_name("name").unwrap();
+                    let found: Vec<LocalVar> = run_query(&q, child, self.bytes, None)
+                        .into_iter()
+                        .filter_map(|captures| {
+                            let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
+                            let name_node = captures.iter().find(|(idx, _)| *idx == name_idx)?.1;
+                            if ty_node.start_byte() >= self.offset {
+                                return None;
+                            }
+                            let ty = ty_node.utf8_text(self.bytes).ok()?;
+                            let name = name_node.utf8_text(self.bytes).ok()?;
+                            let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
+                            if raw_ty == "var" {
+                                return Some(
+                                    match infer_type_from_initializer(ty_node, self.bytes) {
+                                        Some(t) => LocalVar {
+                                            name: Arc::from(name),
+                                            type_internal: Arc::from(
+                                                java_type_to_internal(&t).as_str(),
+                                            ),
+                                            init_expr: None,
+                                        },
+                                        None => LocalVar {
+                                            name: Arc::from(name),
+                                            type_internal: Arc::from("var"),
+                                            init_expr: get_initializer_text(ty_node, self.bytes),
+                                        },
+                                    },
+                                );
+                            }
+                            Some(LocalVar {
+                                name: Arc::from(name),
+                                type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                                init_expr: None,
+                            })
+                        })
+                        .collect();
+                    vars.extend(found);
+                }
+                // 递归进入嵌套 ERROR
+                self.collect_locals_in_errors(child, vars);
+            } else {
+                self.collect_locals_in_errors(child, vars);
+            }
+        }
     }
 
     fn collect_members_from_node(&self, node: Node, members: &mut Vec<CurrentClassMember>) {
@@ -3271,6 +3439,100 @@ mod tests {
             matches!(&ctx.location, CursorLocation::ConstructorCall { .. }),
             "new at end of line should give ConstructorCall, got {:?}",
             ctx.location
+        );
+    }
+
+    #[test]
+    fn test_expression_after_syntax_error_line() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            String str = "hello":
+            s
+        }
+    }
+    "#};
+        let line = 3u32;
+        let col = src.lines().nth(3).unwrap().len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(&ctx.location, CursorLocation::Expression { prefix } if prefix == "s"),
+            "expression after syntax error should still parse, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_snapshot_syntax_error_colon_ast() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            String str = "hello":
+            var b1 = str;
+            b
+        }
+    }
+    "#};
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(src, None).unwrap();
+
+        fn dump(node: tree_sitter::Node, src: &str, indent: usize, out: &mut String) {
+            let pad = "  ".repeat(indent);
+            let text: String = src[node.start_byte()..node.end_byte()]
+                .chars()
+                .take(30)
+                .collect();
+            out.push_str(&format!(
+                "{}{} [{}-{}] {:?}\n",
+                pad,
+                node.kind(),
+                node.start_byte(),
+                node.end_byte(),
+                text
+            ));
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                dump(child, src, indent + 1, out);
+            }
+        }
+
+        let mut out = String::new();
+        dump(tree.root_node(), src, 0, &mut out);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn test_locals_extracted_after_syntax_error_line() {
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            String str = "hello":
+            var b1 = str;
+            b
+        }
+    }
+    "#};
+        let line = 4u32;
+        let col = src.lines().nth(4).unwrap().len() as u32;
+        let ctx = at(src, line, col);
+        assert!(
+            ctx.local_variables.iter().any(|v| v.name.as_ref() == "str"),
+            "str should be in locals: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|v| v.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            ctx.local_variables.iter().any(|v| v.name.as_ref() == "b1"),
+            "b1 should be in locals: {:?}",
+            ctx.local_variables
+                .iter()
+                .map(|v| v.name.as_ref())
+                .collect::<Vec<_>>()
         );
     }
 }

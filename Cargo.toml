@@ -16,6 +16,8 @@ rust-asm = "0.1.4"
 zip = "8.1.0"
 tower-lsp = "0.20.0"
 serde = { version = "1", features = ["derive", "rc"] }
+postcard = { version = "1", features = ["alloc"] }
+dirs = "6.0.0"
 nucleo = "0.5.0"
 nucleo-matcher = "0.3.1"
 indoc = "2.0.7"

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::index::parse_class_data_bytes;
+use crate::index::{cache, parse_class_data_bytes};
 
 use super::{ClassMetadata, index_jar};
 
@@ -59,6 +59,12 @@ impl JdkIndexer {
     }
 
     fn index_jimage(path: &Path) -> Vec<ClassMetadata> {
+        // Try cache
+        if let Some(cached) = crate::index::cache::load_cached(path) {
+            tracing::info!(count = cached.len(), "JDK index loaded from cache");
+            return cached;
+        }
+
         let origin = Arc::from(JDK_ORIGIN);
 
         let jimage = match jimage_rs::JImage::open(path) {
@@ -111,6 +117,13 @@ impl JdkIndexer {
                 None => debug!(path = resource_path, "failed to parse class"),
             }
         }
+
+        // cache index
+        let results_clone = results.clone();
+        let path_buf = path.to_path_buf();
+        std::thread::spawn(move || {
+            cache::save_cache(&path_buf, &results_clone);
+        });
 
         info!(count = results.len(), "JDK jimage indexed");
         results
