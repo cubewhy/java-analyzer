@@ -714,4 +714,625 @@ mod tests {
             result[0].required_import
         );
     }
+
+    #[test]
+    fn test_chain_field_access_resolved() {
+        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary};
+        use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("System"),
+                internal_name: Arc::from("java/lang/System"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![FieldSummary {
+                    name: Arc::from("out"),
+                    descriptor: Arc::from("Ljava/io/PrintStream;"), // 指向 PrintStream
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    is_synthetic: false,
+                }],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/io")),
+                name: Arc::from("PrintStream"),
+                internal_name: Arc::from("java/io/PrintStream"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let engine = CompletionEngine::new();
+        // 模拟用户输入了 System.out.|
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "System.out".to_string(),
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec!["java.lang.System".to_string()], // 确保 System 能够被解析
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+            assert_eq!(
+                receiver_type.as_deref(),
+                Some("java/io/PrintStream"),
+                "System.out 应该被正确链式推导为 java/io/PrintStream"
+            );
+        } else {
+            panic!("Location changed unexpectedly");
+        }
+    }
+
+    #[test]
+    fn test_expected_type_ranks_first_in_constructor_completion() {
+        use crate::completion::context::CursorLocation;
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        for (pkg, name) in [
+            ("org/cubewhy/a", "Main"),
+            ("org/cubewhy/a", "Main2"),
+            ("org/cubewhy", "RandomClass"),
+        ] {
+            idx.add_classes(vec![ClassMetadata {
+                package: Some(Arc::from(pkg)),
+                name: Arc::from(name),
+                internal_name: Arc::from(format!("{}/{}", pkg, name)),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("<init>"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            }]);
+        }
+        let engine = CompletionEngine::new();
+        let ctx = CompletionContext::new(
+            CursorLocation::ConstructorCall {
+                class_prefix: String::new(),
+                expected_type: Some("RandomClass".to_string()),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/a/Main")),
+            Some(Arc::from("org/cubewhy/a")),
+            vec!["org.cubewhy.RandomClass".to_string()],
+        );
+        let results = engine.complete(ctx, &mut idx);
+        assert!(!results.is_empty(), "should have candidates");
+        assert_eq!(
+            results[0].label.as_ref(),
+            "RandomClass",
+            "RandomClass should rank first when it matches expected_type, got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_var_method_return_type_resolved() {
+        use crate::completion::context::{CursorLocation, LocalVar};
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("NestedClass"),
+            internal_name: Arc::from("NestedClass"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("randomFunction"),
+                descriptor: Arc::from("(Ljava/lang/String;)LNestedClass;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("NestedClass")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "str".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("nc"),
+                    type_internal: Arc::from("NestedClass"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("str"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("nc.randomFunction()".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        let str_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "str")
+            .unwrap();
+        assert_eq!(str_var.type_internal.as_ref(), "NestedClass");
+    }
+
+    #[test]
+    fn test_var_overload_resolved_by_long_arg() {
+        use crate::completion::context::{CursorLocation, LocalVar};
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("NestedClass"),
+            internal_name: Arc::from("NestedClass"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![
+                MethodSummary {
+                    name: Arc::from("randomFunction"),
+                    descriptor: Arc::from("(Ljava/lang/String;I)LRandomClass;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("RandomClass")),
+                },
+                MethodSummary {
+                    name: Arc::from("randomFunction"),
+                    descriptor: Arc::from("(Ljava/lang/String;J)LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                },
+            ],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "str".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("nc"),
+                    type_internal: Arc::from("NestedClass"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("str"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("nc.randomFunction(\"a\", 1l)".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        let str_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "str")
+            .unwrap();
+        assert_eq!(str_var.type_internal.as_ref(), "Main2");
+    }
+
+    #[test]
+    fn test_var_bare_method_call_resolved() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Main"),
+            internal_name: Arc::from("Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("getString"),
+                descriptor: Arc::from("()Ljava/lang/String;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("java/lang/String")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "str".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("str"),
+                type_internal: Arc::from("var"),
+                init_expr: Some("getString()".to_string()),
+            }],
+            Some(Arc::from("Main")),
+            Some(Arc::from("Main")),
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        let str_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "str")
+            .unwrap();
+        assert_eq!(str_var.type_internal.as_ref(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_resolve_method_return_walks_mro() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Parent"),
+                internal_name: Arc::from("Parent"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getValue"),
+                    descriptor: Arc::from("()Ljava/lang/String;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("java/lang/String")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Child"),
+                internal_name: Arc::from("Child"),
+                super_name: Some("Parent".to_string()),
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let resolver = TypeResolver::new(&idx);
+        let result = resolver.resolve_method_return("Child", "getValue", 0, &[]);
+        assert_eq!(result.as_deref(), Some("java/lang/String"));
+    }
+
+    #[test]
+    fn test_complete_member_after_bare_method_call() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main"),
+                internal_name: Arc::from("Main"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("getMain2"),
+                    descriptor: Arc::from("()LMain2;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Main2")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("Main2"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("func"),
+                    descriptor: Arc::from("()V"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let engine = CompletionEngine::new();
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "getMain2()".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("Main")),
+            None,
+            vec![],
+        );
+        let results = engine.complete(ctx, &mut idx);
+        assert!(results.iter().any(|c| c.label.as_ref() == "func"));
+    }
+
+    #[test]
+    fn test_var_array_element_type_resolved() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "a".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("args"),
+                    type_internal: Arc::from("String[]"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("a"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("args[0]".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        let a_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "a")
+            .unwrap();
+        assert_eq!(a_var.type_internal.as_ref(), "String");
+    }
+
+    #[test]
+    fn test_var_primitive_array_element_not_resolved() {
+        let idx = GlobalIndex::new();
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "x".to_string(),
+            },
+            "",
+            vec![
+                LocalVar {
+                    name: Arc::from("nums"),
+                    type_internal: Arc::from("int[]"),
+                    init_expr: None,
+                },
+                LocalVar {
+                    name: Arc::from("x"),
+                    type_internal: Arc::from("var"),
+                    init_expr: Some("nums[0]".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        let x_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "x")
+            .unwrap();
+        assert_ne!(x_var.type_internal.as_ref(), "int[]");
+    }
+
+    #[test]
+    fn test_enrich_context_array_access_receiver() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("length"),
+                descriptor: Arc::from("()I"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "b[0]".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("b"),
+                type_internal: Arc::from("String[]"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+            assert_eq!(receiver_type.as_deref(), Some("java/lang/String"));
+        }
+    }
+
+    #[test]
+    fn test_element_type_source_form() {
+        assert_eq!(element_type_of_array("String[]").as_deref(), Some("String"));
+        assert_eq!(
+            element_type_of_array("java/lang/String[]").as_deref(),
+            Some("java/lang/String")
+        );
+        assert_eq!(element_type_of_array("int[]").as_deref(), Some("int"));
+        assert_eq!(element_type_of_array("double[]").as_deref(), Some("double"));
+    }
+
+    #[test]
+    fn test_element_type_descriptor_form() {
+        assert_eq!(
+            element_type_of_array("[Ljava/lang/String;").as_deref(),
+            Some("java/lang/String")
+        );
+        assert_eq!(element_type_of_array("[I").as_deref(), Some("int"));
+        assert_eq!(
+            element_type_of_array("[[Ljava/lang/String;").as_deref(),
+            Some("[Ljava/lang/String;")
+        );
+    }
+
+    #[test]
+    fn test_package_path_becomes_import_location() {
+        use crate::completion::engine::CompletionEngine;
+        use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/util")),
+            name: Arc::from("ArrayList"),
+            internal_name: Arc::from("java/util/ArrayList"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "ArrayL".to_string(),
+                receiver_expr: "java.util".to_string(),
+            },
+            "ArrayL",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        assert!(matches!(
+            &ctx.location,
+            CursorLocation::Import { prefix } if prefix == "java.util.ArrayL"
+        ));
+    }
+
+    #[test]
+    fn test_unknown_receiver_stays_member_access() {
+        use crate::completion::engine::CompletionEngine;
+        use crate::index::GlobalIndex;
+        let idx = GlobalIndex::new();
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "foo".to_string(),
+                receiver_expr: "unknownPkg".to_string(),
+            },
+            "foo",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        assert!(matches!(&ctx.location, CursorLocation::MemberAccess { .. }));
+    }
 }
