@@ -536,34 +536,8 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn handle_import(&self, node: Node) -> (CursorLocation, String) {
-        // 只取节点文本从开头到光标位置
         let up_to_cursor = &self.source[node.start_byte()..self.offset];
-
-        tracing::debug!(
-            node_kind = node.kind(),
-            node_start = node.start_byte(),
-            node_end = node.end_byte(),
-            offset = self.offset,
-            up_to_cursor = up_to_cursor,
-            "handle_import raw"
-        );
-
-        // 拍平多行：去掉换行和多余空白
-        let flat: String = up_to_cursor
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // 截断行内注释（// 之后的内容）
-        let without_comment = flat.find("//").map(|p| &flat[..p]).unwrap_or(&flat);
-
-        let prefix = without_comment
-            .trim_start_matches("import")
-            .trim()
-            .trim_end_matches(';')
-            .trim()
-            .to_string();
-
+        let prefix = crate::completion::import_completion::extract_import_prefix(up_to_cursor);
         let query = prefix.rsplit('.').next().unwrap_or("").to_string();
         (CursorLocation::Import { prefix }, query)
     }
