@@ -12,7 +12,6 @@ use super::{
     },
     scorer::Scorer,
 };
-use crate::completion::LocalVar;
 use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::providers::annotation::AnnotationProvider;
 use crate::completion::providers::expression::ExpressionProvider;
@@ -21,6 +20,7 @@ use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
 use crate::completion::type_resolver::{ChainSegment, descriptor_to_type};
+use crate::completion::{CandidateKind, LocalVar};
 use crate::index::GlobalIndex;
 
 pub struct CompletionEngine {
@@ -363,10 +363,32 @@ fn dedup(mut candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
 
     let mut result: Vec<CompletionCandidate> = Vec::with_capacity(candidates.len());
     for c in candidates {
-        let duplicate = result.last().is_some_and(|last| {
-            last.label == c.label
-                && std::mem::discriminant(&last.kind) == std::mem::discriminant(&c.kind)
-        });
+        let duplicate = result
+            .iter()
+            .rev()
+            .take_while(|last| last.label == c.label)
+            .any(|last| {
+                if std::mem::discriminant(&last.kind) != std::mem::discriminant(&c.kind) {
+                    return false;
+                }
+
+                match (&last.kind, &c.kind) {
+                    (
+                        CandidateKind::Method { descriptor: d1, .. },
+                        CandidateKind::Method { descriptor: d2, .. },
+                    )
+                    | (
+                        CandidateKind::StaticMethod { descriptor: d1, .. },
+                        CandidateKind::StaticMethod { descriptor: d2, .. },
+                    )
+                    | (
+                        CandidateKind::Constructor { descriptor: d1, .. },
+                        CandidateKind::Constructor { descriptor: d2, .. },
+                    ) => d1 == d2,
+                    _ => true,
+                }
+            });
+
         if !duplicate {
             result.push(c);
         }
