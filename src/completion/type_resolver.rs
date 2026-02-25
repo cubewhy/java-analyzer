@@ -213,7 +213,7 @@ fn params_match(descriptor: &str, arg_types: &[Arc<str>]) -> bool {
 /// - "[[J" -> "long[][]"
 /// - "Ljava/lang/String;" -> "java/lang/String"
 /// - "[Ljava/lang/String;" -> "java/lang/String[]"
-pub fn descriptor_to_type(desc: &str) -> String {
+pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
     let mut array_depth = 0;
     let mut s = desc;
     while s.starts_with('[') {
@@ -256,7 +256,7 @@ pub fn parse_method_descriptor(descriptor: &str) -> Vec<String> {
 
     while !s.is_empty() {
         let (ty_desc, rest) = consume_one_descriptor_type(s);
-        types.push(descriptor_to_type(ty_desc));
+        types.push(descriptor_to_source_code_style_type(ty_desc));
         s = rest;
     }
 
@@ -807,19 +807,22 @@ mod tests {
     #[test]
     fn test_descriptor_to_type_intellij_style() {
         // primitive arrays
-        assert_eq!(descriptor_to_type("[I"), "int[]");
-        assert_eq!(descriptor_to_type("[[D"), "double[][]");
+        assert_eq!(descriptor_to_source_code_style_type("[I"), "int[]");
+        assert_eq!(descriptor_to_source_code_style_type("[[D"), "double[][]");
 
         // objects
-        assert_eq!(descriptor_to_type("Ljava/lang/String;"), "java/lang/String");
+        assert_eq!(
+            descriptor_to_source_code_style_type("Ljava/lang/String;"),
+            "java/lang/String"
+        );
 
         // object arrays
         assert_eq!(
-            descriptor_to_type("[Ljava/lang/Object;"),
+            descriptor_to_source_code_style_type("[Ljava/lang/Object;"),
             "java/lang/Object[]"
         );
         assert_eq!(
-            descriptor_to_type("[[Ljava/util/List;"),
+            descriptor_to_source_code_style_type("[[Ljava/util/List;"),
             "java/util/List[][]"
         );
     }

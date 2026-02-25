@@ -1,7 +1,9 @@
 use rust_asm::constants::ACC_PRIVATE;
 
 use crate::{
-    completion::type_resolver::{parse_method_descriptor, singleton_descriptor_to_type},
+    completion::type_resolver::{
+        descriptor_to_source_code_style_type, parse_method_descriptor, singleton_descriptor_to_type,
+    },
     index::{FieldSummary, MethodSummary},
 };
 
@@ -150,8 +152,13 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 
 pub fn method_detail(class_name: &str, method: &MethodSummary) -> String {
     format!(
-        "{} — {}({})",
+        "{} — {} {}({})",
         class_name,
+        method
+            .return_type
+            .clone()
+            .map(|ty| descriptor_to_source_code_style_type(ty.as_ref()))
+            .unwrap_or_else(|| "void".to_string()),
         method.name,
         parse_method_descriptor(&method.descriptor).join(", ")
     )
