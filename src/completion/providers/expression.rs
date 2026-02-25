@@ -113,6 +113,8 @@ impl CompletionProvider for ExpressionProvider {
                     40.0
                 };
 
+                let length_penalty = meta.name.len() as f32 * 0.05;
+
                 let candidate = CompletionCandidate::new(
                     Arc::clone(&meta.name),
                     meta.name.to_string(),
@@ -120,7 +122,7 @@ impl CompletionProvider for ExpressionProvider {
                     self.name(),
                 )
                 .with_detail(fqn.clone())
-                .with_score(base_score + score as f32 * 0.1);
+                .with_score(base_score + score as f32 * 0.1 - length_penalty);
 
                 let needs_import = is_import_needed(
                     &fqn,
