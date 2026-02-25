@@ -43,6 +43,10 @@ impl CompletionProvider for MemberProvider {
         );
 
         if receiver_expr == "this" {
+            if ctx.is_in_static_context() {
+                return vec![];
+            }
+
             // source members (including private members, directly parsed from the AST)
             let mut results = if !ctx.current_class_members.is_empty() {
                 self.provide_from_source_members(ctx, member_prefix)
@@ -621,6 +625,7 @@ fn resolve_simple_name_to_internal(
 mod tests {
     use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 
+    use crate::completion::context::CurrentClassMember;
     use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodSummary};
     use crate::language::Language;
     use crate::{
@@ -1740,7 +1745,6 @@ public class RandomClass {
     #[test]
     fn test_resolve_receiver_type_with_generics_dynamic() {
         let mut idx = GlobalIndex::new();
-        // 必须向 mock index 中注册真实被查找的 java/util/List 和 String
         idx.add_classes(vec![
             ClassMetadata {
                 package: Some(Arc::from("java/util")),
@@ -1783,6 +1787,61 @@ public class RandomClass {
         assert!(
             results.iter().any(|c| c.label.as_ref() == "size"),
             "should dynamically resolve List and String to find methods"
+        );
+    }
+
+    #[test]
+    fn test_no_this_completion_in_static_method() {
+        let mut idx = GlobalIndex::new();
+
+        let members = vec![
+            CurrentClassMember {
+                name: Arc::from("staticField"),
+                is_method: false,
+                is_static: true,
+                is_private: false,
+                descriptor: Arc::from("I"),
+            },
+            CurrentClassMember {
+                name: Arc::from("instanceField"),
+                is_method: false,
+                is_static: false,
+                is_private: false,
+                descriptor: Arc::from("I"),
+            },
+        ];
+
+        // create a static methods
+        let enclosing_method = CurrentClassMember {
+            name: Arc::from("main"),
+            is_method: true,
+            is_static: true,
+            is_private: false,
+            descriptor: Arc::from("([Ljava/lang/String;)V"),
+        };
+
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "this".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/Main")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_class_members(members)
+        .with_enclosing_member(Some(enclosing_method));
+
+        let results = MemberProvider.provide(&ctx, &mut idx);
+
+        assert!(
+            results.is_empty(),
+            "In static context, 'this.' should not provide any completions, but got: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
     }
 }
