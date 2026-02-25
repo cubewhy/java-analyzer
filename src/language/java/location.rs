@@ -211,6 +211,23 @@ fn handle_identifier(
             "import_declaration" => return handle_import(ctx, ancestor),
             "object_creation_expression" => return handle_constructor(ctx, ancestor),
             "local_variable_declaration" => {
+                // Detect misreading: If the next sibling begins with `(`,
+                // this indicates that `str\nfunc(...)` was misread as local_variable_declaration,
+                // the "type" of the cursor is actually an expression.
+                if let Some(next) = ancestor.next_sibling() {
+                    let next_text = &ctx.source[next.start_byte()..next.end_byte()];
+                    if next_text.trim_start().starts_with('(') {
+                        let text = cursor_truncated_text(ctx, node);
+                        let clean = strip_sentinel(&text);
+                        return (
+                            CursorLocation::Expression {
+                                prefix: clean.clone(),
+                            },
+                            clean,
+                        );
+                    }
+                }
+
                 if is_in_type_position(node, ancestor) {
                     let text = cursor_truncated_text(ctx, node);
                     return (
@@ -401,4 +418,110 @@ fn infer_expected_type_from_lhs(ctx: &JavaContextExtractor, node: Node) -> Optio
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use ropey::Rope;
+    use tree_sitter::Parser;
+
+    use crate::{
+        completion::CursorLocation,
+        language::java::{JavaContextExtractor, location::determine_location},
+    };
+
+    fn setup_with(source: &'_ str, offset: usize) -> (JavaContextExtractor<'_>, tree_sitter::Tree) {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .expect("failed to load java grammar");
+        let tree = parser.parse(source, None).unwrap();
+        let ctx = JavaContextExtractor {
+            source,
+            bytes: source.as_bytes(),
+            offset,
+            rope: Rope::from_str(source),
+        };
+        (ctx, tree)
+    }
+
+    #[test]
+    fn test_misread_type_as_expression() {
+        // str 缺分号，TS 把 `str\nfunc(...)` 误读为
+        // local_variable_declaration(type=str, declarator=func)
+        // cursor 在 str 末尾时应该得到 Expression 而非 TypeAnnotation
+        let src = indoc::indoc! {r#"
+    class A {
+        public static String str = "1234";
+        public static void func() {
+            str
+            func(func("1234", 5678));
+        }
+    }
+    "#};
+        // offset 紧贴 str 末尾（方法体内那个 str，不是字段声明里的）
+        let marker = "func() {\n        str";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression (str is an expression, not a type annotation), got {:?}",
+            loc
+        );
+        assert_eq!(query, "str");
+    }
+
+    #[test]
+    fn test_genuine_type_annotation_in_local_decl() {
+        // 正常的 local_variable_declaration，cursor 在 type 上，不能被误读检测误伤
+        // 用 `HashM` 作为类型前缀，后面跟 `map =` 确保 TS 解析为 local_variable_declaration
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            HashM map = null;
+        }
+    }
+    "#};
+        let offset = src.find("HashM").unwrap() + 5; // 紧贴 HashM 末尾
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::TypeAnnotation { .. }),
+            "Expected TypeAnnotation for genuine type position, got {:?}",
+            loc
+        );
+        assert_eq!(query, "HashM");
+    }
+
+    #[test]
+    fn test_misread_not_triggered_when_next_sibling_is_normal_statement() {
+        // next sibling 不以 `(` 开头时，误读检测不应触发
+        // 保证普通 local_variable_declaration 里 type 位置的补全正常
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            ArrayL list = new ArrayList<>();
+            int x = 1;
+        }
+    }
+    "#};
+        let offset = src.find("ArrayL").unwrap() + 6;
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, _) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::TypeAnnotation { .. }),
+            "Expected TypeAnnotation, got {:?}",
+            loc
+        );
+    }
 }

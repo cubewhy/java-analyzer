@@ -48,6 +48,29 @@ pub fn extract_locals(
             if ty_node.start_byte() >= ctx.offset {
                 return None;
             }
+
+            let declarator = name_node.parent()?; // variable_declarator
+            let decl = declarator.parent()?; // local_variable_declaration
+
+            // Pattern 1: The declarator contains an argument list (direct method calls are inserted into it)
+            {
+                let mut dc = declarator.walk();
+                if declarator
+                    .children(&mut dc)
+                    .any(|c| c.kind() == "argument_list")
+                {
+                    return None;
+                }
+            }
+
+            // Pattern 2: Zero-length semicolon + next sibling begins with `(` (method call after a newline)
+            if let Some(next) = decl.next_sibling() {
+                let next_text = &ctx.source[next.start_byte()..next.end_byte()];
+                if next_text.trim_start().starts_with('(') {
+                    return None;
+                }
+            }
+
             let ty = ty_node.utf8_text(ctx.bytes).ok()?;
             let name = name_node.utf8_text(ctx.bytes).ok()?;
             tracing::debug!(
@@ -74,8 +97,9 @@ pub fn extract_locals(
         .collect();
 
     vars.extend(extract_misread_var_decls(ctx, search_root));
-
+    vars.extend(extract_locals_from_error_nodes(ctx, search_root));
     vars.extend(extract_params(ctx, root, cursor_node));
+
     vars
 }
 
@@ -484,6 +508,111 @@ mod tests {
         assert!(
             vars.iter().any(|v| v.name.as_ref() == "insideError"),
             "Should extract locals deeply nested inside ERROR nodes"
+        );
+    }
+
+    #[test]
+    fn test_no_false_local_from_misread_method_decl() {
+        // str 缺分号 + 紧跟方法调用，TS 会把整体误读为
+        // local_variable_declaration(type=str, declarator=func(...))
+        // func 不应该出现在局部变量表里，str 也不应出现
+        let src = indoc::indoc! {r#"
+    class A {
+        public static String str = "1234";
+
+        public static void func() {
+            str
+            func(
+                func("1234", 5678)
+            );
+            // cursor here
+        }
+
+        public static void func(Object o) {}
+        public static Object func(String s, int i) { return null; }
+    }
+    "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            !vars.iter().any(|v| v.name.as_ref() == "func"),
+            "`func` must not appear as a local variable (it's a method name misread as declarator). \
+         Found: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
+        assert!(
+            !vars.iter().any(|v| v.name.as_ref() == "str"),
+            "`str` must not appear as a local variable (it was a misread type annotation)"
+        );
+    }
+
+    #[test]
+    fn test_locals_from_error_nodes_are_included() {
+        // 验证 extract_locals_from_error_nodes 确实被 extract_locals 调用了
+        // 使用一个严重损坏的方法体，其中局部变量会落入 ERROR 节点
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            try {
+                String trapped = "value";
+            } catch (
+            // cursor
+        }
+    }
+    "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        // 通过 extract_locals 的统一入口调用，而非直接调用私有函数
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "trapped"),
+            "extract_locals should include vars from ERROR nodes via extract_locals_from_error_nodes. \
+         Found: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_misread_method_multiple_statements_before_cursor() {
+        // 混合场景：正常变量 + 误读方法 + cursor，确保正常变量不受影响
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            int legit = 42;
+            String also = "ok";
+            badMethod   // 缺分号，下一行的调用会触发误读
+            doSomething();
+            // cursor here
+        }
+        void badMethod() {}
+        void doSomething() {}
+    }
+    "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "legit"),
+            "legit should be extracted"
+        );
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "also"),
+            "also should be extracted"
+        );
+        // doSomething 不能作为变量名出现
+        assert!(
+            !vars.iter().any(|v| v.name.as_ref() == "doSomething"),
+            "method name must not appear as local var"
         );
     }
 }

@@ -143,13 +143,13 @@ fn make_package_text_edit(
 
     let end_char = position.character;
 
-    tracing::debug!(
-        insert_text,
-        before_cursor,
-        start_char,
-        end_char,
-        "make_package_text_edit"
-    );
+    // tracing::debug!(
+    //     insert_text,
+    //     before_cursor,
+    //     start_char,
+    //     end_char,
+    //     "make_package_text_edit"
+    // );
 
     Some(CompletionTextEdit::Edit(TextEdit {
         range: Range {
