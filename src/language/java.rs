@@ -150,8 +150,6 @@ impl<'s> JavaContextExtractor<'s> {
         .with_char_after_cursor(char_after_cursor)
     }
 
-    // ── 注入路径 ──────────────────────────────────────────────────────────
-
     /// 构造注入后的 source：用 SENTINEL 替换光标处的 token（或直接插入）
     fn build_injected_source(&self, cursor_node: Option<Node>) -> String {
         let before = &self.source[..self.offset];
@@ -159,10 +157,20 @@ impl<'s> JavaContextExtractor<'s> {
 
         // Case 1: cursor right after `new` keyword (bare `new` or `new `)
         if trimmed.ends_with("new") {
-            let after = self.source[self.offset..].trim_start();
+            let immediate_suffix = &self.source[self.offset..];
+            // Check if there are newlines before the next token
+            let separated_by_newline = immediate_suffix
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .any(|c| c == '\n' || c == '\r');
+
+            let after = immediate_suffix.trim_start();
             let next_meaningful = after.chars().next();
             let is_continuation = next_meaningful.is_some_and(|c| c.is_alphanumeric() || c == '_');
-            if !is_continuation {
+
+            // If separated by newline, we assume the user stopped typing 'new ...'
+            // and the next line is unrelated.
+            if separated_by_newline || !is_continuation {
                 return self.inject_at(self.offset, self.offset, &format!(" {SENTINEL}()"));
             }
         }
@@ -223,10 +231,41 @@ impl<'s> JavaContextExtractor<'s> {
                 find_ancestor(n, "scoped_type_identifier").is_some()
                     || n.kind() == "scoped_type_identifier"
             });
+
+            // Check if we are inside a `new` expression to inject parentheses
+            // This helps tree-sitter terminate the object_creation_expression correctly
+            // instead of swallowing the next lines into the type node.
+            let is_constructor_ctx = cursor_node.is_some_and(|n| {
+                let mut curr = Some(n);
+                while let Some(node) = curr {
+                    if node.kind() == "object_creation_expression" {
+                        return true;
+                    }
+                    if node.kind() == "method_declaration"
+                        || node.kind() == "class_declaration"
+                        || node.kind() == "block"
+                    {
+                        break;
+                    }
+                    curr = node.parent();
+                }
+                false
+            });
+
+            let suffix = if is_constructor_ctx { "()" } else { "" };
+
             if in_scoped_type {
-                self.inject_at(replace_start, replace_end, &format!("{prefix}{SENTINEL};"))
+                self.inject_at(
+                    replace_start,
+                    replace_end,
+                    &format!("{prefix}{SENTINEL}{suffix};"),
+                )
             } else {
-                self.inject_at(replace_start, replace_end, &format!("{prefix}{SENTINEL}"))
+                self.inject_at(
+                    replace_start,
+                    replace_end,
+                    &format!("{prefix}{SENTINEL}{suffix}"),
+                )
             }
         }
     }
@@ -322,6 +361,31 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn determine_location(
+        &self,
+        cursor_node: Option<Node>,
+        trigger_char: Option<char>,
+    ) -> (CursorLocation, String) {
+        let (loc, query) = self.determine_location_impl(cursor_node, trigger_char);
+        if self.location_has_newline(&loc) {
+            return (CursorLocation::Unknown, String::new());
+        }
+        (loc, query)
+    }
+
+    fn location_has_newline(&self, loc: &CursorLocation) -> bool {
+        match loc {
+            CursorLocation::ConstructorCall { class_prefix, .. } => class_prefix.contains('\n'),
+            CursorLocation::MemberAccess { member_prefix, .. } => member_prefix.contains('\n'),
+            CursorLocation::Expression { prefix } => prefix.contains('\n'),
+            CursorLocation::MethodArgument { prefix } => prefix.contains('\n'),
+            CursorLocation::TypeAnnotation { prefix } => prefix.contains('\n'),
+            CursorLocation::Annotation { prefix } => prefix.contains('\n'),
+            CursorLocation::Import { prefix } => prefix.contains('\n'),
+            _ => false,
+        }
+    }
+
+    fn determine_location_impl(
         &self,
         cursor_node: Option<Node>,
         trigger_char: Option<char>,
@@ -604,13 +668,28 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn handle_constructor(&self, node: Node) -> (CursorLocation, String) {
-        let class_prefix = node
-            .child_by_field_name("type")
+        let type_node = node.child_by_field_name("type");
+
+        // If the type node starts after the cursor and is separated by a newline,
+        // it means tree-sitter consumed the next line as the type.
+        // We reject this and return Unknown to trigger the injection path.
+        if let Some(ty) = type_node
+            && self.offset < ty.start_byte()
+        {
+            let gap = &self.source[self.offset..ty.start_byte()];
+            if gap.contains('\n') {
+                return (CursorLocation::Unknown, String::new());
+            }
+        }
+
+        let class_prefix = type_node
             .map(|n| {
-                let raw = self.node_text(n).to_string();
+                // Use cursor_truncated_text so we don't capture text *after* the cursor
+                let raw = self.cursor_truncated_text(n);
                 strip_sentinel(&raw)
             })
             .unwrap_or_default();
+
         let expected_type = self.infer_expected_type_from_lhs(node);
         (
             CursorLocation::ConstructorCall {
@@ -3767,5 +3846,72 @@ mod tests {
             "inline comment should be stripped from import prefix, got {:?}",
             ctx.location
         );
+    }
+
+    #[test]
+    fn test_constructor_incomplete_with_newlines_swallowed() {
+        // Reproduces the issue where "Ar\n\n System..." is captured as the class prefix
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new Ar
+                
+                System.out.println("hello");
+            }
+        }
+        "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("new Ar").map(|c| (i as u32, c as u32 + 6)))
+            .unwrap();
+
+        let ctx = at(src, line, col);
+
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::ConstructorCall { class_prefix, .. }
+                if class_prefix == "Ar"
+            ),
+            "Should extract 'Ar' cleanly without newlines, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_constructor_with_newline_gap_triggers_injection() {
+        // Reproduces the issue where "System.out.println" is captured as class_prefix
+        // because tree-sitter greedily consumes the next line.
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new 
+        
+                System.out.println(new ArrayList());
+            }
+        }
+        "#};
+        // cursor is after "new "
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("new ").map(|c| (i as u32, c as u32 + 4)))
+            .unwrap();
+
+        let ctx = at(src, line, col);
+
+        // The fix should cause handle_constructor to return Unknown,
+        // triggering injection of "new __KIRO__()", which results in an empty prefix.
+        match &ctx.location {
+            CursorLocation::ConstructorCall { class_prefix, .. } => {
+                assert!(
+                    class_prefix.is_empty(),
+                    "Expected empty class_prefix (from injection), but got '{}'",
+                    class_prefix
+                );
+            }
+            _ => panic!("Expected ConstructorCall, got {:?}", ctx.location),
+        }
     }
 }
