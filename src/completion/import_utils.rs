@@ -1,46 +1,45 @@
 use crate::index::{ClassMetadata, GlobalIndex};
 use std::sync::Arc;
 
-/// 判断一个 FQN 是否已被现有 imports 覆盖（精确 + 通配符 + 同包）
+/// Check if an FQN has been overridden by existing imports (exact match + wildcard + same package)
 ///
-/// - `fqn`: 点分 FQN，如 "org.cubewhy.RandomClass"
-/// - `existing_imports`: 文件中已有的 import 语句
-/// - `enclosing_package`: 当前文件所在包（内部格式，如 "org/cubewhy/a"）
+/// - `fqn`: Dotted FQN, e.g., "org.cubewhy.RandomClass"
+/// - `existing_imports`: Existing import statements in the file
+/// - `enclosing_package`: The package containing the current file (internal format, e.g., "org/cubewhy/a")
 ///
-/// 判断一个 FQN 是否需要插入 import 语句
+/// Check if an FQN needs an import statement
 ///
-/// 不需要 import 的情况：
-/// 1. 精确匹配已有 import
-/// 2. 通配符 import 已覆盖（同一层包，不跨子包）
-/// 3. 同包类（enclosing_package 与 fqn 的包相同）
-/// 4. java.lang 包（自动导入）
-/// 5. 默认包（无包名的类）
+/// Cases where imports are not needed:
+/// 1. Exact match with an existing import
+/// 2. Wildcard import already overridden (same package level, not across sub-packages)
+/// 3. Same package (enclosing_package is the same as the package of fqn)
+/// 4. java.lang package (auto-import)
+/// 5. Default package (classes without a package name)
 pub fn is_import_needed(
     fqn: &str,
     existing_imports: &[String],
     enclosing_package: Option<&str>,
 ) -> bool {
-    // 5. 默认包：没有 '.' 说明是默认包的类，不需要 import
+    // default package
     if !fqn.contains('.') {
         return false;
     }
 
-    // 4. java.lang 自动导入
     if is_java_lang(fqn) {
         return false;
     }
 
-    // 1. 精确匹配
+    // exact match
     if existing_imports.iter().any(|imp| imp == fqn) {
         return false;
     }
 
-    // 2. 通配符匹配
+    // wildcard
     if existing_imports.iter().any(|imp| wildcard_covers(imp, fqn)) {
         return false;
     }
 
-    // 3. 同包
+    // same package
     if let Some(enc_pkg) = enclosing_package
         && same_package(fqn, enc_pkg)
     {
@@ -50,34 +49,33 @@ pub fn is_import_needed(
     true
 }
 
-/// "java.lang.*" 或 "java.lang.String" 等 java.lang 下的类不需要显式 import
+/// Determinate a class is in java.lang
 fn is_java_lang(fqn: &str) -> bool {
-    // 只有直接在 java.lang 包下的类才自动导入，子包不算
-    // e.g. "java.lang.String" → true
-    //      "java.lang.reflect.Method" → false
+    // Only classes directly under the java.lang package are automatically imported; sub-packages are not included.
+    // e.g. "java.lang.String" -> true
+    //      "java.lang.reflect.Method" -> false
     if let Some(rest) = fqn.strip_prefix("java.lang.") {
-        // rest 不能含有 '.'（子包）
         !rest.contains('.')
     } else {
         false
     }
 }
 
-/// 判断 fqn 是否与 enclosing_package 同包
-/// enclosing_package 是内部格式（"org/cubewhy/a"），fqn 是点分格式（"org.cubewhy.a.Main"）
+/// Check if fqn is in the same package as enclosing_package
+/// enclosing_package is in internal format ("org/cubewhy/a"), fqn is in dotted-part format ("org.cubewhy.a.Main")
 fn same_package(fqn: &str, enclosing_package: &str) -> bool {
     if enclosing_package.is_empty() {
-        // 默认包：fqn 也必须是默认包（无 '.'）
+        // Default package: fqn must also be the default package (without '.')
         return !fqn.contains('.');
     }
     let enc_dot = enclosing_package.replace('/', ".");
     match fqn.rfind('.') {
         Some(pos) => fqn[..pos] == enc_dot,
-        None => false, // fqn 无包，enclosing 有包 → 不同包
+        None => false, // fqn no package, enclosing has package -> different packages
     }
 }
 
-/// 判断通配符 import 是否覆盖 fqn
+/// Check if wildcard imports override fqn
 /// "org.cubewhy.*" covers "org.cubewhy.Foo" but NOT "org.cubewhy.sub.Bar"
 fn wildcard_covers(wildcard_import: &str, fqn: &str) -> bool {
     let pkg = match wildcard_import.strip_suffix(".*") {
@@ -90,21 +88,21 @@ fn wildcard_covers(wildcard_import: &str, fqn: &str) -> bool {
     }
 }
 
-/// 从简单类名解析到内部名（FQN）
-/// 搜索顺序：已 import → 同包 → 全局唯一
+/// Resolve simple class names to internal names (FQN)
+/// Search order: imported -> same package -> globally unique
 pub fn resolve_simple_to_internal(
     simple: &str,
     existing_imports: &[String],
     enclosing_package: Option<&str>,
     index: &GlobalIndex,
 ) -> Option<Arc<str>> {
-    // 1. 从 imports 解析
+    // resolve from imported classes
     let imported = index.resolve_imports(existing_imports);
     if let Some(m) = imported.iter().find(|m| m.name.as_ref() == simple) {
         return Some(Arc::clone(&m.internal_name));
     }
 
-    // 2. 同包
+    // same package
     if let Some(pkg) = enclosing_package {
         let classes = index.classes_in_package(pkg);
         if let Some(m) = classes.iter().find(|m| m.name.as_ref() == simple) {
@@ -112,7 +110,7 @@ pub fn resolve_simple_to_internal(
         }
     }
 
-    // 3. 全局唯一匹配（优先同包）
+    // locate in global index
     let candidates = index.get_classes_by_simple_name(simple);
     if !candidates.is_empty() {
         if let Some(pkg) = enclosing_package
@@ -128,7 +126,7 @@ pub fn resolve_simple_to_internal(
     None
 }
 
-/// 给定一个 ClassMetadata，计算其点分 FQN
+/// Given a ClassMetadata, compute its point score FQN
 pub fn fqn_of_meta(meta: &ClassMetadata) -> String {
     match &meta.package {
         Some(pkg) => format!("{}.{}", pkg.replace('/', "."), meta.name),
@@ -136,7 +134,7 @@ pub fn fqn_of_meta(meta: &ClassMetadata) -> String {
     }
 }
 
-/// 从 source 文本提取已有 import 列表
+/// Extract the list of existing imports from the source text
 pub fn extract_imports_from_source(source: &str) -> Vec<String> {
     source
         .lines()
@@ -149,8 +147,8 @@ pub fn extract_imports_from_source(source: &str) -> Vec<String> {
         .collect()
 }
 
-/// 从 Java/Kotlin source 文本中提取包名（内部格式，如 "org/cubewhy/a"）
-/// 用于 converter 层的兜底检查
+/// Extract package names from Java/Kotlin source text (internal format, such as "org/cubewhy/a")
+/// Used for fallback checks in the converter layer
 pub fn extract_package_from_source(source: &str) -> Option<String> {
     source.lines().find_map(|line| {
         let t = line.trim();

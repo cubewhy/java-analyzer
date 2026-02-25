@@ -5,32 +5,8 @@ use crate::completion::candidate::{CandidateKind, CompletionCandidate};
 use crate::completion::fuzzy::fuzzy_match;
 use crate::index::GlobalIndex;
 
-/// 从原始节点文本（已截断到光标）中提取干净的 import prefix。
-///
-/// 处理：
-/// - 多行 import（`import\n    org.cubewhy.`）
-/// - 行内注释（`import org.; // comment`）
-/// - 末尾分号
-pub fn extract_import_prefix(up_to_cursor: &str) -> String {
-    // 拍平多行
-    let flat = up_to_cursor
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // 截断行内注释
-    let without_comment = flat.find("//").map(|p| &flat[..p]).unwrap_or(&flat);
-
-    without_comment
-        .trim_start_matches("import")
-        .trim()
-        .trim_end_matches(';')
-        .trim()
-        .to_string()
-}
-
-/// 根据 import prefix 生成所有候选项（类 + 包）。
-/// 这是 ImportProvider 和 PackageProvider 在 import 场景下的统一入口。
+/// Generates all candidate classes (classes + packages) based on the import prefix.
+/// This is the unified entry point for ImportProvider and PackageProvider in import scenarios.
 pub fn candidates_for_import(prefix: &str, index: &GlobalIndex) -> Vec<CompletionCandidate> {
     if prefix.is_empty() {
         return vec![];
@@ -245,42 +221,6 @@ mod tests {
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }
-    }
-
-    // ── extract_import_prefix ─────────────────────────────────────────────
-
-    #[test]
-    fn test_prefix_simple() {
-        assert_eq!(extract_import_prefix("import org.cubewhy."), "org.cubewhy.");
-    }
-
-    #[test]
-    fn test_prefix_with_semicolon() {
-        assert_eq!(
-            extract_import_prefix("import org.cubewhy.Main;"),
-            "org.cubewhy.Main"
-        );
-    }
-
-    #[test]
-    fn test_prefix_multiline() {
-        assert_eq!(
-            extract_import_prefix("import \n    org.cubewhy."),
-            "org.cubewhy."
-        );
-    }
-
-    #[test]
-    fn test_prefix_with_inline_comment() {
-        assert_eq!(extract_import_prefix("import org.; // comment"), "org.");
-    }
-
-    #[test]
-    fn test_prefix_multiline_with_comment() {
-        assert_eq!(
-            extract_import_prefix("import \n    org. // comment"),
-            "org."
-        );
     }
 
     // ── candidates_for_import ─────────────────────────────────────────────

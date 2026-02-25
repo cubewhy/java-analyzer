@@ -19,9 +19,11 @@ impl Language for JavaLanguage {
     fn id(&self) -> &'static str {
         "java"
     }
+
     fn supports(&self, language_id: &str) -> bool {
         language_id == "java"
     }
+
     fn make_parser(&self) -> Parser {
         let mut parser = Parser::new();
         parser
@@ -29,6 +31,7 @@ impl Language for JavaLanguage {
             .expect("failed to load java grammar");
         parser
     }
+
     fn parse_completion_context(
         &self,
         source: &str,
@@ -600,10 +603,41 @@ impl<'s> JavaContextExtractor<'s> {
     }
 
     fn handle_import(&self, node: Node) -> (CursorLocation, String) {
-        let up_to_cursor = &self.source[node.start_byte()..self.offset];
-        let prefix = crate::completion::import_completion::extract_import_prefix(up_to_cursor);
+        let mut raw_prefix = String::new();
+        self.collect_import_text(node, &mut raw_prefix);
+        let prefix = strip_sentinel(&raw_prefix);
         let query = prefix.rsplit('.').next().unwrap_or("").to_string();
+
         (CursorLocation::Import { prefix }, query)
+    }
+
+    /// 递归收集 import 声明中的有效文本（标识符、点、星号）
+    /// 跳过 import 关键字、static 关键字、分号以及所有类型的注释
+    fn collect_import_text(&self, node: Node, out: &mut String) {
+        // 如果节点起始位置已经在光标之后，跳过（因为我们需要光标前的部分）
+        if node.start_byte() >= self.offset {
+            return;
+        }
+
+        // 如果没有子节点，说明是叶子节点 (Token)
+        if node.child_count() == 0 {
+            let kind = node.kind();
+            // 过滤掉不需要的 Token
+            if kind == "import" || kind == "static" || kind == ";" || is_comment_kind(kind) {
+                return;
+            }
+
+            // 获取截断到光标位置的文本
+            // 注意：cursor_truncated_text 内部处理了 node.end_byte().min(self.offset)
+            let text = self.cursor_truncated_text(node);
+            out.push_str(&text);
+        } else {
+            // 递归遍历子节点
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                self.collect_import_text(child, out);
+            }
+        }
     }
 
     fn handle_member_access(&self, node: Node) -> (CursorLocation, String) {
@@ -3913,5 +3947,107 @@ mod tests {
             }
             _ => panic!("Expected ConstructorCall, got {:?}", ctx.location),
         }
+    }
+
+    #[test]
+    fn test_import_with_whitespace_and_newlines() {
+        // 验证 AST 遍历能自动忽略空白字符，将分散的 token 拼合
+        let src = indoc::indoc! {r#"
+        import java.
+            util.
+            List;
+        class A {}
+        "#};
+        // 光标在 List 后面
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("List").map(|c| (i as u32, c as u32 + 4)))
+            .unwrap();
+
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.util.List"
+            ),
+            "Should flatten multiline import ignoring whitespace, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_with_block_comments() {
+        // 验证 AST 遍历能准确跳过 block_comment 节点
+        let src = indoc::indoc! {r#"
+        import java./* comment */util.List;
+        class A {}
+        "#};
+        let (line, col) = src
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("List").map(|c| (i as u32, c as u32 + 4)))
+            .unwrap();
+
+        let ctx = at(src, line, col);
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.util.List"
+            ),
+            "Should ignore inline block comments, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_static_handling() {
+        // 验证 AST 遍历跳过了 'import' 和 'static' 关键字
+        let src = "import static java.lang.Math.PI;";
+        let ctx = end_of(src); // 光标在最后
+
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.lang.Math.PI"
+            ),
+            "Should strip 'import' and 'static' keywords, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_incomplete_truncated() {
+        // 验证光标截断逻辑：光标在 'u' 之后，应该只捕获到 'u'，忽略后面的 'til'
+        let src = "import java.util;";
+        // 光标在 'java.u|til'
+        let col = "import java.u".len() as u32;
+        let ctx = at(src, 0, col);
+
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.u"
+            ),
+            "Should truncate text at cursor position, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_import_asterisk() {
+        // 验证 * 号被视为有效 token 收集
+        let src = "import java.util.*;";
+        let col = "import java.util.*".len() as u32;
+        let ctx = at(src, 0, col);
+
+        assert!(
+            matches!(
+                &ctx.location,
+                CursorLocation::Import { prefix } if prefix == "java.util.*"
+            ),
+            "Should include asterisk, got {:?}",
+            ctx.location
+        );
     }
 }
