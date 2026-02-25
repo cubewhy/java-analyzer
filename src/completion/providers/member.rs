@@ -433,6 +433,69 @@ fn resolve_receiver_type(
     }
 
     tracing::debug!(expr, "local var not found");
+
+    if let Some(internal_class) = resolve_strict_class_name(expr, ctx, index) {
+        return Some(internal_class);
+    }
+
+    None
+}
+
+fn resolve_strict_class_name(
+    simple_name: &str,
+    ctx: &CompletionContext,
+    index: &mut GlobalIndex,
+) -> Option<Arc<str>> {
+    // Enclosing class
+    if let Some(enclosing) = &ctx.enclosing_internal_name {
+        let enclosing_simple = enclosing
+            .rsplit('/')
+            .next()
+            .unwrap_or(enclosing)
+            .rsplit('$')
+            .next()
+            .unwrap_or(enclosing);
+
+        if simple_name == enclosing_simple {
+            return Some(Arc::clone(enclosing));
+        }
+    }
+
+    // Explicit Imports
+    for imp in &ctx.existing_imports {
+        let explicit_suffix = format!("/{}", simple_name);
+        if imp.ends_with(&explicit_suffix) {
+            return Some(Arc::clone(imp));
+        }
+
+        // wildcard imports (*)
+        if let Some(pkg) = imp.strip_suffix("/*") {
+            let candidate = format!("{}/{}", pkg, simple_name);
+
+            if index.get_class(&candidate).is_some() {
+                return Some(Arc::from(candidate));
+            }
+        }
+    }
+
+    // Same Package
+    if let Some(enclosing) = &ctx.enclosing_internal_name
+        && let Some(last_slash) = enclosing.rfind('/')
+    {
+        let pkg = &enclosing[..last_slash];
+        let candidate = format!("{}/{}", pkg, simple_name);
+
+        if index.get_class(&candidate).is_some() {
+            return Some(Arc::from(candidate));
+        }
+    }
+
+    // java.lang.*
+    let java_lang_candidate = format!("java/lang/{}", simple_name);
+    if index.get_class(&java_lang_candidate).is_some() {
+        return Some(Arc::from(java_lang_candidate));
+    }
+
     None
 }
 
@@ -759,7 +822,7 @@ mod tests {
         var_name: &str,
         var_type_simple: &str,
         prefix: &str,
-        imports: Vec<String>,
+        imports: Vec<Arc<str>>,
         enclosing_pkg: &str,
     ) -> CompletionContext {
         CompletionContext::new(
@@ -1037,7 +1100,7 @@ mod tests {
             "myFoo",
             "Foo", // simple name
             "ru",
-            vec!["com.example.Foo".to_string()],
+            vec!["com.example.Foo".into()],
             "org/cubewhy",
         );
         let results = MemberProvider.provide(&ctx, &mut idx);
@@ -1402,7 +1465,7 @@ public class RandomClass {
             Some(Arc::from("org/cubewhy/a/Main")),
             Some(Arc::from("org/cubewhy/a")),
             // wildcard import
-            vec!["org.cubewhy.*".to_string()],
+            vec!["org.cubewhy.*".into()],
         );
 
         let results = MemberProvider.provide(&ctx, &mut idx);
@@ -1778,7 +1841,7 @@ public class RandomClass {
             "myList",
             "List<String>",
             "si",
-            vec!["java.util.List".to_string()],
+            vec!["java.util.List".into()],
             "org/cubewhy",
         );
 

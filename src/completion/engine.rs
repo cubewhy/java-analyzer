@@ -105,15 +105,22 @@ impl CompletionEngine {
                 )
             } else {
                 let chain = parse_chain_from_expr(receiver_expr);
+                tracing::debug!(?chain, receiver_expr, "enrich_context: parsed chain");
+
                 if chain.is_empty() {
-                    resolver.resolve(
+                    let r = resolver.resolve(
                         receiver_expr,
                         &ctx.local_variables,
                         ctx.enclosing_internal_name.as_ref(),
-                    )
+                    );
+                    tracing::debug!(
+                        ?r,
+                        receiver_expr,
+                        "enrich_context: chain is empty, resolver.resolve returned"
+                    );
+                    r
                 } else {
-                    // 使用加强版的链式推导
-                    evaluate_chain(
+                    let r = evaluate_chain(
                         &chain,
                         &ctx.local_variables,
                         ctx.enclosing_internal_name.as_ref(),
@@ -121,20 +128,38 @@ impl CompletionEngine {
                         &ctx.existing_imports,
                         ctx.enclosing_package.as_deref(),
                         index,
-                    )
+                    );
+                    tracing::debug!(?r, "enrich_context: evaluate_chain returned");
+                    r
                 }
             };
 
+            tracing::debug!(?resolved, "enrich_context: resolved before final match");
+
             // If the result is a simple name (without '/'), it needs to be further parsed into an internal name.
             *receiver_type = match resolved.as_deref() {
-                None => None,
-                Some(ty) if ty.contains('/') => resolved,
-                Some(ty) => resolve_simple_to_internal(
-                    ty,
-                    &ctx.existing_imports,
-                    ctx.enclosing_package.as_deref(),
-                    index,
-                ),
+                None => {
+                    tracing::debug!("enrich_context: final match -> None");
+                    None
+                }
+                Some(ty) if ty.contains('/') => {
+                    tracing::debug!(ty, "enrich_context: final match -> Contains '/'");
+                    resolved
+                }
+                Some(ty) => {
+                    let r = resolve_simple_to_internal(
+                        ty,
+                        &ctx.existing_imports,
+                        ctx.enclosing_package.as_deref(),
+                        index,
+                    );
+                    tracing::debug!(
+                        ?r,
+                        ty,
+                        "enrich_context: final match -> resolve_simple_to_internal returned"
+                    );
+                    r
+                }
             };
 
             // receiver_expr 是已知包名 -> 转成 Import
@@ -208,7 +233,7 @@ fn resolve_array_access_type(
     locals: &[LocalVar],
     enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
-    _existing_imports: &[String],
+    _existing_imports: &[Arc<str>],
     _enclosing_package: Option<&str>,
     _index: &GlobalIndex,
 ) -> Option<Arc<str>> {
@@ -229,7 +254,7 @@ fn resolve_var_init_expr(
     locals: &[LocalVar],
     enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
-    existing_imports: &[String],
+    existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
     index: &GlobalIndex,
 ) -> Option<Arc<str>> {
@@ -276,7 +301,7 @@ fn evaluate_chain(
     locals: &[LocalVar],
     enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
-    existing_imports: &[String],
+    existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
     index: &GlobalIndex,
 ) -> Option<Arc<str>> {
@@ -303,13 +328,42 @@ fn evaluate_chain(
                 );
             } else {
                 current = resolver.resolve(&seg.name, locals, enclosing_internal);
+                tracing::debug!(
+                    ?current,
+                    seg_name = seg.name,
+                    "evaluate_chain: i=0 resolver.resolve returned"
+                );
+
                 if current.is_none() {
-                    current = resolve_simple_to_internal(
-                        &seg.name,
-                        existing_imports,
-                        enclosing_package,
-                        index,
-                    );
+                    if let Some(enclosing) = enclosing_internal {
+                        let enclosing_simple = enclosing
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(enclosing)
+                            .rsplit('$')
+                            .next()
+                            .unwrap_or(enclosing);
+
+                        if seg.name == enclosing_simple {
+                            current = Some(Arc::clone(enclosing));
+                        }
+                    }
+
+                    // 如果还不是当前类，再走 Import 和全局解析
+                    if current.is_none() {
+                        current = resolve_simple_to_internal(
+                            &seg.name,
+                            existing_imports,
+                            enclosing_package,
+                            index,
+                        );
+
+                        tracing::debug!(
+                            ?current,
+                            seg_name = seg.name,
+                            "evaluate_chain: i=0 resolve_simple_to_internal returned"
+                        );
+                    }
                 }
             }
         } else {
@@ -616,7 +670,7 @@ mod tests {
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
             Some(Arc::from("org/cubewhy/a")),
-            vec!["org.cubewhy.RandomClass".to_string()],
+            vec!["org.cubewhy.RandomClass".into()],
         );
         engine.enrich_context(&mut ctx, &idx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
@@ -647,7 +701,7 @@ mod tests {
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
             Some(Arc::from("org/cubewhy/a")),
-            vec!["org.cubewhy.*".to_string()],
+            vec!["org.cubewhy.*".into()],
         );
         engine.enrich_context(&mut ctx, &idx);
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
@@ -674,7 +728,7 @@ mod tests {
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
             Some(Arc::from("org/cubewhy/a")),
-            vec!["org.cubewhy.RandomClass".to_string()],
+            vec!["org.cubewhy.RandomClass".into()],
         );
         let results = engine.complete(ctx, &mut idx);
         assert!(
@@ -769,7 +823,7 @@ mod tests {
             None,
             None,
             None,
-            vec!["java.lang.System".to_string()], // 确保 System 能够被解析
+            vec!["java.lang.System".into()], // 确保 System 能够被解析
         );
 
         engine.enrich_context(&mut ctx, &idx);
@@ -828,7 +882,7 @@ mod tests {
             Some(Arc::from("Main")),
             Some(Arc::from("org/cubewhy/a/Main")),
             Some(Arc::from("org/cubewhy/a")),
-            vec!["org.cubewhy.RandomClass".to_string()],
+            vec!["org.cubewhy.RandomClass".into()],
         );
         let results = engine.complete(ctx, &mut idx);
         assert!(!results.is_empty(), "should have candidates");

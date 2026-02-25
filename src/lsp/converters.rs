@@ -147,7 +147,10 @@ mod tests {
     fn test_extract_imports_basic() {
         let src = "package a;\nimport java.util.List;\nimport java.util.Map;\nclass A {}";
         let imports = extract_imports_from_source(src);
-        assert_eq!(imports, vec!["java.util.List", "java.util.Map"]);
+        assert_eq!(
+            imports,
+            vec!["java.util.List".into(), "java.util.Map".into()]
+        );
     }
 
     #[test]
@@ -160,7 +163,7 @@ mod tests {
     fn test_extract_imports_wildcard() {
         let src = "import org.cubewhy.*;\nclass A {}";
         let imports = extract_imports_from_source(src);
-        assert_eq!(imports, vec!["org.cubewhy.*"]);
+        assert_eq!(imports, vec!["org.cubewhy.*".into()]);
     }
 
     // ── is_already_in_source ──────────────────────────────────────────────

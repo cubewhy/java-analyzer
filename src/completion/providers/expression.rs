@@ -191,7 +191,7 @@ mod tests {
         prefix: &str,
         enclosing_class: &str,
         enclosing_pkg: &str,
-        imports: Vec<String>,
+        imports: Vec<Arc<str>>,
     ) -> CompletionContext {
         CompletionContext::new(
             CursorLocation::Expression {

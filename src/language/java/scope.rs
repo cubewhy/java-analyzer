@@ -27,7 +27,7 @@ pub fn extract_package(ctx: &JavaContextExtractor, root: Node) -> Option<Arc<str
     Some(Arc::from(pkg.as_str()))
 }
 
-pub fn extract_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<String> {
+pub fn extract_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<Arc<str>> {
     let q = match Query::new(
         &tree_sitter_java::LANGUAGE.into(),
         r#"(import_declaration) @import"#,
@@ -44,12 +44,11 @@ pub fn extract_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<String> {
                 .trim_start_matches("import")
                 .trim()
                 .trim_end_matches(';')
-                .trim()
-                .to_string();
+                .trim();
             if cleaned.is_empty() {
                 None
             } else {
-                Some(cleaned)
+                Some(Arc::from(cleaned))
             }
         })
         .collect()

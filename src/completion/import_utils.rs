@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// 5. Default package (classes without a package name)
 pub fn is_import_needed(
     fqn: &str,
-    existing_imports: &[String],
+    existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
 ) -> bool {
     // default package
@@ -30,7 +30,7 @@ pub fn is_import_needed(
     }
 
     // exact match
-    if existing_imports.iter().any(|imp| imp == fqn) {
+    if existing_imports.iter().any(|imp| imp.as_ref() == fqn) {
         return false;
     }
 
@@ -92,7 +92,7 @@ fn wildcard_covers(wildcard_import: &str, fqn: &str) -> bool {
 /// Search order: imported -> same package -> globally unique
 pub fn resolve_simple_to_internal(
     simple: &str,
-    existing_imports: &[String],
+    existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
     index: &GlobalIndex,
 ) -> Option<Arc<str>> {
@@ -135,15 +135,15 @@ pub fn fqn_of_meta(meta: &ClassMetadata) -> String {
 }
 
 /// Extract the list of existing imports from the source text
-pub fn extract_imports_from_source(source: &str) -> Vec<String> {
+pub fn extract_imports_from_source(source: &str) -> Vec<Arc<str>> {
     source
         .lines()
         .filter_map(|line| {
             let t = line.trim();
             t.strip_prefix("import ")
-                .map(|rest| rest.trim_end_matches(';').trim().to_string())
+                .map(|rest| rest.trim_end_matches(';').trim().into())
         })
-        .filter(|s| !s.is_empty())
+        .filter(|s: &Arc<str>| !s.is_empty())
         .collect()
 }
 
@@ -196,7 +196,7 @@ mod tests {
     fn test_exact_import_not_needed() {
         assert!(!is_import_needed(
             "org.cubewhy.RandomClass",
-            &["org.cubewhy.RandomClass".to_string()],
+            &["org.cubewhy.RandomClass".into()],
             None,
         ));
     }
@@ -205,7 +205,7 @@ mod tests {
     fn test_exact_import_different_class_needed() {
         assert!(is_import_needed(
             "org.cubewhy.OtherClass",
-            &["org.cubewhy.RandomClass".to_string()],
+            &["org.cubewhy.RandomClass".into()],
             None,
         ));
     }
@@ -216,7 +216,7 @@ mod tests {
     fn test_wildcard_covers_direct_child() {
         assert!(!is_import_needed(
             "org.cubewhy.RandomClass",
-            &["org.cubewhy.*".to_string()],
+            &["org.cubewhy.*".into()],
             None,
         ));
     }
@@ -225,7 +225,7 @@ mod tests {
     fn test_wildcard_does_not_cover_subpackage() {
         assert!(is_import_needed(
             "org.cubewhy.sub.Foo",
-            &["org.cubewhy.*".to_string()],
+            &["org.cubewhy.*".into()],
             None,
         ));
     }
@@ -235,7 +235,7 @@ mod tests {
         // "org.cubewhy2.Foo" is NOT covered by "org.cubewhy.*"
         assert!(is_import_needed(
             "org.cubewhy2.Foo",
-            &["org.cubewhy.*".to_string()],
+            &["org.cubewhy.*".into()],
             None,
         ));
     }
@@ -244,7 +244,7 @@ mod tests {
     fn test_multiple_wildcards_one_covers() {
         assert!(!is_import_needed(
             "java.util.List",
-            &["org.cubewhy.*".to_string(), "java.util.*".to_string()],
+            &["org.cubewhy.*".into(), "java.util.*".into()],
             None,
         ));
     }
@@ -295,7 +295,7 @@ mod tests {
         // 通配符覆盖，同时也在同包 → 不需要
         assert!(!is_import_needed(
             "org.cubewhy.a.Foo",
-            &["org.cubewhy.a.*".to_string()],
+            &["org.cubewhy.a.*".into()],
             Some("org/cubewhy/a"),
         ));
     }

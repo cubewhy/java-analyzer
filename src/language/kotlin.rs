@@ -463,7 +463,7 @@ impl<'s> KotlinContextExtractor<'s> {
             .map(|n| Arc::from(self.node_text(n)))
     }
 
-    fn extract_imports(&self, root: Node) -> Vec<String> {
+    fn extract_imports(&self, root: Node) -> Vec<Arc<str>> {
         // AST structure:
         // import_list
         //   import_header
@@ -480,8 +480,8 @@ impl<'s> KotlinContextExtractor<'s> {
             .into_iter()
             .filter_map(|captures| {
                 let text = capture_text(&captures, idx, self.bytes)?;
-                let cleaned = text.trim_start_matches("import").trim().to_string();
-                if cleaned.is_empty() {
+                let cleaned: Arc<str> = text.trim_start_matches("import").trim().into();
+                if cleaned.as_ref().is_empty() {
                     None
                 } else {
                     Some(cleaned)

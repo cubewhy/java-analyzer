@@ -452,7 +452,7 @@ impl GlobalIndex {
         self.get_classes_by_simple_name(simple).first().cloned()
     }
 
-    pub fn resolve_imports(&self, imports: &[String]) -> Vec<Arc<ClassMetadata>> {
+    pub fn resolve_imports(&self, imports: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {
         let mut result = Vec::new();
         for import in imports {
             if import.ends_with(".*") {
@@ -460,7 +460,7 @@ impl GlobalIndex {
                 let pkg = import.trim_end_matches(".*").replace('.', "/");
                 let classes = self.classes_in_package(&pkg);
                 tracing::debug!(
-                    import,
+                    import = import.as_ref(),
                     pkg,
                     count = classes.len(),
                     "wildcard import expanded"
@@ -469,7 +469,7 @@ impl GlobalIndex {
             } else {
                 // 精确 import：按内部名查
                 let internal = import.replace('.', "/");
-                tracing::debug!(import, internal, "exact import lookup");
+                tracing::debug!(import = import.as_ref(), internal, "exact import lookup");
                 if let Some(cls) = self.get_class(&internal) {
                     tracing::debug!(internal, "exact import found");
                     result.push(cls);
@@ -785,7 +785,7 @@ mod tests {
         ]);
 
         // java.util.* → List + ArrayList
-        let resolved = idx.resolve_imports(&["java.util.*".to_string()]);
+        let resolved = idx.resolve_imports(&["java.util.*".into()]);
         assert_eq!(resolved.len(), 2);
         assert!(resolved.iter().any(|c| c.name.as_ref() == "List"));
         assert!(resolved.iter().any(|c| c.name.as_ref() == "ArrayList"));
@@ -795,7 +795,7 @@ mod tests {
     fn test_exact_import_resolve() {
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![make_class("java/io", "File", ClassOrigin::Unknown)]);
-        let resolved = idx.resolve_imports(&["java.io.File".to_string()]);
+        let resolved = idx.resolve_imports(&["java.io.File".into()]);
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name.as_ref(), "File");
     }
@@ -808,7 +808,7 @@ mod tests {
             make_class("java/util", "ArrayList", ClassOrigin::Unknown),
             make_class("java/io", "File", ClassOrigin::Unknown),
         ]);
-        let imports = vec!["java.util.*".to_string(), "java.io.File".to_string()];
+        let imports = vec!["java.util.*".into(), "java.io.File".into()];
         let resolved = idx.resolve_imports(&imports);
         assert_eq!(resolved.len(), 3);
     }
@@ -816,7 +816,7 @@ mod tests {
     #[test]
     fn test_unknown_import_returns_empty() {
         let idx = GlobalIndex::new();
-        let resolved = idx.resolve_imports(&["com.nonexistent.Foo".to_string()]);
+        let resolved = idx.resolve_imports(&["com.nonexistent.Foo".into()]);
         assert!(resolved.is_empty());
     }
 
@@ -1179,7 +1179,7 @@ class Main {
         );
 
         // 验证通配符 import 展开能找到 RandomClass
-        let resolved = idx.resolve_imports(&["org.cubewhy.*".to_string()]);
+        let resolved = idx.resolve_imports(&["org.cubewhy.*".into()]);
         assert!(
             resolved.iter().any(|c| c.name.as_ref() == "RandomClass"),
             "wildcard import should resolve RandomClass: {:?}",

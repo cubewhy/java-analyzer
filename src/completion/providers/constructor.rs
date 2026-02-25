@@ -248,7 +248,7 @@ mod tests {
         idx
     }
 
-    fn make_ctx(prefix: &str, expected: Option<&str>, imports: Vec<String>) -> CompletionContext {
+    fn make_ctx(prefix: &str, expected: Option<&str>, imports: Vec<Arc<str>>) -> CompletionContext {
         CompletionContext::new(
             CursorLocation::ConstructorCall {
                 class_prefix: prefix.to_string(),
@@ -293,11 +293,7 @@ mod tests {
     #[test]
     fn test_no_import_when_already_exact_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
-        let ctx = make_ctx(
-            "RandomClass",
-            None,
-            vec!["org.cubewhy.RandomClass".to_string()],
-        );
+        let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.RandomClass".into()]);
         let results = ConstructorProvider.provide(&ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
@@ -312,7 +308,7 @@ mod tests {
     #[test]
     fn test_no_import_when_wildcard_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
-        let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".to_string()]);
+        let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".into()]);
         let results = ConstructorProvider.provide(&ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.required_import.is_none()),

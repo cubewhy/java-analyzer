@@ -1,8 +1,6 @@
 use super::context::LocalVar;
 use crate::{
-    completion::type_resolver::generics::{
-        JvmType, parse_class_type_parameters, split_internal_name, substitute_type,
-    },
+    completion::type_resolver::generics::{JvmType, split_internal_name, substitute_type},
     index::{GlobalIndex, MethodSummary},
 };
 use std::sync::Arc;
@@ -44,11 +42,6 @@ impl<'idx> TypeResolver<'idx> {
         // Class name (index lookup)
         if self.index.get_class(expr).is_some() {
             return Some(Arc::from(expr));
-        }
-
-        // Simple name fallback: RealMain → org/cubewhy/RealMain
-        if let Some(meta) = self.index.get_classes_by_simple_name(expr).iter().next() {
-            return Some(Arc::clone(&meta.internal_name));
         }
 
         // Literal checks should be placed last, with strict numeric prefix validation.
@@ -93,9 +86,9 @@ impl<'idx> TypeResolver<'idx> {
         arg_count: i32,
         arg_types: &[Arc<str>],
     ) -> Option<Arc<str>> {
-        let (base_receiver, receiver_type_args) = split_internal_name(receiver_internal);
+        let (base_receiver, _receiver_type_args) = split_internal_name(receiver_internal);
 
-        // 使用 base_receiver 在 index 里查找 MRO
+        // Use base_receiver to find MRO in the index
         for class in self.index.mro(base_receiver) {
             let candidates: Vec<&MethodSummary> = class
                 .methods

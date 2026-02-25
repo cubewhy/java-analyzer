@@ -199,7 +199,7 @@ mod tests {
         }
     }
 
-    fn annotation_ctx(prefix: &str, imports: Vec<String>, pkg: &str) -> CompletionContext {
+    fn annotation_ctx(prefix: &str, imports: Vec<Arc<str>>, pkg: &str) -> CompletionContext {
         CompletionContext::new(
             CursorLocation::Annotation {
                 prefix: prefix.to_string(),
@@ -257,7 +257,7 @@ mod tests {
     fn test_annotation_from_import_appears() {
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![make_annotation("org/junit", "Test")]);
-        let ctx = annotation_ctx("Te", vec!["org.junit.Test".to_string()], "com/example");
+        let ctx = annotation_ctx("Te", vec!["org.junit.Test".into()], "com/example");
         let results = AnnotationProvider.provide(&ctx, &mut idx);
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Test"),
