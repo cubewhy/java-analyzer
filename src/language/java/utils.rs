@@ -180,7 +180,7 @@ pub(crate) fn find_enclosing_method_in_error(root: Node, offset: usize) -> Optio
     result
 }
 
-pub(crate) fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> {
+pub fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> {
     let decl = type_node.parent()?;
     if decl.kind() != "local_variable_declaration" {
         return None;
