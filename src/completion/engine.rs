@@ -18,7 +18,7 @@ use crate::completion::providers::name_suggestion::NameSuggestionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
-use crate::completion::type_resolver::{ChainSegment, descriptor_to_type};
+use crate::completion::type_resolver::{ChainSegment, singleton_descriptor_to_type};
 use crate::index::GlobalIndex;
 use std::sync::Arc;
 
@@ -343,7 +343,7 @@ fn evaluate_chain(
                 let mut found = None;
                 for m in index.mro(&recv_full) {
                     if let Some(f) = m.fields.iter().find(|f| f.name.as_ref() == seg.name) {
-                        found = descriptor_to_type(&f.descriptor).map(Arc::from);
+                        found = singleton_descriptor_to_type(&f.descriptor).map(Arc::from);
                         break;
                     }
                 }
@@ -491,7 +491,7 @@ pub(crate) fn element_type_of_array(array_internal: &str) -> Option<Arc<str>> {
                 Some(Arc::from(inner.split('<').next()?))
             }
             '[' => Some(Arc::from(stripped)),
-            _ => descriptor_to_type(stripped).map(Arc::from),
+            _ => singleton_descriptor_to_type(stripped).map(Arc::from),
         };
     }
     if let Some(base) = array_internal.strip_suffix("[]") {

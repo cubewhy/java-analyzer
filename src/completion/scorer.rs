@@ -1,6 +1,9 @@
 use rust_asm::constants::ACC_PRIVATE;
 
-use crate::index::{FieldSummary, MethodSummary};
+use crate::{
+    completion::type_resolver::{parse_method_descriptor, singleton_descriptor_to_type},
+    index::{FieldSummary, MethodSummary},
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct AccessFilter {
@@ -146,11 +149,21 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 }
 
 pub fn method_detail(class_name: &str, method: &MethodSummary) -> String {
-    format!("{} — {}{}", class_name, method.name, method.descriptor)
+    format!(
+        "{} — {}({})",
+        class_name,
+        method.name,
+        parse_method_descriptor(&method.descriptor).join(", ")
+    )
 }
 
 pub fn field_detail(class_name: &str, field: &FieldSummary) -> String {
-    format!("{} — {} : {}", class_name, field.name, field.descriptor)
+    format!(
+        "{} — {} : {}",
+        class_name,
+        field.name,
+        singleton_descriptor_to_type(&field.descriptor).unwrap_or(&field.descriptor)
+    )
 }
 
 /// Extract the first letter (lowercase) of each word in camelCase naming

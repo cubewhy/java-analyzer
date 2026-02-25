@@ -202,11 +202,69 @@ fn params_match(descriptor: &str, arg_types: &[Arc<str>]) -> bool {
     param_descs
         .iter()
         .zip(arg_types.iter())
-        .all(|(desc, arg_ty)| descriptor_matches_type(desc, arg_ty))
+        .all(|(desc, arg_ty)| singleton_descriptor_matches_type(desc, arg_ty))
+}
+
+/// Convert JVM descriptor into source code style type name
+///
+/// # Examples
+/// - "I" -> "int"
+/// - "[B" -> "byte[]"
+/// - "[[J" -> "long[][]"
+/// - "Ljava/lang/String;" -> "java/lang/String"
+/// - "[Ljava/lang/String;" -> "java/lang/String[]"
+pub fn descriptor_to_type(desc: &str) -> String {
+    let mut array_depth = 0;
+    let mut s = desc;
+    while s.starts_with('[') {
+        array_depth += 1;
+        s = &s[1..];
+    }
+
+    let base_type = match s {
+        "B" => "byte",
+        "C" => "char",
+        "D" => "double",
+        "F" => "float",
+        "I" => "int",
+        "J" => "long",
+        "S" => "short",
+        "Z" => "boolean",
+        "V" => "void",
+        _ if s.starts_with('L') && s.ends_with(';') => &s[1..s.len() - 1],
+        // unknown type
+        _ => s,
+    };
+
+    let mut result = String::with_capacity(base_type.len() + array_depth * 2);
+    result.push_str(base_type);
+    for _ in 0..array_depth {
+        result.push_str("[]");
+    }
+
+    result
+}
+
+pub fn parse_method_descriptor(descriptor: &str) -> Vec<String> {
+    let inner = match descriptor.find('(').zip(descriptor.find(')')) {
+        Some((l, r)) => &descriptor[l + 1..r],
+        None => return Vec::new(),
+    };
+
+    let mut types = Vec::new();
+    let mut s = inner;
+
+    while !s.is_empty() {
+        let (ty_desc, rest) = consume_one_descriptor_type(s);
+        types.push(descriptor_to_type(ty_desc));
+        s = rest;
+    }
+
+    types
 }
 
 /// Converts a singleton descriptor to an internal type name
-pub(crate) fn descriptor_to_type(desc: &str) -> Option<&str> {
+pub(crate) fn singleton_descriptor_to_type(desc: &str) -> Option<&str> {
     match desc {
         "B" => Some("byte"),
         "C" => Some("char"),
@@ -223,8 +281,8 @@ pub(crate) fn descriptor_to_type(desc: &str) -> Option<&str> {
 }
 
 /// Compare a single parameter descriptor against an inferred type internal name.
-fn descriptor_matches_type(desc: &str, ty: &str) -> bool {
-    let Some(resolved_ty) = descriptor_to_type(desc) else {
+fn singleton_descriptor_matches_type(desc: &str, ty: &str) -> bool {
+    let Some(resolved_ty) = singleton_descriptor_to_type(desc) else {
         return false;
     };
 
@@ -601,20 +659,23 @@ mod tests {
 
     #[test]
     fn test_params_match_primitive_long() {
-        assert!(descriptor_matches_type("J", "long"));
-        assert!(!descriptor_matches_type("J", "int"));
-        assert!(descriptor_matches_type("I", "int"));
-        assert!(!descriptor_matches_type("I", "long"));
+        assert!(singleton_descriptor_matches_type("J", "long"));
+        assert!(!singleton_descriptor_matches_type("J", "int"));
+        assert!(singleton_descriptor_matches_type("I", "int"));
+        assert!(!singleton_descriptor_matches_type("I", "long"));
     }
 
     #[test]
     fn test_params_match_object_type() {
-        assert!(descriptor_matches_type(
+        assert!(singleton_descriptor_matches_type(
             "Ljava/lang/String;",
             "java/lang/String"
         ));
-        assert!(descriptor_matches_type("Ljava/lang/String;", "String")); // simple name match
-        assert!(!descriptor_matches_type(
+        assert!(singleton_descriptor_matches_type(
+            "Ljava/lang/String;",
+            "String"
+        )); // simple name match
+        assert!(!singleton_descriptor_matches_type(
             "Ljava/util/List;",
             "java/lang/String"
         ));
@@ -741,5 +802,34 @@ mod tests {
             Some("org/cubewhy/RealMain"),
             "RealMain.getInstance() should resolve via simple name lookup + method return type"
         );
+    }
+
+    #[test]
+    fn test_descriptor_to_type_intellij_style() {
+        // primitive arrays
+        assert_eq!(descriptor_to_type("[I"), "int[]");
+        assert_eq!(descriptor_to_type("[[D"), "double[][]");
+
+        // objects
+        assert_eq!(descriptor_to_type("Ljava/lang/String;"), "java/lang/String");
+
+        // object arrays
+        assert_eq!(
+            descriptor_to_type("[Ljava/lang/Object;"),
+            "java/lang/Object[]"
+        );
+        assert_eq!(
+            descriptor_to_type("[[Ljava/util/List;"),
+            "java/util/List[][]"
+        );
+    }
+
+    #[test]
+    fn test_parse_method() {
+        // void method(int[], String[][])
+        let desc = "([I[[Ljava/lang/String;)V";
+        let params = parse_method_descriptor(desc);
+
+        assert_eq!(params, vec!["int[]", "java/lang/String[][]"]);
     }
 }
