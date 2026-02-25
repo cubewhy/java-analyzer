@@ -428,7 +428,7 @@ fn resolve_receiver_type(
         }
 
         let result = resolve_complex_type_to_internal(ty, ctx, index);
-        tracing::debug!(?result, ty, "resolve_simple_name_to_internal result");
+        tracing::debug!(?result, ty, "resolve_complex_name_to_internal result");
         return result.map(Arc::from);
     }
 
