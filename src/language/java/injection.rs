@@ -82,13 +82,16 @@ pub fn build_injected_source(
 
         // Case 3: ERROR has trailing dot (e.g. `cl.`)
         if error_has_trailing_dot(err, extractor.offset) {
-            // Must include `;` so tree-sitter parses as expression_statement > field_access
-            // instead of scoped_type_identifier
+            let terminator = if requires_semicolon(cursor_node) {
+                ";"
+            } else {
+                ""
+            };
             return inject_at(
                 extractor,
                 extractor.offset,
                 extractor.offset,
-                &format!("{SENTINEL};"),
+                &format!("{SENTINEL}{terminator}"),
             );
         }
     }
@@ -104,13 +107,19 @@ pub fn build_injected_source(
         _ => (extractor.offset, extractor.offset),
     };
 
+    let terminator = if requires_semicolon(cursor_node) {
+        ";"
+    } else {
+        ""
+    };
+
     if replace_start == replace_end {
-        // Nothing at cursor, insert sentinel as a statement
+        // Nothing at cursor, insert sentinel
         inject_at(
             extractor,
             extractor.offset,
             extractor.offset,
-            &format!("{SENTINEL};"),
+            &format!("{SENTINEL}{terminator}"),
         )
     } else {
         let prefix = &extractor.source[replace_start..replace_end];
@@ -146,17 +155,8 @@ pub fn build_injected_source(
             extractor,
             replace_start,
             replace_end,
-            &format!("{prefix}{SENTINEL}{suffix};"),
+            &format!("{prefix}{SENTINEL}{suffix}{terminator}"),
         )
-        // if in_scoped_type {
-        // } else {
-        //     inject_at(
-        //         extractor,
-        //         replace_start,
-        //         replace_end,
-        //         &format!("{prefix}{SENTINEL}{suffix}"),
-        //     )
-        // }
     }
 }
 
@@ -235,6 +235,37 @@ pub fn inject_and_determine(
     }
 
     None
+}
+
+fn requires_semicolon(cursor_node: Option<Node>) -> bool {
+    let Some(n) = cursor_node else {
+        return true;
+    };
+    let mut curr = Some(n);
+    while let Some(node) = curr {
+        let kind = node.kind();
+        if matches!(
+            kind,
+            "formal_parameters"
+                | "argument_list"
+                | "type_arguments"
+                | "condition"
+                | "for_statement"
+                | "while_statement"
+                | "catch_clause"
+                | "parenthesized_expression"
+                | "array_access"
+                | "array_initializer"
+        ) {
+            return false;
+        }
+
+        if matches!(kind, "block" | "class_body" | "program") {
+            break;
+        }
+        curr = node.parent();
+    }
+    true
 }
 
 #[cfg(test)]
@@ -448,5 +479,53 @@ mod tests {
         assert_eq!(query, "func");
         // 应当解析为某种可补全的上下文（如 Identifier / MethodCall）
         println!("location: {:?}", location);
+    }
+
+    #[test]
+    fn test_build_injected_source_in_parameters() {
+        let src = indoc::indoc! {r#"
+        class A {
+            public static void func(Str) {
+            }
+        }
+        "#};
+        let offset = src.find("Str").unwrap() + 3;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let injected = build_injected_source(&ctx, cursor_node);
+
+        // 预期：位于 parameters 中，不应该注入分号导致 AST 解析错误
+        assert!(!injected.contains(&format!("Str{SENTINEL};")));
+        assert!(injected.contains(&format!("Str{SENTINEL}")));
+    }
+
+    #[test]
+    fn test_inject_and_determine_in_parameters() {
+        let src = indoc::indoc! {r#"
+        class A {
+            public static void func(Str) {
+            }
+        }
+        "#};
+        let offset = src.find("Str").unwrap() + 3;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let result = inject_and_determine(&ctx, cursor_node, None);
+        assert!(
+            result.is_some(),
+            "inject_and_determine should succeed in parameters"
+        );
+
+        let (location, query) = result.unwrap();
+
+        // 预期：被正确识别为参数列表中的类型注解补全
+        assert!(
+            matches!(location, CursorLocation::TypeAnnotation { .. }),
+            "Expected TypeAnnotation, got {:?}",
+            location
+        );
+        assert_eq!(query, "Str");
     }
 }
