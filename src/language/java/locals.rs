@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-pub(crate) fn extract_locals(
+pub fn extract_locals(
     ctx: &JavaContextExtractor,
     root: Node,
     cursor_node: Option<Node>,
@@ -59,17 +59,10 @@ pub(crate) fn extract_locals(
             );
             let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
             if raw_ty == "var" {
-                return Some(match infer_type_from_initializer(ty_node, ctx.bytes) {
-                    Some(t) => LocalVar {
-                        name: Arc::from(name),
-                        type_internal: Arc::from(java_type_to_internal(&t).as_str()),
-                        init_expr: None,
-                    },
-                    None => LocalVar {
-                        name: Arc::from(name),
-                        type_internal: Arc::from("var"),
-                        init_expr: get_initializer_text(ty_node, ctx.bytes),
-                    },
+                return Some(LocalVar {
+                    name: Arc::from(name),
+                    type_internal: Arc::from("var"),
+                    init_expr: get_initializer_text(ty_node, ctx.bytes),
                 });
             }
             Some(LocalVar {
@@ -257,5 +250,240 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
         } else {
             collect_locals_in_errors(ctx, child, vars);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ropey::Rope;
+    use tree_sitter::Parser;
+
+    fn setup(source: &'_ str, offset: usize) -> (JavaContextExtractor<'_>, tree_sitter::Tree) {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .expect("failed to load java grammar");
+        let tree = parser.parse(source, None).unwrap();
+
+        let ctx = JavaContextExtractor {
+            source,
+            bytes: source.as_bytes(),
+            offset,
+            rope: Rope::from_str(source),
+        };
+        (ctx, tree)
+    }
+
+    #[test]
+    fn test_extract_standard_locals() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                int a = 1;
+                String b = "hello";
+                List<String> c = new ArrayList<>();
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        // 验证提取结果
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "a" && v.type_internal.as_ref() == "int")
+        );
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "b" && v.type_internal.as_ref() == "String")
+        );
+        // 验证泛型被清洗
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "c" && v.type_internal.as_ref() == "List")
+        );
+    }
+
+    #[test]
+    fn test_extract_params() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f(int p1, String p2) {
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "p1" && v.type_internal.as_ref() == "int")
+        );
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "p2" && v.type_internal.as_ref() == "String")
+        );
+    }
+
+    #[test]
+    fn test_var_capture_init_expr() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                var map = new HashMap<String, String>();
+                var list = new ArrayList<>();
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        let map_var = vars
+            .iter()
+            .find(|v| v.name.as_ref() == "map")
+            .expect("Should find map");
+        assert_eq!(map_var.type_internal.as_ref(), "var");
+        assert!(map_var.init_expr.as_ref().unwrap().contains("new HashMap"));
+    }
+
+    #[test]
+    fn test_var_inference_fallback() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                var unknown = someMethodCall();
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        // 无法推断时，类型应为 "var"，并且携带初始化表达式以供后续分析（如果支持的话）
+        let v = vars.iter().find(|v| v.name.as_ref() == "unknown").unwrap();
+        assert_eq!(v.type_internal.as_ref(), "var");
+        assert_eq!(v.init_expr.as_deref(), Some("someMethodCall()"));
+    }
+
+    #[test]
+    fn test_scope_visibility_ignore_future_vars() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                int visible = 1;
+                // cursor here
+                int invisible = 2;
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(vars.iter().any(|v| v.name.as_ref() == "visible"));
+        assert!(!vars.iter().any(|v| v.name.as_ref() == "invisible"));
+    }
+
+    #[test]
+    fn test_misread_declaration_missing_semicolon() {
+        // 这是 collect_misread_decls 的重点测试场景
+        // Tree-sitter 经常把没有分号的 `String s = "v"` 解析为：
+        // variable_declarator 内部包含了一个 assignment_expression
+        // 且类型 `String` 变成了一个 ERROR 节点或游离的 identifier
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                String s = "incomplete"
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        // 期望能从容错逻辑中提取出 s
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "s" && v.type_internal.as_ref() == "String"),
+            "Should parse variable 's' even without semicolon. Found: {:?}",
+            vars.iter().map(|v| v.name.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_misread_var_capture_init_expr() {
+        // 测试在语法错误（缺分号）情况下的 var 推断
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                var x = new HashSet<>()
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        // 注意：collect_misread_decls 内部逻辑是如果检测到 var，
+        // type_internal 设为 "var"，init_expr 设为右值
+        let x = vars
+            .iter()
+            .find(|v| v.name.as_ref() == "x")
+            .expect("Should find 'x'");
+        assert_eq!(x.type_internal.as_ref(), "var");
+        assert!(x.init_expr.as_ref().unwrap().contains("new HashSet"));
+    }
+
+    #[test]
+    fn test_locals_inside_error_nodes() {
+        // 针对 extract_locals_from_error_nodes 的测试
+        // 这种情况通常发生在极其破碎的代码结构中，例如 try-catch 写了一半
+        // 这个函数目前在 extract_locals 中没有被直接调用（原代码可能有，或者被移除了）
+        // 但我们仍然应该测试它的逻辑正确性，以便将来集成
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                try {
+                    String insideError = "ok";
+                } catch (
+                // cursor
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+
+        // 我们直接调用 extract_locals_from_error_nodes 来测试私有/crate私有逻辑
+        // 因为 tree-sitter 可能会把整个 try-catch 块标记为 ERROR
+        let vars = extract_locals_from_error_nodes(&ctx, tree.root_node());
+
+        assert!(
+            vars.iter().any(|v| v.name.as_ref() == "insideError"),
+            "Should extract locals deeply nested inside ERROR nodes"
+        );
     }
 }

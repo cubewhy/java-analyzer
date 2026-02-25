@@ -933,45 +933,6 @@ mod tests {
     }
 
     #[test]
-    fn test_var_type_inferred_from_constructor() {
-        let src = indoc::indoc! {r#"
-        class Main {
-            public static class NestedClass {
-                public void randomFunction(String arg1) {}
-            }
-            public static void main(String[] args) {
-                var nc = new NestedClass();
-                nc.
-            }
-        }
-    "#};
-
-        // Find line/col dynamically instead of hardcoding
-        let (line, col) = src
-            .lines()
-            .enumerate()
-            .find_map(|(i, l)| l.find("nc.").map(|c| (i as u32, c as u32 + 3)))
-            .expect("nc. not found in source");
-
-        let ctx = at(src, line, col);
-
-        let nc = ctx.local_variables.iter().find(|v| v.name.as_ref() == "nc");
-        assert!(
-            nc.is_some(),
-            "nc should be in locals: {:?}",
-            ctx.local_variables
-                .iter()
-                .map(|v| format!("{}:{}", v.name, v.type_internal))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            nc.unwrap().type_internal.as_ref(),
-            "NestedClass",
-            "var type should be inferred as NestedClass"
-        );
-    }
-
-    #[test]
     fn test_var_with_non_constructor_init_skipped() {
         // var x = someMethod() — cannot infer, should not crash
         let src = indoc::indoc! {r#"
