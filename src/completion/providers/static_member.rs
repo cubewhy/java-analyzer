@@ -112,7 +112,11 @@ impl CompletionProvider for StaticMemberProvider {
                     },
                     self.name(),
                 )
-                .with_detail(scorer::method_detail(class_name, method)),
+                .with_detail(scorer::method_detail(
+                    class_name,
+                    &class_meta,
+                    method,
+                )),
             );
         }
 
@@ -136,7 +140,7 @@ impl CompletionProvider for StaticMemberProvider {
                     },
                     self.name(),
                 )
-                .with_detail(scorer::field_detail(class_name, field)),
+                .with_detail(scorer::field_detail(class_name, &class_meta, field)),
             );
         }
 
@@ -263,6 +267,7 @@ mod tests {
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -341,15 +346,18 @@ mod tests {
                     descriptor: Arc::from("Lorg/cubewhy/Inst;"),
                     access_flags: ACC_PRIVATE | ACC_STATIC,
                     is_synthetic: false,
+                    generic_signature: None,
                 },
                 FieldSummary {
                     name: Arc::from("publicField"),
                     descriptor: Arc::from("I"),
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
+                    generic_signature: None,
                 },
             ],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -410,15 +418,18 @@ mod tests {
                     descriptor: Arc::from("I"),
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
+                    generic_signature: None,
                 },
                 FieldSummary {
                     name: Arc::from("instanceF"),
                     descriptor: Arc::from("I"),
                     access_flags: ACC_PUBLIC, // NOT static
                     is_synthetic: false,
+                    generic_signature: None,
                 },
             ],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -529,8 +540,10 @@ mod tests {
                 descriptor: Arc::from("I"),
                 access_flags: ACC_PRIVATE | ACC_STATIC,
                 is_synthetic: false,
+                generic_signature: None,
             }],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -681,8 +694,10 @@ mod tests {
                 descriptor: Arc::from("I"),
                 access_flags: ACC_PUBLIC | ACC_STATIC,
                 is_synthetic: false,
+                generic_signature: None,
             }],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);

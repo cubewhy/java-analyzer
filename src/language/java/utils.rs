@@ -262,12 +262,7 @@ fn is_in_line_comment(line: &str) -> bool {
 }
 
 pub fn java_type_to_internal(ty: &str) -> String {
-    match ty {
-        "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "void" => {
-            ty.to_string()
-        }
-        other => other.replace('.', "/"),
-    }
+    ty.trim().replace('.', "/")
 }
 
 pub fn find_error_ancestor(mut node: Node) -> Option<Node> {

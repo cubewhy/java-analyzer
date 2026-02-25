@@ -591,6 +591,7 @@ mod tests {
             fields: vec![],
             access_flags: ACC_PUBLIC,
             inner_class_of: None,
+            generic_signature: None,
             origin: ClassOrigin::Unknown,
         }]);
         idx
@@ -733,8 +734,10 @@ mod tests {
                     descriptor: Arc::from("Ljava/io/PrintStream;"), // 指向 PrintStream
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
+                    generic_signature: None,
                 }],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -747,6 +750,7 @@ mod tests {
                 methods: vec![],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -808,6 +812,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             }]);
@@ -857,6 +862,7 @@ mod tests {
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -926,6 +932,7 @@ mod tests {
             ],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -984,6 +991,7 @@ mod tests {
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -1036,6 +1044,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1048,6 +1057,7 @@ mod tests {
                 methods: vec![],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1077,6 +1087,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1096,6 +1107,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1130,6 +1142,7 @@ mod tests {
             methods: vec![],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -1223,6 +1236,7 @@ mod tests {
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -1289,6 +1303,7 @@ mod tests {
             methods: vec![],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);

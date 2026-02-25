@@ -88,7 +88,7 @@ impl CompletionProvider for AnnotationProvider {
                 if imported_internals.contains(&meta.internal_name) {
                     continue;
                 }
-                if !is_annotation_class(&meta) {
+                if !is_annotation_class(meta) {
                     continue;
                 }
                 let score = match fuzzy::fuzzy_match(&prefix_lower, &meta.name.to_lowercase()) {
@@ -102,7 +102,7 @@ impl CompletionProvider for AnnotationProvider {
                         CandidateKind::Annotation,
                         self.name(),
                     )
-                    .with_detail(fqn_of(&meta))
+                    .with_detail(fqn_of(meta))
                     .with_score(70.0 + score as f32 * 0.1),
                 );
             }
@@ -177,6 +177,7 @@ mod tests {
             methods: vec![],
             fields: vec![],
             access_flags: ACC_PUBLIC | ACC_ANNOTATION,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }
@@ -192,6 +193,7 @@ mod tests {
             methods: vec![],
             fields: vec![],
             access_flags: ACC_PUBLIC, // not an annotation
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }

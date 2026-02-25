@@ -29,6 +29,7 @@ pub struct ClassMetadata {
     pub methods: Vec<MethodSummary>,
     pub fields: Vec<FieldSummary>,
     pub access_flags: u16,
+    pub generic_signature: Option<Arc<str>>,
     pub inner_class_of: Option<Arc<str>>,
     pub origin: ClassOrigin,
 }
@@ -56,6 +57,7 @@ pub struct FieldSummary {
     pub descriptor: Arc<str>,
     pub access_flags: u16,
     pub is_synthetic: bool,
+    pub generic_signature: Option<Arc<str>>,
 }
 
 pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> {
@@ -147,6 +149,22 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
     let class_name = *rsp.first()?;
     let package = rsp.get(1).copied();
 
+    let generic_signature = cn.attributes.iter().find_map(|a| {
+        if let AttributeInfo::Signature { signature_index } = a {
+            cn.constant_pool
+                .get(*signature_index as usize)
+                .and_then(|cp| {
+                    if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                        Some(Arc::from(s.as_str()))
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        }
+    });
+
     let methods = cn
         .methods
         .iter()
@@ -190,11 +208,28 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                 .attributes
                 .iter()
                 .any(|a| matches!(a, AttributeInfo::Synthetic));
+            let generic_signature = fd.attributes.iter().find_map(|a| {
+                if let AttributeInfo::Signature { signature_index } = a {
+                    cn.constant_pool
+                        .get(*signature_index as usize)
+                        .and_then(|cp| {
+                            if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                                Some(Arc::from(s.as_str()))
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                }
+            });
+
             FieldSummary {
                 name: Arc::from(fd.name.as_str()),
                 descriptor: Arc::from(fd.descriptor.as_str()),
                 access_flags: fd.access_flags,
                 is_synthetic,
+                generic_signature,
             }
         })
         .collect();
@@ -221,6 +256,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
         methods,
         fields,
         access_flags: cn.access_flags,
+        generic_signature,
         inner_class_of,
         origin,
     })
@@ -476,26 +512,15 @@ impl GlobalIndex {
             for method in &meta.methods {
                 let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
                 if seen_methods.insert(key) {
-                    methods.push(Arc::new(MethodSummary {
-                        name: Arc::clone(&method.name),
-                        descriptor: Arc::clone(&method.descriptor),
-                        access_flags: method.access_flags,
-                        is_synthetic: method.is_synthetic,
-                        generic_signature: method.generic_signature.clone(),
-                        return_type: method.return_type.clone(),
-                    }));
+                    methods.push(Arc::new(method.clone()));
                 }
             }
             for field in &meta.fields {
                 if seen_fields.insert(Arc::clone(&field.name)) {
-                    fields.push(Arc::new(FieldSummary {
-                        name: Arc::clone(&field.name),
-                        descriptor: Arc::clone(&field.descriptor),
-                        access_flags: field.access_flags,
-                        is_synthetic: field.is_synthetic,
-                    }));
+                    fields.push(Arc::new(field.clone()));
                 }
             }
+
             // Enqueue super class
             if let Some(ref super_name) = meta.super_name
                 && !super_name.is_empty()
@@ -653,6 +678,7 @@ mod tests {
             fields: vec![],
             access_flags: ACC_PUBLIC,
             inner_class_of: None,
+            generic_signature: None,
             origin,
         }
     }
@@ -953,15 +979,13 @@ mod tests {
 
     #[test]
     fn test_parse_return_type_primitive() {
-        assert_eq!(parse_return_type_from_descriptor("()I"), None);
-        assert_eq!(parse_return_type_from_descriptor("()Z"), None);
-    }
-
-    #[test]
-    fn test_parse_return_type_generic_erased() {
         assert_eq!(
-            parse_return_type_from_descriptor("()Ljava/util/List<Ljava/lang/String;>;").as_deref(),
-            Some("java/util/List")
+            parse_return_type_from_descriptor("()I").as_deref(),
+            Some("int")
+        );
+        assert_eq!(
+            parse_return_type_from_descriptor("()Z").as_deref(),
+            Some("boolean")
         );
     }
 

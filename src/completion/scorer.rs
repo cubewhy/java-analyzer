@@ -2,9 +2,10 @@ use rust_asm::constants::ACC_PRIVATE;
 
 use crate::{
     completion::type_resolver::{
-        descriptor_to_source_code_style_type, parse_method_descriptor, singleton_descriptor_to_type,
+        descriptor_to_source_code_style_type,
+        generics::{JvmType, substitute_type},
     },
-    index::{FieldSummary, MethodSummary},
+    index::{ClassMetadata, FieldSummary, MethodSummary},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -150,26 +151,124 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
     true
 }
 
-pub fn method_detail(class_name: &str, method: &MethodSummary) -> String {
+pub fn method_detail(
+    receiver_internal: &str,
+    class_meta: &ClassMetadata,
+    method: &MethodSummary,
+) -> String {
+    // 1. 处理返回类型的泛型替换
+    let base_return = method.return_type.as_deref().unwrap_or("void");
+    let display_return = if let Some(sig) = method.generic_signature.as_deref() {
+        if let Some(ret_idx) = sig.find(')') {
+            let ret_jvm = &sig[ret_idx + 1..];
+            substitute_type(
+                receiver_internal,
+                class_meta.generic_signature.as_deref(),
+                ret_jvm,
+            )
+            .unwrap_or_else(|| {
+                JvmType::parse(ret_jvm)
+                    .map(|(t, _)| t.to_internal_name_string())
+                    .unwrap_or_else(|| base_return.to_string())
+            })
+        } else {
+            base_return.to_string()
+        }
+    } else {
+        base_return.to_string()
+    };
+    let source_style_return = descriptor_to_source_code_style_type(&display_return);
+
+    // 2. 处理参数列表的泛型替换 (实现你的 TODO)
+    let sig_to_use = method
+        .generic_signature
+        .as_deref()
+        .unwrap_or(&method.descriptor);
+    let mut formatted_params = Vec::new();
+
+    if let Some(start) = sig_to_use.find('(')
+        && let Some(end) = sig_to_use.find(')')
+    {
+        let mut params_str = &sig_to_use[start + 1..end];
+
+        // 利用 JvmType::parse 逐个消费参数类型
+        while !params_str.is_empty() {
+            if let Some((_, rest)) = JvmType::parse(params_str) {
+                // 截取当前消费掉的这一段 (例如 "TE;" 或 "Ljava/lang/String;")
+                let param_jvm_str = &params_str[..params_str.len() - rest.len()];
+
+                // 尝试对其进行替换
+                let subbed = substitute_type(
+                    receiver_internal,
+                    class_meta.generic_signature.as_deref(),
+                    param_jvm_str,
+                )
+                .unwrap_or_else(|| {
+                    JvmType::parse(param_jvm_str)
+                        .map(|(t, _)| t.to_internal_name_string())
+                        .unwrap_or_else(|| param_jvm_str.to_string())
+                });
+
+                formatted_params.push(descriptor_to_source_code_style_type(&subbed));
+                params_str = rest; // 游标前移
+            } else {
+                break; // 解析异常，安全退出
+            }
+        }
+    }
+
+    // 3. 提取一个干净的简短类名以美化 UI (例如 "java/util/List<String>" -> "List")
+    let base_class_name = receiver_internal
+        .split('<')
+        .next()
+        .unwrap_or(receiver_internal);
+    let short_class_name = base_class_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(base_class_name);
+
     format!(
         "{} — {} {}({})",
-        class_name,
-        method
-            .return_type
-            .clone()
-            .map(|ty| descriptor_to_source_code_style_type(ty.as_ref()))
-            .unwrap_or_else(|| "void".to_string()),
+        short_class_name,
+        source_style_return,
         method.name,
-        parse_method_descriptor(&method.descriptor).join(", ")
+        formatted_params.join(", ")
     )
 }
 
-pub fn field_detail(class_name: &str, field: &FieldSummary) -> String {
+pub fn field_detail(
+    receiver_internal: &str,
+    class_meta: &ClassMetadata,
+    field: &FieldSummary,
+) -> String {
+    // 1. 优先使用字段的泛型签名，否则回退到基础描述符
+    let sig_to_use = field
+        .generic_signature
+        .as_deref()
+        .unwrap_or(&field.descriptor);
+
+    // 2. 尝试替换 (比如把 T item 替换为 String item)
+    let display_type = substitute_type(
+        receiver_internal,
+        class_meta.generic_signature.as_deref(),
+        sig_to_use,
+    )
+    .unwrap_or_else(|| sig_to_use.to_string());
+
+    let source_style_type = descriptor_to_source_code_style_type(&display_type);
+
+    let base_class_name = receiver_internal
+        .split('<')
+        .next()
+        .unwrap_or(receiver_internal);
+    let short_class_name = base_class_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(base_class_name);
+
     format!(
         "{} — {} : {}",
-        class_name,
-        field.name,
-        singleton_descriptor_to_type(&field.descriptor).unwrap_or(&field.descriptor)
+        short_class_name, field.name, source_style_type
     )
 }
 

@@ -241,6 +241,7 @@ mod tests {
             methods,
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -379,6 +380,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             }]);

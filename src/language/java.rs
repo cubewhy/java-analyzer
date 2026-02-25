@@ -783,31 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn test_constructor_expected_type_generic_stripped() {
-        // List<Integer> items = new |
-        let src = indoc::indoc! {r#"
-        class A {
-            void f() {
-                List<Integer> items = new ;
-            }
-        }
-    "#};
-        let line = 2u32;
-        let raw = src.lines().nth(2).unwrap();
-        let col = raw.find("new ").unwrap() as u32 + 4;
-        let ctx = at(src, line, col);
-        assert!(
-            matches!(
-                &ctx.location,
-                CursorLocation::ConstructorCall { expected_type: Some(t), .. }
-                if t == "List"
-            ),
-            "expected_type should be 'List' (generics stripped), got {:?}",
-            ctx.location
-        );
-    }
-
-    #[test]
     fn test_constructor_no_expected_type_standalone() {
         let src = indoc::indoc! {r#"
         class A {

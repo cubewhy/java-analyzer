@@ -103,7 +103,11 @@ impl CompletionProvider for MemberProvider {
                             format!("{}(", method.name)
                         };
                         let detail = if i == 0 {
-                            scorer::method_detail(enclosing, method)
+                            scorer::method_detail(
+                                ctx.enclosing_internal_name.as_deref().unwrap_or(""),
+                                class_meta,
+                                method,
+                            )
                         } else {
                             format!("inherited from {}", class_meta.name)
                         };
@@ -154,7 +158,11 @@ impl CompletionProvider for MemberProvider {
                             }
                         };
                         let detail = if i == 0 {
-                            scorer::field_detail(enclosing, field)
+                            scorer::field_detail(
+                                ctx.enclosing_internal_name.as_deref().unwrap_or(""),
+                                &class_meta,
+                                field,
+                            )
                         } else {
                             format!("inherited from {}", class_meta.name)
                         };
@@ -195,10 +203,17 @@ impl CompletionProvider for MemberProvider {
             }
         };
 
-        tracing::debug!(class_internal, "looking up class in index");
+        // type with generics removed. e.g List<String> -> List
+        let base_class_internal = class_internal.split('<').next().unwrap_or(class_internal);
+
+        tracing::debug!(
+            base_class_internal,
+            class_internal,
+            "looking up class in index"
+        );
 
         // Check if it's a similar access (allow private/protected access)
-        let is_same_class = ctx.enclosing_internal_name.as_deref() == Some(class_internal);
+        let is_same_class = ctx.enclosing_internal_name.as_deref() == Some(base_class_internal);
 
         let filter = if is_same_class {
             AccessFilter::same_class()
@@ -209,7 +224,7 @@ impl CompletionProvider for MemberProvider {
         let prefix_lower = member_prefix.to_lowercase();
         let mut results = Vec::new();
 
-        let mro = index.mro(class_internal);
+        let mro = index.mro(base_class_internal);
         let mut seen_methods = std::collections::HashSet::new();
         let mut seen_fields = std::collections::HashSet::new();
 
@@ -256,7 +271,11 @@ impl CompletionProvider for MemberProvider {
                         kind,
                         self.name(),
                     )
-                    .with_detail(scorer::method_detail(class_internal, method)),
+                    .with_detail(scorer::method_detail(
+                        class_internal,
+                        class_meta,
+                        method,
+                    )),
                 );
             }
 
@@ -289,7 +308,11 @@ impl CompletionProvider for MemberProvider {
                         kind,
                         self.name(),
                     )
-                    .with_detail(scorer::field_detail(class_internal, field)),
+                    .with_detail(scorer::field_detail(
+                        class_internal,
+                        &class_meta,
+                        field,
+                    )),
                 );
             }
         }
@@ -400,26 +423,125 @@ fn resolve_receiver_type(
             return Some(Arc::clone(&lv.type_internal));
         }
 
-        let result = resolve_simple_name_to_internal(ty, ctx, index);
+        let result = resolve_complex_type_to_internal(ty, ctx, index);
         tracing::debug!(?result, ty, "resolve_simple_name_to_internal result");
-        return result;
+        return result.map(Arc::from);
     }
 
     tracing::debug!(expr, "local var not found");
     None
 }
 
+/// Dynamically recursively resolves types, using the current context (ctx/index) to convert source code types into JVM signatures.
+fn resolve_complex_type_to_internal(
+    ty: &str,
+    ctx: &CompletionContext,
+    index: &mut GlobalIndex,
+) -> Option<String> {
+    let ty = ty.trim();
+
+    // 1. Array
+    if let Some(stripped) = ty.strip_suffix("[]") {
+        let inner = resolve_complex_type_to_internal(stripped, ctx, index)?;
+        match inner.as_str() {
+            "byte" => return Some("[B".to_string()),
+            "char" => return Some("[C".to_string()),
+            "double" => return Some("[D".to_string()),
+            "float" => return Some("[F".to_string()),
+            "int" => return Some("[I".to_string()),
+            "long" => return Some("[J".to_string()),
+            "short" => return Some("[S".to_string()),
+            "boolean" => return Some("[Z".to_string()),
+            _ if inner.starts_with('[') => return Some(format!("[{}", inner)),
+            _ => return Some(format!("[L{};", inner)),
+        }
+    }
+
+    // 2. Generics
+    if let Some(pos) = ty.find('<')
+        && ty.ends_with('>')
+    {
+        let base = &ty[..pos];
+        let args_str = &ty[pos + 1..ty.len() - 1];
+
+        // 动态解析 Base 类 (例如 "List" -> "java/util/List")
+        let base_internal = resolve_complex_type_to_internal(base, ctx, index)?;
+
+        // 应对 diamond operator: new ArrayList<>()
+        if args_str.trim().is_empty() {
+            return Some(base_internal);
+        }
+
+        let mut args = Vec::new();
+        let mut depth = 0;
+        let mut start = 0;
+        for (i, c) in args_str.char_indices() {
+            match c {
+                '<' => depth += 1,
+                '>' => depth -= 1,
+                ',' if depth == 0 => {
+                    args.push(&args_str[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+        args.push(&args_str[start..]);
+
+        let mut resolved_args = Vec::new();
+        for a in args {
+            let arg = a.trim();
+            if arg == "?" {
+                resolved_args.push("*".to_string());
+                continue;
+            }
+
+            // 动态解析泛型实参 (例如 "String" -> "java/lang/String")
+            let inner = resolve_complex_type_to_internal(arg, ctx, index)?;
+            let desc = match inner.as_str() {
+                "byte" => "B".to_string(),
+                "char" => "C".to_string(),
+                "double" => "D".to_string(),
+                "float" => "F".to_string(),
+                "int" => "I".to_string(),
+                "long" => "J".to_string(),
+                "short" => "S".to_string(),
+                "boolean" => "Z".to_string(),
+                _ if inner.starts_with('[') => inner,
+                _ => format!("L{};", inner),
+            };
+            resolved_args.push(desc);
+        }
+        return Some(format!("{}<{}>", base_internal, resolved_args.join("")));
+    }
+
+    // 3. Primitive & Special
+    match ty {
+        "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" | "void"
+        | "var" => {
+            return Some(ty.to_string());
+        }
+        _ => {}
+    }
+
+    // 4. Base class name
+    if ty.contains('/') {
+        Some(ty.to_string())
+    } else {
+        // 交给原有的 import / global index 推导机制去查
+        resolve_simple_name_to_internal(ty, ctx, index).map(|arc| arc.to_string())
+    }
+}
+
 /// Extract "Foo" from "new Foo()" / "new Foo(a, b)".
 fn extract_constructor_class(expr: &str) -> Option<&str> {
     let rest = expr.trim().strip_prefix("new ")?;
-    // The part before the '(' is the class name (which may contain generics, such as "ArrayList<String>").
+    // The part before the '(' is the class name.
     let class_part = rest.split('(').next()?.trim();
-    // Remove generic parameter: ArrayList<String> -> ArrayList
-    let simple = class_part.split('<').next()?.trim();
-    if simple.is_empty() {
+    if class_part.is_empty() {
         None
     } else {
-        Some(simple)
+        Some(class_part)
     }
 }
 
@@ -545,6 +667,7 @@ mod tests {
             descriptor: Arc::from(descriptor),
             access_flags,
             is_synthetic,
+            generic_signature: None,
         }
     }
 
@@ -559,6 +682,7 @@ mod tests {
             methods,
             fields,
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -751,6 +875,7 @@ mod tests {
             ],
             fields: vec![make_field("secret", "I", ACC_PRIVATE, false)],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -775,6 +900,7 @@ mod tests {
             methods: vec![],
             fields: vec![make_field("count", "I", ACC_PRIVATE, false)],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -967,6 +1093,7 @@ mod tests {
             methods: vec![make_method("run", "()V", ACC_PUBLIC, false)],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -1207,6 +1334,7 @@ mod tests {
             ],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -1352,6 +1480,7 @@ public class RandomClass {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1371,6 +1500,7 @@ public class RandomClass {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1421,6 +1551,7 @@ public class RandomClass {
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -1471,6 +1602,7 @@ public class RandomClass {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1490,6 +1622,7 @@ public class RandomClass {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1548,6 +1681,7 @@ public class RandomClass {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -1568,6 +1702,7 @@ public class RandomClass {
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 inner_class_of: None,
+                generic_signature: None,
                 origin: ClassOrigin::Unknown,
             },
         ]);
@@ -1599,6 +1734,55 @@ public class RandomClass {
             results.iter().any(|c| c.label.as_ref() == "funcA"),
             "this.| should show inherited funcA from BaseClass, got: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_resolve_receiver_type_with_generics_dynamic() {
+        let mut idx = GlobalIndex::new();
+        // 必须向 mock index 中注册真实被查找的 java/util/List 和 String
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/util/List"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![make_method("size", "()I", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = ctx_with_local_and_import(
+            "myList",
+            "List<String>",
+            "si",
+            vec!["java.util.List".to_string()],
+            "org/cubewhy",
+        );
+
+        let results = MemberProvider.provide(&ctx, &mut idx);
+
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "size"),
+            "should dynamically resolve List and String to find methods"
         );
     }
 }

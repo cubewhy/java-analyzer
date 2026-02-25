@@ -9,6 +9,7 @@ use super::{
     ClassMetadata, ClassOrigin, FieldSummary, MethodSummary, parse_return_type_from_descriptor,
 };
 use crate::{
+    completion::type_resolver::{java_source_type_to_descriptor, java_type_to_descriptor},
     index::intern_str,
     language::ts_utils::{capture_text, run_query},
 };
@@ -162,6 +163,7 @@ fn parse_java_class(
         fields,
         access_flags,
         inner_class_of: outer_class,
+        generic_signature: extract_generic_signature(node, bytes, "Ljava/lang/Object;"),
         origin: origin.clone(),
     })
 }
@@ -229,12 +231,14 @@ fn parse_java_method(node: Node, bytes: &[u8]) -> Option<MethodSummary> {
     let descriptor = build_java_descriptor(params, ret);
     let return_type = parse_return_type_from_descriptor(&descriptor);
 
+    let generic_signature = extract_generic_signature(node, bytes, &descriptor);
+
     Some(MethodSummary {
         name: Arc::from(name),
         descriptor: Arc::from(descriptor.as_str()),
         access_flags,
         is_synthetic: false,
-        generic_signature: None,
+        generic_signature,
         return_type,
     })
 }
@@ -301,6 +305,7 @@ fn parse_java_field(node: Node, bytes: &[u8]) -> Vec<FieldSummary> {
                 descriptor: Arc::from(descriptor.as_str()),
                 access_flags,
                 is_synthetic: false,
+                generic_signature: None,
             }
         })
         .collect()
@@ -409,35 +414,6 @@ fn split_params(s: &str) -> Vec<&str> {
         result.push(&s[start..]);
     }
     result
-}
-
-/// Java source code type name → JVM descriptor
-fn java_source_type_to_descriptor(ty: &str) -> String {
-    // Remove generics
-    let base = ty.split('<').next().unwrap_or(ty).trim();
-    match base {
-        "void" => "V".into(),
-        "boolean" => "Z".into(),
-        "byte" => "B".into(),
-        "char" => "C".into(),
-        "short" => "S".into(),
-        "int" => "I".into(),
-        "long" => "J".into(),
-        "float" => "F".into(),
-        "double" => "D".into(),
-        other => {
-            let internal = other.replace('.', "/");
-            format!("L{};", internal)
-        }
-    }
-}
-
-/// Java source code type name → JVM descriptor (used for fields)
-pub fn java_type_to_descriptor(ty: &str) -> String {
-    let base = ty.split('<').next().unwrap_or(ty).trim();
-    let array_depth = ty.chars().filter(|&c| c == '[').count();
-    let brackets: String = (0..array_depth).map(|_| '[').collect();
-    format!("{}{}", brackets, java_source_type_to_descriptor(base))
 }
 
 pub fn parse_kotlin_source(source: &str, origin: ClassOrigin) -> Vec<ClassMetadata> {
@@ -556,6 +532,7 @@ fn parse_kotlin_class(
         methods,
         fields,
         access_flags,
+        generic_signature: extract_generic_signature(node, bytes, "Ljava/lang/Object;"),
         inner_class_of: outer_class,
         origin: origin.clone(),
     })
@@ -581,10 +558,11 @@ fn extract_kotlin_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
     let mut result = Vec::new();
 
     for caps in run_query(&q, body, bytes, None) {
-        let name = match capture_text(&caps, name_idx, bytes) {
-            Some(n) => n,
+        let name_node = match caps.iter().find(|(idx, _)| *idx == name_idx) {
+            Some(n) => n.1,
             None => continue,
         };
+        let name = node_text(name_node, bytes);
         let params_text = capture_text(&caps, params_idx, bytes).unwrap_or("()");
 
         // Get the corresponding node from captures, then find its type_reference
@@ -592,12 +570,15 @@ fn extract_kotlin_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
         let descriptor = build_kotlin_descriptor(params_text);
         let return_type = parse_return_type_from_descriptor(&descriptor);
 
+        let func_node = name_node.parent().unwrap();
+        let generic_signature = extract_generic_signature(func_node, bytes, &descriptor);
+
         result.push(MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor.as_str()),
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
-            generic_signature: None,
+            generic_signature,
             return_type,
         });
     }
@@ -634,6 +615,7 @@ fn extract_kotlin_fields(body: Node, bytes: &[u8]) -> Vec<FieldSummary> {
                 descriptor: Arc::from(descriptor.as_str()),
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
+                generic_signature: None,
             })
         })
         .collect()
@@ -754,10 +736,50 @@ fn make_kotlin_parser() -> Parser {
     p
 }
 
+/// 提取类或方法的泛型参数，并构建成 JVM 规范的泛型签名。
+/// 例如从 `class List<T, E>` 提取出 `<T:Ljava/lang/Object;E:Ljava/lang/Object;>Ljava/lang/Object;`
+fn extract_generic_signature(node: Node, bytes: &[u8], suffix: &str) -> Option<Arc<str>> {
+    // 兼容 Java (child_by_field_name) 和 Kotlin (直接找 kind)
+    let tp_node = node.child_by_field_name("type_parameters").or_else(|| {
+        node.children(&mut node.walk())
+            .find(|n| n.kind() == "type_parameters")
+    })?;
+
+    let mut sig = String::from("<");
+    let mut has_params = false;
+    let mut walker = tp_node.walk();
+
+    for child in tp_node.named_children(&mut walker) {
+        if child.kind() == "type_parameter" {
+            // Java 是 identifier，Kotlin 是 type_identifier
+            if let Some(id_node) = child
+                .children(&mut child.walk())
+                .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
+            {
+                let name = node_text(id_node, bytes).trim();
+                if !name.is_empty() {
+                    sig.push_str(name);
+                    // 统一擦除到 Object，因为我们的引擎目前只关心参数占位符的名称映射
+                    sig.push_str(":Ljava/lang/Object;");
+                    has_params = true;
+                }
+            }
+        }
+    }
+
+    if !has_params {
+        return None;
+    }
+
+    sig.push('>');
+    sig.push_str(suffix);
+    Some(Arc::from(sig))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::index::ClassOrigin;
-    use crate::index::source::parse_java_source;
+    use crate::index::source::{parse_java_source, parse_kotlin_source};
 
     #[test]
     fn test_nested_class_internal_name_with_package() {
@@ -855,5 +877,40 @@ public class Main {
             child.super_name
         );
         assert!(child.interfaces.contains(&"Runnable".into()));
+    }
+
+    #[test]
+    fn test_extract_java_class_generic_signature() {
+        let src = "public class MyMap<K, V> { }";
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let meta = classes.first().unwrap();
+
+        assert_eq!(
+            meta.generic_signature.as_deref(),
+            Some("<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;")
+        );
+    }
+
+    #[test]
+    fn test_extract_java_method_generic_signature() {
+        let src = "public class Utils { public <T> T getFirst(List<T> list) { return null; } }";
+        let classes = parse_java_source(src, ClassOrigin::Unknown);
+        let method = classes.first().unwrap().methods.first().unwrap();
+
+        // 验证方法上的泛型 T 被正确抓取，并且携带了后续的 descriptor
+        let sig = method.generic_signature.as_deref().unwrap();
+        assert!(sig.starts_with("<T:Ljava/lang/Object;>"));
+    }
+
+    #[test]
+    fn test_extract_kotlin_class_generic_signature() {
+        let src = "class Box<T>(val item: T) { }";
+        let classes = parse_kotlin_source(src, ClassOrigin::Unknown);
+        let meta = classes.first().unwrap();
+
+        assert_eq!(
+            meta.generic_signature.as_deref(),
+            Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+        );
     }
 }

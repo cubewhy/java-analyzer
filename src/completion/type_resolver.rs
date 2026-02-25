@@ -1,6 +1,13 @@
 use super::context::LocalVar;
-use crate::index::{GlobalIndex, MethodSummary};
+use crate::{
+    completion::type_resolver::generics::{
+        JvmType, parse_class_type_parameters, split_internal_name, substitute_type,
+    },
+    index::{GlobalIndex, MethodSummary},
+};
 use std::sync::Arc;
+
+pub mod generics;
 
 pub struct TypeResolver<'idx> {
     index: &'idx GlobalIndex,
@@ -86,8 +93,10 @@ impl<'idx> TypeResolver<'idx> {
         arg_count: i32,
         arg_types: &[Arc<str>],
     ) -> Option<Arc<str>> {
-        // Walk MRO to find the method
-        for class in self.index.mro(receiver_internal) {
+        let (base_receiver, receiver_type_args) = split_internal_name(receiver_internal);
+
+        // 使用 base_receiver 在 index 里查找 MRO
+        for class in self.index.mro(base_receiver) {
             let candidates: Vec<&MethodSummary> = class
                 .methods
                 .iter()
@@ -96,13 +105,33 @@ impl<'idx> TypeResolver<'idx> {
             if candidates.is_empty() {
                 continue;
             }
-            // Found in this class — resolve overload and return
+
             let method = Self::select_overload(&candidates, arg_count, arg_types);
             let sig = method
                 .generic_signature
                 .as_deref()
                 .unwrap_or(&method.descriptor);
-            return extract_return_internal_name(sig);
+
+            let ret_idx = sig.find(')')?;
+            let ret_jvm_str = &sig[ret_idx + 1..];
+            let (ret_jvm_type, _) = JvmType::parse(&sig[ret_idx + 1..])?;
+
+            if let Some(substituted) = substitute_type(
+                receiver_internal,
+                class.generic_signature.as_deref(),
+                ret_jvm_str,
+            ) {
+                if substituted == "V" {
+                    return None;
+                }
+                return Some(Arc::from(substituted));
+            }
+
+            if let JvmType::Primitive('V') = ret_jvm_type {
+                return None;
+            }
+
+            return Some(Arc::from(ret_jvm_type.to_internal_name_string()));
         }
         None
     }
@@ -366,10 +395,16 @@ impl ChainSegment {
 /// - `"()I"` → `None` (primitive type, no further dot chaining)
 /// - `"()[Ljava/lang/String;"` → `Some("[Ljava/lang/String;")` (array type)
 pub fn extract_return_internal_name(descriptor: &str) -> Option<Arc<str>> {
-    // Find the return type part after ')'
-    let ret = descriptor.find(')').map(|i| &descriptor[i + 1..])?;
+    let ret_idx = descriptor.find(')')?;
+    let ret_str = &descriptor[ret_idx + 1..];
 
-    parse_single_type_to_internal(ret)
+    let (jvm_type, _) = JvmType::parse(ret_str)?;
+
+    if let JvmType::Primitive('V') = jvm_type {
+        return None;
+    }
+
+    Some(Arc::from(jvm_type.to_internal_name_string()))
 }
 
 /// Convert a single type descriptor to an internal name (remove generic parameters, retain the primitive type)
@@ -379,33 +414,10 @@ pub fn extract_return_internal_name(descriptor: &str) -> Option<Arc<str>> {
 /// - `"[Ljava/lang/String;"` → `Some("[Ljava/lang/String;")` (Arrays retain complete descriptors)
 /// - Primitive types such as `"V"` / `"I"` / `"Z"` → `None`
 pub fn parse_single_type_to_internal(ty: &str) -> Option<Arc<str>> {
-    match ty.chars().next()? {
-        // Object type: L...; or L...<...>;
-        'L' => {
-            // Find the first ';' or '<', and take the part before it as the internal name.
-            let end = ty[1..].find([';', '<'])? + 1;
-            Some(Arc::from(&ty[1..end]))
-        }
-        // Array type: retain the complete descriptor (because arrays in GlobalIndex do not have individual entries)
-        '[' => {
-            // Find the type of the element after the last '['
-            let element_start = ty.rfind('[').unwrap_or(0) + 1;
-            let element = &ty[element_start..];
-            // If the element is an object type, extract its internal name.
-            if let Some(_stripped) = element.strip_prefix('L') {
-                // TODO: wtf, Claude what are you doing
-
-                // let end = stripped.find([';', '<'])? + 1;
-                // Returns the fully internal name of the array, such as "[Ljava/util/List;"
-                Some(Arc::from(ty))
-            } else {
-                // Arrays of primitive types, such as "[I"
-                Some(Arc::from(ty))
-            }
-        }
-        // void and primitive types: cannot continue the dot chain, returns None
-        'V' | 'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' => None,
-        _ => None,
+    let (jvm_type, _) = JvmType::parse(ty)?;
+    match jvm_type {
+        JvmType::Primitive(_) => None,
+        _ => Some(Arc::from(jvm_type.to_internal_name_string())),
     }
 }
 
@@ -446,6 +458,132 @@ pub fn count_params(descriptor: &str) -> usize {
 /// Extract return type from descriptor
 pub fn parse_return_type_from_descriptor(descriptor: &str) -> Option<Arc<str>> {
     extract_return_internal_name(descriptor)
+}
+
+pub fn java_primitive_char_to_name(c: char) -> &'static str {
+    match c {
+        'I' => "int",
+        'Z' => "boolean",
+        'J' => "long",
+        'F' => "float",
+        'D' => "double",
+        'B' => "byte",
+        'C' => "char",
+        'S' => "short",
+        'V' => "void",
+        _ => "unknown",
+    }
+}
+
+/// Java source code type name → JVM descriptor
+pub fn java_source_type_to_descriptor(ty: &str) -> String {
+    // Remove generics
+    let base = ty.split('<').next().unwrap_or(ty).trim();
+    match base {
+        "void" => "V".into(),
+        "boolean" => "Z".into(),
+        "byte" => "B".into(),
+        "char" => "C".into(),
+        "short" => "S".into(),
+        "int" => "I".into(),
+        "long" => "J".into(),
+        "float" => "F".into(),
+        "double" => "D".into(),
+        other => {
+            let internal = other.replace('.', "/");
+            format!("L{};", internal)
+        }
+    }
+}
+
+/// Java source code type name → JVM descriptor (used for fields)
+pub fn java_type_to_descriptor(ty: &str) -> String {
+    let base = ty.split('<').next().unwrap_or(ty).trim();
+    let array_depth = ty.chars().filter(|&c| c == '[').count();
+    let brackets: String = (0..array_depth).map(|_| '[').collect();
+    format!("{}{}", brackets, java_source_type_to_descriptor(base))
+}
+
+/// 将 Java 源码类型转换为携带泛型的 JVM internal name
+///
+/// # Examples
+/// - `List<String>` -> `java/util/List<Ljava/lang/String;>`
+/// - `Map<String, List<User>>` -> `java/util/Map<Ljava/lang/String;Ljava/util/List<Luser/User;>;>`
+/// - `String[]` -> `[Ljava/lang/String;`
+pub fn java_source_type_to_jvm_generic(
+    source_ty: &str,
+    resolve_simple_name: &impl Fn(&str) -> String,
+) -> String {
+    let mut ty = source_ty.trim();
+
+    // 1. 处理数组后缀 (String[] -> array_depth = 1)
+    let mut array_depth = 0;
+    while let Some(stripped) = ty.strip_suffix("[]") {
+        array_depth += 1;
+        ty = stripped.trim();
+    }
+
+    // 2. 处理泛型
+    let mut result = if let Some(pos) = ty.find('<') {
+        if ty.ends_with('>') {
+            let base = &ty[..pos];
+            let args_str = &ty[pos + 1..ty.len() - 1];
+            // 解析基类：List -> java/util/List
+            let base_internal = resolve_simple_name(base.trim());
+
+            // 按逗号分割泛型参数，这里必须忽略嵌套的 <> (例如 Map<String, List<User>>)
+            let mut args = Vec::new();
+            let mut depth = 0;
+            let mut start = 0;
+            for (i, c) in args_str.char_indices() {
+                match c {
+                    '<' => depth += 1,
+                    '>' => depth -= 1,
+                    ',' if depth == 0 => {
+                        args.push(&args_str[start..i]);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            args.push(&args_str[start..]);
+
+            // 递归转换内部参数，并包装成 L...;
+            let resolved_args: Vec<_> = args
+                .into_iter()
+                .map(|a| {
+                    let arg_ty = a.trim();
+                    if arg_ty == "?" {
+                        return "*".to_string(); // 通配符
+                    }
+                    let inner = java_source_type_to_jvm_generic(arg_ty, resolve_simple_name);
+
+                    // 如果 inner 已经是数组（以 '[' 开头），就不要再套 'L' 了
+                    if inner.starts_with('[') {
+                        inner
+                    } else {
+                        format!("L{};", inner)
+                    }
+                })
+                .collect();
+
+            format!("{}<{}>", base_internal, resolved_args.join(""))
+        } else {
+            resolve_simple_name(ty)
+        }
+    } else {
+        resolve_simple_name(ty)
+    };
+
+    // 3. 数组包装恢复
+    for _ in 0..array_depth {
+        if !result.starts_with('[') {
+            result = format!("L{};", result);
+        }
+        result = format!("[{}", result);
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -619,6 +757,7 @@ mod tests {
             ],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -701,6 +840,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -720,6 +860,7 @@ mod tests {
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
+                generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
@@ -750,6 +891,7 @@ mod tests {
             methods: vec![],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -784,6 +926,7 @@ mod tests {
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
+            generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
         }]);
@@ -829,5 +972,51 @@ mod tests {
         let params = parse_method_descriptor(desc);
 
         assert_eq!(params, vec!["int[]", "java/lang/String[][]"]);
+    }
+
+    #[test]
+    fn test_generics_substitution_list_get() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/util")),
+            name: Arc::from("List"),
+            internal_name: Arc::from("java/util/List"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("get"),
+                descriptor: Arc::from("(I)Ljava/lang/Object;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                // 这里代表泛型方法返回类型是 E
+                generic_signature: Some(Arc::from("(I)TE;")),
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let resolver = TypeResolver::new(&idx);
+
+        // 模拟推导 `myList.get()`
+        // receiver 是我们带有泛型尾巴的完整形式
+        let result = resolver.resolve_method_return(
+            "java/util/List<Ljava/lang/String;>",
+            "get",
+            1,
+            &[Arc::from("int")],
+        );
+
+        assert_eq!(
+            result.as_deref(),
+            Some("java/lang/String"),
+            "Generic type TE; should be correctly substituted to java/lang/String"
+        );
     }
 }

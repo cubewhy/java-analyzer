@@ -80,7 +80,8 @@ pub fn extract_locals(
                 offset = ctx.offset,
                 "extracted local var"
             );
-            let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
+            let raw_ty = ty.trim();
+
             if raw_ty == "var" {
                 return Some(LocalVar {
                     name: Arc::from(name),
@@ -88,6 +89,7 @@ pub fn extract_locals(
                     init_expr: get_initializer_text(ty_node, ctx.bytes),
                 });
             }
+
             Some(LocalVar {
                 name: Arc::from(name),
                 type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
@@ -245,7 +247,8 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                         }
                         let ty = ty_node.utf8_text(ctx.bytes).ok()?;
                         let name = name_node.utf8_text(ctx.bytes).ok()?;
-                        let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
+                        let raw_ty = ty.trim();
+
                         if raw_ty == "var" {
                             return Some(match infer_type_from_initializer(ty_node, ctx.bytes) {
                                 Some(t) => LocalVar {
@@ -260,6 +263,7 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                                 },
                             });
                         }
+
                         Some(LocalVar {
                             name: Arc::from(name),
                             type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
@@ -275,6 +279,16 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
             collect_locals_in_errors(ctx, child, vars);
         }
     }
+}
+
+fn clean_type_string(ty: &str) -> String {
+    // 移除空白字符，保留泛型符号
+    let ty = ty.trim();
+    if ty == "var" {
+        return "var".to_string();
+    }
+
+    ty.to_string()
 }
 
 #[cfg(test)]
@@ -326,10 +340,13 @@ mod tests {
             vars.iter()
                 .any(|v| v.name.as_ref() == "b" && v.type_internal.as_ref() == "String")
         );
-        // 验证泛型被清洗
         assert!(
             vars.iter()
-                .any(|v| v.name.as_ref() == "c" && v.type_internal.as_ref() == "List")
+                .any(|v| v.name.as_ref() == "c" && v.type_internal.as_ref() == "List<String>"),
+            "Should preserve generics. Found types: {:?}",
+            vars.iter()
+                .map(|v| v.type_internal.as_ref())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -613,6 +630,32 @@ mod tests {
         assert!(
             !vars.iter().any(|v| v.name.as_ref() == "doSomething"),
             "method name must not appear as local var"
+        );
+    }
+
+    #[test]
+    fn test_extract_standard_locals_with_generics() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                List<String> c = new ArrayList<>();
+                // cursor here
+            }
+        }
+        "#};
+        let offset = src.find("// cursor").unwrap();
+        let (ctx, tree) = setup(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let vars = extract_locals(&ctx, tree.root_node(), cursor_node);
+
+        assert!(
+            vars.iter()
+                .any(|v| v.name.as_ref() == "c" && v.type_internal.as_ref() == "List<String>"),
+            "Should preserve generics exactly as in source. Found types: {:?}",
+            vars.iter()
+                .map(|v| v.type_internal.as_ref())
+                .collect::<Vec<_>>()
         );
     }
 }

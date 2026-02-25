@@ -263,14 +263,7 @@ fn handle_identifier(
                 if is_in_formal_param_name_position(node, ancestor) {
                     let type_name = ancestor
                         .child_by_field_name("type")
-                        .map(|n| {
-                            ctx.node_text(n)
-                                .split('<')
-                                .next()
-                                .unwrap_or("")
-                                .trim()
-                                .to_string()
-                        })
+                        .map(|n| ctx.node_text(n).trim().to_string())
                         .unwrap_or_default();
                     return (CursorLocation::VariableName { type_name }, String::new());
                 }
@@ -367,13 +360,7 @@ fn extract_type_from_decl(ctx: &JavaContextExtractor, decl_node: Node) -> String
         if child.kind() == "modifiers" {
             continue;
         }
-        return ctx
-            .node_text(child)
-            .split('<')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        return ctx.node_text(child).trim().to_string();
     }
     String::new()
 }
@@ -412,9 +399,8 @@ fn infer_expected_type_from_lhs(ctx: &JavaContextExtractor, node: Node) -> Optio
             continue;
         }
         let ty = ctx.node_text(child);
-        let simple = ty.split('<').next()?.trim();
-        if !simple.is_empty() {
-            return Some(simple.to_string());
+        if !ty.is_empty() {
+            return Some(ty.to_string());
         }
     }
     None

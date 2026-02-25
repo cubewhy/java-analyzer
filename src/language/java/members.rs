@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use tree_sitter::Node;
 
-use crate::{completion::context::CurrentClassMember, language::java::JavaContextExtractor};
+use crate::{
+    completion::{context::CurrentClassMember, type_resolver::java_type_to_descriptor},
+    language::java::JavaContextExtractor,
+};
 
 // TODO: duplicate logic, need a refactor
 #[rustfmt::skip]
@@ -359,9 +362,7 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
             is_method: false,
             is_static,
             is_private,
-            descriptor: Arc::from(
-                crate::index::source::java_type_to_descriptor(field_type).as_str(),
-            ),
+            descriptor: Arc::from(java_type_to_descriptor(field_type).as_str()),
         })
         .collect()
 }
