@@ -115,10 +115,10 @@ pub fn build_injected_source(
     } else {
         let prefix = &extractor.source[replace_start..replace_end];
         // cursor in scoped_type_identifier (e.g., java.util.A) -> add semicolon to turn into expression statement
-        let in_scoped_type = cursor_node.is_some_and(|n| {
-            find_ancestor(n, "scoped_type_identifier").is_some()
-                || n.kind() == "scoped_type_identifier"
-        });
+        // let in_scoped_type = cursor_node.is_some_and(|n| {
+        //     find_ancestor(n, "scoped_type_identifier").is_some()
+        //         || n.kind() == "scoped_type_identifier"
+        // });
 
         // Check if we are inside a `new` expression to inject parentheses
         // This helps tree-sitter terminate the object_creation_expression correctly
@@ -142,21 +142,21 @@ pub fn build_injected_source(
 
         let suffix = if is_constructor_ctx { "()" } else { "" };
 
-        if in_scoped_type {
-            inject_at(
-                extractor,
-                replace_start,
-                replace_end,
-                &format!("{prefix}{SENTINEL}{suffix};"),
-            )
-        } else {
-            inject_at(
-                extractor,
-                replace_start,
-                replace_end,
-                &format!("{prefix}{SENTINEL}{suffix}"),
-            )
-        }
+        inject_at(
+            extractor,
+            replace_start,
+            replace_end,
+            &format!("{prefix}{SENTINEL}{suffix};"),
+        )
+        // if in_scoped_type {
+        // } else {
+        //     inject_at(
+        //         extractor,
+        //         replace_start,
+        //         replace_end,
+        //         &format!("{prefix}{SENTINEL}{suffix}"),
+        //     )
+        // }
     }
 }
 
@@ -422,5 +422,31 @@ mod tests {
             location
         );
         assert_eq!(query, "RandomCla", "Query should match the prefix");
+    }
+
+    #[test]
+    fn test_inject_and_determine_plain_identifier() {
+        let src = indoc::indoc! {r#"
+    class A {
+        public static void func() {}
+        void f() {
+            func
+        }
+    }
+    "#};
+        let offset = src.find("func\n").unwrap() + 4; // 指向方法体内的 func
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let result = inject_and_determine(&ctx, cursor_node, None);
+        assert!(
+            result.is_some(),
+            "inject_and_determine should succeed for plain identifier"
+        );
+
+        let (location, query) = result.unwrap();
+        assert_eq!(query, "func");
+        // 应当解析为某种可补全的上下文（如 Identifier / MethodCall）
+        println!("location: {:?}", location);
     }
 }
