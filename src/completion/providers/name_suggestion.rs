@@ -3,8 +3,13 @@ use super::super::{
     context::{CompletionContext, CursorLocation},
 };
 use super::CompletionProvider;
-use crate::index::GlobalIndex;
+use crate::{
+    completion::providers::name_suggestion::rules::{BASE_RULES, ParsedType, pluralize},
+    index::GlobalIndex,
+};
 use std::sync::Arc;
+
+pub mod rules;
 
 pub struct NameSuggestionProvider;
 
@@ -50,90 +55,47 @@ impl CompletionProvider for NameSuggestionProvider {
 /// Generate variable name suggestions from a type name.
 /// e.g. "StringBuilder" → ["sb", "builder", "stringBuilder", "StringBuilder"]  
 pub fn generate_name_suggestions(type_name: &str) -> Vec<String> {
-    // Strip array suffix
-    let base = type_name.trim_end_matches("[]").trim_end_matches(';');
-    // Use only the simple name (strip package path)
-    let simple = base
-        .rsplit('/')
-        .next()
-        .unwrap_or(base)
-        .rsplit('.')
-        .next()
-        .unwrap_or(base);
+    let parsed = ParsedType::parse(type_name);
 
-    if simple.is_empty() {
+    if parsed.simple_name.is_empty() {
         return vec![];
+    }
+
+    let mut base_suggestions = vec![];
+    for rule in BASE_RULES {
+        if let Some(suggestions) = rule(&parsed) {
+            base_suggestions = suggestions;
+            break;
+        }
+    }
+
+    if parsed.is_array {
+        base_suggestions = base_suggestions
+            .into_iter()
+            .flat_map(|s| {
+                let mut variants = vec![format!("{}Arr", s)];
+
+                if s.len() <= 1 {
+                    variants.push(s);
+                } else {
+                    variants.push(pluralize(&s));
+                }
+
+                variants
+            })
+            .collect();
     }
 
     let mut results: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    let mut add = |s: String| {
+    for s in base_suggestions {
         if !s.is_empty() && is_valid_identifier(&s) && seen.insert(s.clone()) {
             results.push(s);
         }
-    };
-
-    // 1. Acronym: StringBuilder → sb, HttpServletRequest → hsr
-    let acronym = acronym_of(simple);
-    add(acronym);
-
-    // 2. Last word (camelCase split): StringBuilder → builder, HttpServletRequest → request
-    if let Some(last) = camel_words(simple).last().map(|w| to_lower_camel(w)) {
-        add(last);
-    }
-
-    // 3. Full name in lowerCamelCase: StringBuilder → stringBuilder
-    let lower_camel = to_lower_camel(simple);
-    add(lower_camel);
-
-    // 4. For short names (≤4 chars), also suggest as-is lowercased
-    if simple.len() <= 4 {
-        add(simple.to_lowercase());
     }
 
     results
-}
-
-/// Split a CamelCase identifier into words.
-/// "StringBuilder" → ["String", "Builder"]
-/// "HTTPSConnection" → ["H","T","T","P","S","Connection"] (consecutive caps each become a word)
-fn camel_words(s: &str) -> Vec<&str> {
-    let mut words = Vec::new();
-    let mut start = 0;
-    let chars: Vec<(usize, char)> = s.char_indices().collect();
-
-    for i in 1..chars.len() {
-        let (_, prev) = chars[i - 1];
-        let (pos, cur) = chars[i];
-        // Split before an uppercase letter that follows a lowercase letter
-        // or before an uppercase letter followed by a lowercase (e.g. "HTTPSConn" → "HTTPS","Conn")
-        let next_is_lower = chars.get(i + 1).is_some_and(|(_, c)| c.is_lowercase());
-        if cur.is_uppercase() && (prev.is_lowercase() || (prev.is_uppercase() && next_is_lower)) {
-            words.push(&s[start..pos]);
-            start = pos;
-        }
-    }
-    words.push(&s[start..]);
-    words.into_iter().filter(|w| !w.is_empty()).collect()
-}
-
-/// Build acronym from CamelCase words: "StringBuilder" → "sb"
-fn acronym_of(s: &str) -> String {
-    camel_words(s)
-        .iter()
-        .filter_map(|w| w.chars().next())
-        .map(|c| c.to_ascii_lowercase())
-        .collect()
-}
-
-/// Convert a word to lowerCamelCase (just lowercase the first char).
-fn to_lower_camel(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(c) => c.to_lowercase().collect::<String>() + chars.as_str(),
-    }
 }
 
 fn is_valid_identifier(s: &str) -> bool {
@@ -262,20 +224,56 @@ mod tests {
     }
 
     #[test]
-    fn test_camel_words_split() {
-        assert_eq!(camel_words("StringBuilder"), vec!["String", "Builder"]);
-        assert_eq!(
-            camel_words("HttpServletRequest"),
-            vec!["Http", "Servlet", "Request"]
-        );
-        assert_eq!(camel_words("simple"), vec!["simple"]);
-        assert_eq!(camel_words("URL"), vec!["URL"]);
+    fn test_generics_list() {
+        let suggestions = generate_name_suggestions("List<User>");
+        let names: Vec<&str> = suggestions.iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"users"), "Should suggest 'users'");
+        assert!(names.contains(&"userList"), "Should suggest 'userList'");
     }
 
     #[test]
-    fn test_acronym_of() {
-        assert_eq!(acronym_of("StringBuilder"), "sb");
-        assert_eq!(acronym_of("HttpServletRequest"), "hsr");
-        assert_eq!(acronym_of("List"), "l");
+    fn test_generics_optional() {
+        let suggestions = generate_name_suggestions("Optional<User>");
+        let names: Vec<&str> = suggestions.iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"user"), "Should suggest 'user'");
+        assert!(names.contains(&"userOpt"), "Should suggest 'userOpt'");
+    }
+
+    #[test]
+    fn test_generics_with_packages() {
+        let suggestions = generate_name_suggestions("java.util.List<com.example.Entity>");
+        let names: Vec<&str> = suggestions.iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"entities"));
+        assert!(names.contains(&"entityList"));
+    }
+
+    #[test]
+    fn test_keyword_rule_base_and_array() {
+        // Base Keyword
+        let base_sugg = generate_name_suggestions("Class");
+        assert!(base_sugg.contains(&"clazz".to_string()));
+        assert!(!base_sugg.contains(&"class".to_string()));
+
+        // Array Keyword (clazz -> clazzes, clazzArr)
+        let arr_sugg = generate_name_suggestions("Class[]");
+        assert!(arr_sugg.contains(&"clazzes".to_string()));
+        assert!(arr_sugg.contains(&"clazzArr".to_string()));
+    }
+
+    #[test]
+    fn test_array_transform_rules() {
+        let suggestions = generate_name_suggestions("String[]");
+        let names: Vec<&str> = suggestions.iter().map(|s| s.as_str()).collect();
+        assert!(names.contains(&"strings"));
+        assert!(names.contains(&"stringArr"));
+
+        // acronym_of("String") -> "s"
+        // 长度为1，不再变形为 "ses" 或 "ss"，直接保留 "s" 和 "sArr"
+        assert!(names.contains(&"s"));
+        assert!(names.contains(&"sArr"));
+        assert!(
+            !names.contains(&"ses"),
+            "Should not pluralize single letter acronyms"
+        );
     }
 }
