@@ -258,12 +258,9 @@ impl GlobalIndex {
         let waker = Arc::new(|| {});
 
         Self {
-            exact_match: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher::default()),
-            simple_name_index: FxHashMap::with_capacity_and_hasher(
-                100_000,
-                FxBuildHasher::default(),
-            ),
-            package_index: FxHashMap::with_capacity_and_hasher(10_000, FxBuildHasher::default()),
+            exact_match: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher),
+            simple_name_index: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher),
+            package_index: FxHashMap::with_capacity_and_hasher(10_000, FxBuildHasher),
             origin_index: FxHashMap::default(),
             fuzzy_matcher: Nucleo::new(nucleo::Config::DEFAULT, waker, None, 1),
         }
@@ -516,10 +513,10 @@ impl GlobalIndex {
                 }
             }
             // Enqueue super class
-            if let Some(ref super_name) = meta.super_name {
-                if !super_name.is_empty() {
-                    queue.push_back(super_name.clone());
-                }
+            if let Some(ref super_name) = meta.super_name
+                && !super_name.is_empty()
+            {
+                queue.push_back(super_name.clone());
             }
             // Enqueue interfaces
             for iface in &meta.interfaces {

@@ -39,7 +39,7 @@ pub enum CursorLocation {
     MethodArgument { prefix: String },
     /// Location of a regular expression (which could be a local variable, static class name, or keyword)
     Expression { prefix: String },
-    /// `@Override|` -> 补全注解类
+    /// Annotations, e.g @Override
     Annotation { prefix: String },
     /// Variable name position: `String |name|` — suggest variable names based on type
     VariableName { type_name: String },
