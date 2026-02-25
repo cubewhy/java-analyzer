@@ -4,6 +4,23 @@ use tree_sitter::Node;
 
 use crate::{completion::context::CurrentClassMember, language::java::JavaContextExtractor};
 
+// TODO: duplicate logic, need a refactor
+#[rustfmt::skip]
+fn is_java_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "public" | "private" | "protected" | "static" | "final" | "abstract"
+            | "synchronized" | "volatile" | "transient" | "native" | "strictfp"
+            | "void" | "int" | "long" | "double" | "float" | "boolean"
+            | "byte" | "short" | "char"
+            | "class" | "interface" | "enum" | "extends" | "implements"
+            | "return" | "new" | "this" | "super" | "null" | "true" | "false"
+            | "if" | "else" | "for" | "while" | "do" | "switch" | "case"
+            | "break" | "continue" | "default" | "try" | "catch" | "finally"
+            | "throw" | "throws" | "import" | "package" | "instanceof" | "assert"
+    )
+}
+
 pub fn extract_class_members_from_body(
     ctx: &JavaContextExtractor,
     body: Node,
@@ -164,7 +181,11 @@ pub fn parse_partial_methods_from_error(
             Some(n) => ctx.node_text(n),
             None => continue,
         };
-        if name == "<init>" || name == "<clinit>" || found_names.contains(name) {
+        if name == "<init>"
+            || name == "<clinit>"
+            || found_names.contains(name)
+            || is_java_keyword(name)
+        {
             continue;
         }
 
@@ -281,7 +302,8 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
             _ => {}
         }
     }
-    let name = name.filter(|n| *n != "<init>" && *n != "<clinit>")?;
+    let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
+
     Some(CurrentClassMember {
         name: Arc::from(name),
         is_method: true,
@@ -319,7 +341,10 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
                 let mut vc = c.walk();
                 for vchild in c.children(&mut vc) {
                     if vchild.kind() == "identifier" {
-                        names.push(ctx.node_text(vchild).to_string());
+                        let n = ctx.node_text(vchild);
+                        if !is_java_keyword(n) {
+                            names.push(n.to_string());
+                        }
                         break;
                     }
                 }
@@ -386,7 +411,7 @@ fn parse_misread_method(
         }
     }
 
-    let name = name.filter(|n| *n != "<init>" && *n != "<clinit>")?;
+    let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
 
     // Extract formal_parameters from the ERROR node
     let mut ec = error_node.walk();
@@ -585,5 +610,82 @@ mod tests {
             .find(|m| m.name.as_ref() == "anotherSalvaged")
             .unwrap();
         assert!(salvaged2.is_method && !salvaged2.is_static && salvaged2.is_private);
+    }
+
+    #[test]
+    fn test_no_keyword_as_member_from_incomplete_declaration() {
+        // `pub` 触发 ERROR 节点，tree-sitter 可能把后续的 `public` 误读为字段名
+        let src = indoc::indoc! {r#"
+    class A {
+        pub // incomplete keyword-like identifier
+
+        public static void realMethod() {}
+    }
+    "#};
+        let (ctx, tree) = setup(src);
+        let mut members = Vec::new();
+        collect_members_from_node(&ctx, tree.root_node(), &mut members);
+
+        // 关键字不能作为成员名出现
+        let keyword_members: Vec<_> = members
+            .iter()
+            .filter(|m| is_java_keyword(m.name.as_ref()))
+            .collect();
+        assert!(
+            keyword_members.is_empty(),
+            "Java keywords should never appear as member names, got: {:?}",
+            keyword_members
+                .iter()
+                .map(|m| m.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+
+        // realMethod 应该正常提取
+        assert!(members.iter().any(|m| m.name.as_ref() == "realMethod"));
+    }
+
+    #[test]
+    fn test_no_keyword_as_field_from_error_in_method_body() {
+        // 方法体内的语法错误导致后续声明被吞入 ERROR，
+        // 其中的修饰符关键字不能被误提为字段
+        let src = indoc::indoc! {r#"
+    class A {
+        void broken() {
+            int x = foo(  // unclosed call
+
+        public String realField;
+        public void realMethod() {}
+    }
+    "#};
+        let (ctx, tree) = setup(src);
+        let mut members = Vec::new();
+        collect_members_from_node(&ctx, tree.root_node(), &mut members);
+
+        for m in &members {
+            assert!(
+                !is_java_keyword(m.name.as_ref()),
+                "keyword '{}' must not appear as a member name",
+                m.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_identifier_named_pub_is_valid_field() {
+        // `pub` 本身不是 Java 关键字，作为字段名应该允许（尽管罕见）
+        let src = indoc::indoc! {r#"
+    class A {
+        int pub;
+    }
+    "#};
+        let (ctx, tree) = setup(src);
+        let mut members = Vec::new();
+        collect_members_from_node(&ctx, tree.root_node(), &mut members);
+
+        // `pub` 不是关键字，应正常提取
+        assert!(
+            members.iter().any(|m| m.name.as_ref() == "pub"),
+            "`pub` is not a Java keyword and should be extracted as a field"
+        );
     }
 }
