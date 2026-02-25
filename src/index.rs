@@ -1,12 +1,13 @@
+use dashmap::{DashMap, DashSet};
 use nucleo::Nucleo;
 use nucleo::pattern::{CaseMatching, Normalization};
 use rayon::prelude::*;
 use rust_asm::class_reader::AttributeInfo;
 use rust_asm::class_reader::ClassReader;
-use rustc_hash::{FxBuildHasher, FxHashMap};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
@@ -226,29 +227,28 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
 }
 
 fn intern_str(s: &str) -> Arc<str> {
-    static POOL: OnceLock<Mutex<std::collections::HashSet<Arc<str>>>> = OnceLock::new();
-    let mut pool = POOL
-        .get_or_init(|| Mutex::new(std::collections::HashSet::new()))
-        .lock()
-        .unwrap();
+    static POOL: OnceLock<DashSet<Arc<str>>> = OnceLock::new();
+    let pool = POOL.get_or_init(|| DashSet::new());
+
     if let Some(arc) = pool.get(s) {
-        Arc::clone(arc)
-    } else {
-        let arc: Arc<str> = Arc::from(s);
-        pool.insert(Arc::clone(&arc));
-        arc
+        return Arc::clone(&arc);
     }
+
+    let arc: Arc<str> = Arc::from(s);
+    pool.insert(Arc::clone(&arc));
+    arc
 }
 
 pub struct GlobalIndex {
     /// 完整内部名 → ClassMetadata
     exact_match: FxHashMap<Arc<str>, Arc<ClassMetadata>>,
     /// 简单类名 → Vec<内部名>（不同包可能同名）
-    simple_name_index: FxHashMap<Arc<str>, Vec<Arc<str>>>,
+    simple_name_index: FxHashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
     /// 包名 → Vec<内部名>（用于通配符 import 展开）
-    package_index: FxHashMap<Arc<str>, Vec<Arc<str>>>,
+    package_index: FxHashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
     /// 来源 → Vec<内部名>（用于按文件删除）
     origin_index: FxHashMap<ClassOrigin, Vec<Arc<str>>>,
+    mro_cache: dashmap::DashMap<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>,
     /// fuzzy 匹配器（用简单类名）
     fuzzy_matcher: Nucleo<Arc<str>>,
 }
@@ -260,6 +260,7 @@ impl GlobalIndex {
         Self {
             exact_match: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher),
             simple_name_index: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher),
+            mro_cache: DashMap::new(),
             package_index: FxHashMap::with_capacity_and_hasher(10_000, FxBuildHasher),
             origin_index: FxHashMap::default(),
             fuzzy_matcher: Nucleo::new(nucleo::Config::DEFAULT, waker, None, 1),
@@ -305,13 +306,13 @@ impl GlobalIndex {
             self.simple_name_index
                 .entry(Arc::clone(&simple))
                 .or_default()
-                .push(Arc::clone(&internal));
+                .push(Arc::clone(&rc));
 
             if let Some(p) = pkg {
                 self.package_index
                     .entry(Arc::clone(&p))
                     .or_default()
-                    .push(Arc::clone(&internal));
+                    .push(Arc::clone(&rc));
             }
 
             self.origin_index
@@ -323,6 +324,8 @@ impl GlobalIndex {
                 cols[0] = item.as_ref().into();
             });
         }
+
+        self.mro_cache.clear();
     }
 
     /// Parse multiple JARs in parallel and write them to the index in batches
@@ -342,7 +345,7 @@ impl GlobalIndex {
             if let Some(meta) = self.exact_match.remove(internal) {
                 // remove from simple_name_index
                 if let Some(v) = self.simple_name_index.get_mut(&meta.name) {
-                    v.retain(|n| n != internal);
+                    v.retain(|meta| meta.internal_name != *internal);
                     if v.is_empty() {
                         self.simple_name_index.remove(&meta.name);
                     }
@@ -351,7 +354,7 @@ impl GlobalIndex {
                 if let Some(pkg) = &meta.package
                     && let Some(v) = self.package_index.get_mut(pkg)
                 {
-                    v.retain(|n| n != internal);
+                    v.retain(|meta| meta.internal_name != *internal);
                     if v.is_empty() {
                         self.package_index.remove(pkg);
                     }
@@ -359,6 +362,7 @@ impl GlobalIndex {
             }
         }
 
+        self.mro_cache.clear();
         // fuzzy_matcher does not support deleting or rebuilding individual records.
         self.rebuild_fuzzy();
     }
@@ -372,46 +376,20 @@ impl GlobalIndex {
         self.exact_match.get(internal_name).cloned()
     }
 
-    pub fn get_classes_by_simple_name(&self, simple_name: &str) -> Vec<Arc<ClassMetadata>> {
-        let result: Vec<Arc<ClassMetadata>> = self
-            .simple_name_index
+    pub fn get_classes_by_simple_name(&self, simple_name: &str) -> &[Arc<ClassMetadata>] {
+        self.simple_name_index
             .get(simple_name)
-            .map(|names| {
-                names
-                    .iter()
-                    .filter_map(|n| self.exact_match.get(n.as_ref()).cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        tracing::debug!(
-            simple_name,
-            count = result.len(),
-            internals = ?result.iter().map(|c| c.internal_name.as_ref()).collect::<Vec<_>>(),
-            "get_classes_by_simple_name"
-        );
-
-        result
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
-    pub fn classes_in_package(&self, pkg: &str) -> Vec<Arc<ClassMetadata>> {
-        let normalized = Arc::from(pkg.replace('.', "/").as_str());
-        let result: Vec<Arc<ClassMetadata>> = self
-            .package_index
-            .get(&normalized)
-            .map(|v| {
-                v.iter()
-                    .filter_map(|n| self.exact_match.get(n).cloned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        tracing::debug!(
-            pkg,
-            normalized = normalized.as_ref(),
-            count = result.len(),
-            "classes_in_package"
-        );
-        result
+    // 返回切片，生命周期与 &self 绑定
+    pub fn classes_in_package(&self, pkg: &str) -> &[Arc<ClassMetadata>] {
+        let normalized = pkg.replace('.', "/");
+        self.package_index
+            .get(normalized.as_str())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn has_package(&self, pkg: &str) -> bool {
@@ -433,7 +411,7 @@ impl GlobalIndex {
         }
         // 简单名回退：取最后一段（"extends Parent" 修复后不再需要，但保留防御）
         let simple = name.rsplit('/').next().unwrap_or(name);
-        self.get_classes_by_simple_name(simple).into_iter().next()
+        self.get_classes_by_simple_name(simple).first().cloned()
     }
 
     pub fn resolve_imports(&self, imports: &[String]) -> Vec<Arc<ClassMetadata>> {
@@ -449,7 +427,7 @@ impl GlobalIndex {
                     count = classes.len(),
                     "wildcard import expanded"
                 );
-                result.extend(self.classes_in_package(&pkg));
+                result.extend(self.classes_in_package(&pkg).iter().cloned());
             } else {
                 // 精确 import：按内部名查
                 let internal = import.replace('.', "/");
@@ -473,11 +451,15 @@ impl GlobalIndex {
         &self,
         class_internal: &str,
     ) -> (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>) {
+        if let Some(cached) = self.mro_cache.get(class_internal) {
+            return cached.clone();
+        }
+
         let mut methods: Vec<Arc<MethodSummary>> = Vec::new();
         let mut fields: Vec<Arc<FieldSummary>> = Vec::new();
         // Track seen method signatures to implement shadowing
-        let mut seen_methods: std::collections::HashSet<(Arc<str>, Arc<str>)> = Default::default(); // (name, descriptor)
-        let mut seen_fields: std::collections::HashSet<Arc<str>> = Default::default();
+        let mut seen_methods: FxHashSet<(Arc<str>, Arc<str>)> = Default::default();
+        let mut seen_fields: FxHashSet<Arc<str>> = Default::default();
         let mut queue: std::collections::VecDeque<Arc<str>> = Default::default();
 
         queue.push_back(Arc::from(class_internal));
@@ -525,7 +507,11 @@ impl GlobalIndex {
                 }
             }
         }
-        (methods, fields)
+        let result = (methods, fields);
+        self.mro_cache
+            .insert(Arc::from(class_internal), result.clone());
+
+        result
     }
 
     /// Return all classes in the MRO (Method Resolution Order) of `class_internal`,
@@ -588,7 +574,7 @@ impl GlobalIndex {
         let simple_names = self.fuzzy_autocomplete(query, limit);
         simple_names
             .into_iter()
-            .flat_map(|name| self.get_classes_by_simple_name(&name))
+            .flat_map(|name| self.get_classes_by_simple_name(&name).iter().cloned())
             .collect()
     }
 
@@ -612,7 +598,7 @@ impl GlobalIndex {
         }
     }
 
-    /// 遍历所有已索引的类（用于 import 补全等需要全量扫描的场景）
+    /// Iterate through all indexed classes (used for scenarios requiring a full scan, such as import completion).
     pub fn iter_all_classes(&self) -> impl Iterator<Item = &Arc<ClassMetadata>> {
         self.exact_match.values()
     }

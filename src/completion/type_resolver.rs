@@ -40,12 +40,7 @@ impl<'idx> TypeResolver<'idx> {
         }
 
         // Simple name fallback: RealMain → org/cubewhy/RealMain
-        if let Some(meta) = self
-            .index
-            .get_classes_by_simple_name(expr)
-            .into_iter()
-            .next()
-        {
+        if let Some(meta) = self.index.get_classes_by_simple_name(expr).iter().next() {
             return Some(Arc::clone(&meta.internal_name));
         }
 

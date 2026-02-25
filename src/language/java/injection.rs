@@ -7,7 +7,7 @@ use crate::{
         JavaContextExtractor, SENTINEL,
         location::determine_location,
         utils::{
-            close_open_brackets, error_has_new_keyword, error_has_trailing_dot, find_ancestor,
+            close_open_brackets, error_has_new_keyword, error_has_trailing_dot,
             find_error_ancestor, find_identifier_in_error, strip_sentinel,
             strip_sentinel_from_location,
         },

@@ -42,7 +42,7 @@ impl CompletionProvider for StaticMemberProvider {
         let class_meta = if let Some(m) = index.get_class(class_name_raw) {
             m
         } else {
-            let mut candidates = index.get_classes_by_simple_name(class_name_raw);
+            let mut candidates = index.get_classes_by_simple_name(class_name_raw).to_vec();
             if candidates.is_empty() {
                 // class not in index at all — may be the currently-edited file;
                 // fall back to source members if we're accessing our own class
