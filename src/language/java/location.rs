@@ -120,6 +120,28 @@ fn handle_member_access(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
         }
     };
 
+    let dot_node = children[dot_pos];
+
+    if ctx.offset <= dot_node.start_byte() {
+        let receiver_node = if dot_pos > 0 {
+            Some(children[dot_pos - 1])
+        } else {
+            None
+        };
+        let prefix = receiver_node
+            .map(|n| {
+                let text = cursor_truncated_text(ctx, n);
+                strip_sentinel(&text)
+            })
+            .unwrap_or_default();
+        return (
+            CursorLocation::Expression {
+                prefix: prefix.clone(),
+            },
+            prefix,
+        );
+    }
+
     let member_node = children[dot_pos + 1..]
         .iter()
         .find(|n| n.kind() == "identifier" || n.kind() == "type_identifier");
@@ -509,5 +531,60 @@ mod tests {
             "Expected TypeAnnotation, got {:?}",
             loc
         );
+    }
+
+    #[test]
+    fn test_cursor_inside_receiver_identifier() {
+        // 当光标在 receiver 的内部时（例如 stri|ngs.addAll();）
+        // 解析器不应该返回 MemberAccess，而应将其视为普通的 Expression
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            List<String> strings = new ArrayList<>();
+            strings.addAll();
+        }
+    }
+    "#};
+        // 计算光标在 "stri|ngs" 中间的位置
+        let marker = "strings.addAll";
+        let offset = src.find(marker).unwrap() + 4; // 长度正好到 "stri"
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression because cursor is inside the receiver, got {:?}",
+            loc
+        );
+        assert_eq!(query, "stri");
+    }
+
+    #[test]
+    fn test_cursor_exactly_before_dot_in_member_access() {
+        // 当光标紧贴在点之前（例如 strings|.addAll();）
+        // 用户依然是在完成 receiver，应该视作 Expression
+        let src = indoc::indoc! {r#"
+    class A {
+        void f() {
+            List<String> strings = new ArrayList<>();
+            strings.addAll();
+        }
+    }
+    "#};
+        let marker = "strings.addAll";
+        let offset = src.find(marker).unwrap() + 7; // 光标在 "strings" 后，'.' 的前面
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression when cursor is exactly before the dot, got {:?}",
+            loc
+        );
+        assert_eq!(query, "strings");
     }
 }
