@@ -82,7 +82,7 @@ impl CompletionProvider for ExpressionProvider {
                         None => continue,
                     }
                 };
-                let fqn = fqn_of(&meta);
+                let fqn = fqn_of(meta);
                 results.push(
                     CompletionCandidate::new(
                         Arc::clone(&meta.name),
@@ -91,7 +91,7 @@ impl CompletionProvider for ExpressionProvider {
                         self.name(),
                     )
                     .with_detail(fqn)
-                    .with_score(70.0 + score as f32 * 0.1),
+                    .with_score(90.0 + score as f32 * 0.1),
                 );
             }
         }
@@ -107,6 +107,12 @@ impl CompletionProvider for ExpressionProvider {
                     None => continue,
                 };
                 let fqn = fqn_of(meta);
+                let base_score = if meta.package.as_deref() == Some("java/lang") {
+                    70.0
+                } else {
+                    40.0
+                };
+
                 let candidate = CompletionCandidate::new(
                     Arc::clone(&meta.name),
                     meta.name.to_string(),
@@ -114,7 +120,7 @@ impl CompletionProvider for ExpressionProvider {
                     self.name(),
                 )
                 .with_detail(fqn.clone())
-                .with_score(40.0 + score as f32 * 0.1);
+                .with_score(base_score + score as f32 * 0.1);
 
                 let needs_import = is_import_needed(
                     &fqn,

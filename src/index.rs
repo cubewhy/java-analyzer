@@ -228,7 +228,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
 
 fn intern_str(s: &str) -> Arc<str> {
     static POOL: OnceLock<DashSet<Arc<str>>> = OnceLock::new();
-    let pool = POOL.get_or_init(|| DashSet::new());
+    let pool = POOL.get_or_init(DashSet::new);
 
     if let Some(arc) = pool.get(s) {
         return Arc::clone(&arc);
@@ -239,17 +239,19 @@ fn intern_str(s: &str) -> Arc<str> {
     arc
 }
 
+type MroCacheMap = dashmap::DashMap<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>;
+
 pub struct GlobalIndex {
-    /// 完整内部名 → ClassMetadata
+    /// Full internal name -> ClassMetadata
     exact_match: FxHashMap<Arc<str>, Arc<ClassMetadata>>,
-    /// 简单类名 → Vec<内部名>（不同包可能同名）
+    /// Simple class name -> Vec<internal name> (may have the same name in different packages)
     simple_name_index: FxHashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
-    /// 包名 → Vec<内部名>（用于通配符 import 展开）
+    /// Package name -> Vec<internal name> (used for wildcard import expansion)
     package_index: FxHashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
-    /// 来源 → Vec<内部名>（用于按文件删除）
+    /// Source -> Vec<internal name> (used for deleting by file)
     origin_index: FxHashMap<ClassOrigin, Vec<Arc<str>>>,
-    mro_cache: dashmap::DashMap<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>,
-    /// fuzzy 匹配器（用简单类名）
+    mro_cache: MroCacheMap,
+    /// Fuzzy matcher (using simple class name)
     fuzzy_matcher: Nucleo<Arc<str>>,
 }
 
