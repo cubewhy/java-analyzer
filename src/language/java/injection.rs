@@ -236,3 +236,191 @@ pub fn inject_and_determine(
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ropey::Rope;
+    use tree_sitter::Parser;
+
+    fn setup_ctx<'a>(
+        source: &'a str,
+        offset: usize,
+    ) -> (JavaContextExtractor<'a>, tree_sitter::Tree) {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .expect("failed to load java grammar");
+        let tree = parser.parse(source, None).unwrap();
+
+        let ctx = JavaContextExtractor {
+            source,
+            bytes: source.as_bytes(),
+            offset,
+            rope: Rope::from_str(source),
+        };
+        (ctx, tree)
+    }
+
+    #[test]
+    fn test_build_injected_source_trailing_dot() {
+        // Case 3: ERROR node with trailing dot
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                cl.
+            }
+        }
+        "#};
+        // Find the end of `cl.`
+        let offset = src.find("cl.").unwrap() + 3;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let injected = build_injected_source(&ctx, cursor_node);
+
+        // Expected behavior: Inject __KIRO__ after the dot and add a semicolon to close the statement,
+        // and close_open_brackets will automatically complete the missing `}`.
+        assert!(
+            injected.contains(&format!("cl.{SENTINEL};")),
+            "Injected source should contain sentinel and semicolon, got:\n{}",
+            injected
+        );
+    }
+
+    #[test]
+    fn test_build_injected_source_new_keyword_with_newline() {
+        // Case 1: A newline after the `new` keyword causes the AST to swallow the next line.
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new 
+                
+                System.out.println("hello");
+            }
+        }
+        "#};
+        let offset = src.find("new ").unwrap() + 4;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let injected = build_injected_source(&ctx, cursor_node);
+
+        // Expectation: Because a newline character follows `new`, it's inferred that the user hasn't finished writing the code, so `__KIRO__()` is injected directly as an empty constructor.
+        assert!(
+            injected.contains(&format!("new  {SENTINEL}()")),
+            "Injected source should treat separated new as complete call, got:\n{}",
+            injected
+        );
+    }
+
+    #[test]
+    fn test_build_injected_source_normal_identifier() {
+        // Case 4: Ordinary Identifiers
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                myVa
+            }
+        }
+        "#};
+        let offset = src.find("myVa").unwrap() + 4;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let injected = build_injected_source(&ctx, cursor_node);
+
+        // Expectation: Since there is no suffix, treat it as an expression statement and inject a semicolon.
+        assert!(
+            injected.contains(&format!("myVa{SENTINEL}")),
+            "Injected source should append sentinel to identifier, got:\n{}",
+            injected
+        );
+    }
+
+    #[test]
+    fn test_build_injected_source_scoped_type() {
+        // Case 4: scoped_type_identifier (FQN)
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                java.util.A
+            }
+        }
+        "#};
+        let offset = src.find("java.util.A").unwrap() + 11;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let injected = build_injected_source(&ctx, cursor_node);
+
+        // Expectation: When injecting package name types, add a semicolon to convert it to a valid MemberAccess.
+        assert!(
+            injected.contains(&format!("java.util.A{SENTINEL};")),
+            "Injected source should append semicolon for scoped types, got:\n{}",
+            injected
+        );
+    }
+
+    #[test]
+    /// Verify whether the CursorLocation can actually be resolved after injection.
+    fn test_inject_and_determine_member_access() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                cl.
+            }
+        }
+        "#};
+        let offset = src.find("cl.").unwrap() + 3;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let result = inject_and_determine(&ctx, cursor_node, None);
+        assert!(result.is_some(), "inject_and_determine should succeed");
+
+        let (location, query) = result.unwrap();
+
+        // Expected result: MemberAccess, receiver_expr is "cl", and query is empty.
+        assert!(
+            matches!(
+                &location,
+                CursorLocation::MemberAccess { member_prefix, receiver_expr, .. }
+                if member_prefix.is_empty() && receiver_expr == "cl"
+            ),
+            "Expected MemberAccess for cl., got {:?}",
+            location
+        );
+        assert_eq!(query, "", "Query should be empty");
+    }
+
+    #[test]
+    fn test_inject_and_determine_constructor() {
+        let src = indoc::indoc! {r#"
+        class A {
+            void f() {
+                new RandomCla
+            }
+        }
+        "#};
+        let offset = src.find("RandomCla").unwrap() + 9;
+        let (ctx, tree) = setup_ctx(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let result = inject_and_determine(&ctx, cursor_node, None);
+        assert!(result.is_some(), "inject_and_determine should succeed");
+
+        let (location, query) = result.unwrap();
+
+        assert!(
+            matches!(
+                &location,
+                CursorLocation::ConstructorCall { class_prefix, .. }
+                if class_prefix == "RandomCla"
+            ),
+            "Expected ConstructorCall with prefix RandomCla, got {:?}",
+            location
+        );
+        assert_eq!(query, "RandomCla", "Query should match the prefix");
+    }
+}
