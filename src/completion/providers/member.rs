@@ -160,7 +160,7 @@ impl CompletionProvider for MemberProvider {
                         let detail = if i == 0 {
                             scorer::field_detail(
                                 ctx.enclosing_internal_name.as_deref().unwrap_or(""),
-                                &class_meta,
+                                class_meta,
                                 field,
                             )
                         } else {
@@ -310,7 +310,7 @@ impl CompletionProvider for MemberProvider {
                     )
                     .with_detail(scorer::field_detail(
                         class_internal,
-                        &class_meta,
+                        class_meta,
                         field,
                     )),
                 );
