@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tree_sitter::{Node, Query};
 
 use crate::{
-    completion::LocalVar,
+    completion::{LocalVar, type_resolver::type_name::TypeName},
     language::{
         java::{
             JavaContextExtractor,
@@ -85,14 +85,14 @@ pub fn extract_locals(
             if raw_ty == "var" {
                 return Some(LocalVar {
                     name: Arc::from(name),
-                    type_internal: Arc::from("var"),
+                    type_internal: TypeName::new("var"),
                     init_expr: get_initializer_text(ty_node, ctx.bytes),
                 });
             }
 
             Some(LocalVar {
                 name: Arc::from(name),
-                type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
                 init_expr: None,
             })
         })
@@ -144,14 +144,16 @@ fn collect_misread_decls(ctx: &JavaContextExtractor, node: Node, vars: &mut Vec<
                         let lv = if type_name.as_deref() == Some("var") {
                             LocalVar {
                                 name: Arc::from(name),
-                                type_internal: Arc::from("var"),
+                                type_internal: TypeName::new("var"),
                                 init_expr: Some(init_text),
                             }
                         } else {
                             let raw_ty = type_name.as_deref().unwrap_or("Object");
                             LocalVar {
                                 name: Arc::from(name),
-                                type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                                type_internal: TypeName::new(
+                                    java_type_to_internal(raw_ty).as_str(),
+                                ),
                                 init_expr: None,
                             }
                         };
@@ -210,7 +212,7 @@ fn extract_params(
             let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
             Some(LocalVar {
                 name: Arc::from(name),
-                type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
                 init_expr: None,
             })
         })
@@ -253,12 +255,14 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                             return Some(match infer_type_from_initializer(ty_node, ctx.bytes) {
                                 Some(t) => LocalVar {
                                     name: Arc::from(name),
-                                    type_internal: Arc::from(java_type_to_internal(&t).as_str()),
+                                    type_internal: TypeName::new(
+                                        java_type_to_internal(&t).as_str(),
+                                    ),
                                     init_expr: None,
                                 },
                                 None => LocalVar {
                                     name: Arc::from(name),
-                                    type_internal: Arc::from("var"),
+                                    type_internal: TypeName::new("var"),
                                     init_expr: get_initializer_text(ty_node, ctx.bytes),
                                 },
                             });
@@ -266,7 +270,7 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
 
                         Some(LocalVar {
                             name: Arc::from(name),
-                            type_internal: Arc::from(java_type_to_internal(raw_ty).as_str()),
+                            type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
                             init_expr: None,
                         })
                     })

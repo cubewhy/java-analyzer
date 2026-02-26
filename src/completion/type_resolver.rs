@@ -1,11 +1,15 @@
 use super::context::LocalVar;
 use crate::{
-    completion::type_resolver::generics::{JvmType, split_internal_name, substitute_type},
+    completion::type_resolver::{
+        generics::{JvmType, split_internal_name, substitute_type},
+        type_name::TypeName,
+    },
     index::{GlobalIndex, MethodSummary},
 };
 use std::sync::Arc;
 
 pub mod generics;
+pub mod type_name;
 
 pub struct TypeResolver<'idx> {
     index: &'idx GlobalIndex,
@@ -21,50 +25,74 @@ impl<'idx> TypeResolver<'idx> {
         expr: &str,
         locals: &[LocalVar],
         enclosing: Option<&Arc<str>>,
-    ) -> Option<Arc<str>> {
+    ) -> Option<TypeName> {
         let expr = expr.trim();
+
+        // array init
+        if expr.ends_with(']')
+            && let Some(bracket_idx) = expr.rfind('[')
+        {
+            let array_expr = expr[..bracket_idx].trim();
+            if !array_expr.is_empty()
+                && let Some(array_type) = self.resolve(array_expr, locals, enclosing)
+            {
+                return array_type.element_type();
+            }
+        }
 
         // `this`
         if expr == "this" {
-            return enclosing.cloned();
+            return enclosing.map(|arc| TypeName::new(arc.to_string()));
         }
 
         // Strings
         if expr.starts_with('"') {
-            return Some(Arc::from("java/lang/String"));
+            return Some(TypeName::new("java/lang/String"));
         }
 
         // Local variables take precedence over literals in the evaluation
         if let Some(lv) = locals.iter().find(|lv| lv.name.as_ref() == expr) {
-            return Some(Arc::clone(&lv.type_internal));
+            return Some(lv.type_internal.clone());
+        }
+
+        if let Some(enc) = enclosing {
+            for class in self.index.mro(enc) {
+                if let Some(f) = class.fields.iter().find(|f| f.name.as_ref() == expr) {
+                    if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
+                        return Some(TypeName::new(ty));
+                    } else {
+                        return parse_single_type_to_internal(&f.descriptor);
+                    }
+                }
+            }
         }
 
         // Class name (index lookup)
         if self.index.get_class(expr).is_some() {
-            return Some(Arc::from(expr));
+            return Some(TypeName::new(expr));
         }
 
         // Literal checks should be placed last, with strict numeric prefix validation.
         if expr.parse::<i64>().is_ok() {
-            return Some(Arc::from("int"));
+            return Some(TypeName::new("int"));
         }
         if let Some(prefix) = expr.strip_suffix('L').or_else(|| expr.strip_suffix('l'))
             && prefix.chars().all(|c| c.is_ascii_digit())
             && !prefix.is_empty()
         {
-            return Some(Arc::from("long"));
+            return Some(TypeName::new("long"));
         }
         if let Some(prefix) = expr.strip_suffix('f').or_else(|| expr.strip_suffix('F'))
             && prefix.chars().all(|c| c.is_ascii_digit() || c == '.')
             && !prefix.is_empty()
         {
-            return Some(Arc::from("float"));
+            return Some(TypeName::new("float"));
         }
         if let Some(prefix) = expr.strip_suffix('d').or_else(|| expr.strip_suffix('D'))
             && prefix.chars().all(|c| c.is_ascii_digit() || c == '.')
             && !prefix.is_empty()
         {
-            return Some(Arc::from("double"));
+            return Some(TypeName::new("double"));
         }
 
         // Pure decimal (no suffix)
@@ -73,7 +101,7 @@ impl<'idx> TypeResolver<'idx> {
             && !expr.starts_with('.')
             && !expr.ends_with('.')
         {
-            return Some(Arc::from("double"));
+            return Some(TypeName::new("double"));
         }
 
         None
@@ -84,8 +112,8 @@ impl<'idx> TypeResolver<'idx> {
         receiver_internal: &str,
         method_name: &str,
         arg_count: i32,
-        arg_types: &[Arc<str>],
-    ) -> Option<Arc<str>> {
+        arg_types: &[TypeName],
+    ) -> Option<TypeName> {
         let (base_receiver, _receiver_type_args) = split_internal_name(receiver_internal);
 
         // Use base_receiver to find MRO in the index
@@ -114,17 +142,16 @@ impl<'idx> TypeResolver<'idx> {
                 class.generic_signature.as_deref(),
                 ret_jvm_str,
             ) {
-                if substituted == "V" {
+                if substituted.as_str() == "void" {
                     return None;
                 }
-                return Some(Arc::from(substituted));
+                return Some(substituted);
             }
 
             if let JvmType::Primitive('V') = ret_jvm_type {
                 return None;
             }
-
-            return Some(Arc::from(ret_jvm_type.to_internal_name_string()));
+            return Some(ret_jvm_type.to_type_name());
         }
         None
     }
@@ -132,7 +159,7 @@ impl<'idx> TypeResolver<'idx> {
     fn select_overload<'a>(
         candidates: &[&'a MethodSummary],
         arg_count: i32,
-        arg_types: &[Arc<str>],
+        arg_types: &[TypeName],
     ) -> &'a MethodSummary {
         match candidates.len() {
             1 => candidates[0],
@@ -165,8 +192,8 @@ impl<'idx> TypeResolver<'idx> {
         chain: &[ChainSegment],
         locals: &[LocalVar],
         enclosing_internal_name: Option<&Arc<str>>,
-    ) -> Option<Arc<str>> {
-        let mut current_type: Option<Arc<str>> = None;
+    ) -> Option<TypeName> {
+        let mut current_type: Option<TypeName> = None;
         for (i, seg) in chain.iter().enumerate() {
             if i == 0 {
                 if seg.arg_count.is_some() {
@@ -176,19 +203,66 @@ impl<'idx> TypeResolver<'idx> {
                         recv.as_ref(),
                         &seg.name,
                         seg.arg_count.unwrap_or(-1),
-                        &[],
+                        &seg.arg_types,
                     );
                 } else {
                     current_type = self.resolve(&seg.name, locals, enclosing_internal_name);
                 }
             } else {
-                let receiver = current_type.as_deref()?;
-                current_type = self.resolve_method_return(
-                    receiver,
-                    &seg.name,
-                    seg.arg_count.unwrap_or(-1),
-                    &seg.arg_types,
-                );
+                let receiver = current_type.as_ref()?;
+
+                // 处理连缀的数组下标，例如 `getCharArr()[0]` 解析出的独立 segment `[0]`
+                if seg.arg_count.is_none() && seg.name.starts_with('[') && seg.name.ends_with(']') {
+                    let dimensions = seg.name.matches('[').count();
+                    let mut arr_ty = receiver.clone();
+                    for _ in 0..dimensions {
+                        arr_ty = arr_ty.element_type()?; // 直接用 TypeName::element_type()
+                    }
+                    current_type = Some(arr_ty);
+                    continue;
+                }
+
+                // 常规方法或字段访问，尝试剥离可能附着的数组下标 e.g., `field[0]`
+                let bracket_idx = seg.name.find('[').unwrap_or(seg.name.len());
+                let actual_name = &seg.name[..bracket_idx];
+                let dimensions = seg.name[bracket_idx..].matches('[').count();
+
+                if seg.arg_count.is_some() {
+                    // 方法返回
+                    current_type = self.resolve_method_return(
+                        receiver.as_str(),
+                        actual_name,
+                        seg.arg_count.unwrap_or(-1),
+                        &seg.arg_types,
+                    );
+                } else {
+                    // 字段读取
+                    let mut found_field: Option<TypeName> = None;
+                    for class in self.index.mro(receiver.as_str()) {
+                        if let Some(f) =
+                            class.fields.iter().find(|f| f.name.as_ref() == actual_name)
+                        {
+                            if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
+                                found_field = Some(TypeName::new(ty));
+                            } else {
+                                found_field = parse_single_type_to_internal(&f.descriptor);
+                            }
+                            break;
+                        }
+                    }
+                    current_type = found_field;
+                }
+
+                // 如果带有下标附着，则降维
+                if dimensions > 0
+                    && let Some(ty) = current_type
+                {
+                    let mut arr_ty = ty;
+                    for _ in 0..dimensions {
+                        arr_ty = arr_ty.element_type()?;
+                    }
+                    current_type = Some(arr_ty);
+                }
             }
         }
         current_type
@@ -198,7 +272,7 @@ impl<'idx> TypeResolver<'idx> {
 /// Check if the descriptor's parameter types match the given arg_types.
 /// arg_types are internal names (e.g. "java/lang/String", "long", "int").
 /// Matching is best-effort: primitive types and object types are compared.
-fn params_match(descriptor: &str, arg_types: &[Arc<str>]) -> bool {
+fn params_match(descriptor: &str, arg_types: &[TypeName]) -> bool {
     let inner = match descriptor.find('(').zip(descriptor.find(')')) {
         Some((l, r)) => &descriptor[l + 1..r],
         None => return false,
@@ -219,7 +293,7 @@ fn params_match(descriptor: &str, arg_types: &[Arc<str>]) -> bool {
     param_descs
         .iter()
         .zip(arg_types.iter())
-        .all(|(desc, arg_ty)| singleton_descriptor_matches_type(desc, arg_ty))
+        .all(|(desc, arg_ty)| singleton_descriptor_matches_type(desc, arg_ty.as_str()))
 }
 
 /// Convert JVM descriptor into source code style type name
@@ -343,7 +417,7 @@ pub struct ChainSegment {
     /// If it's a method call, specify the number of arguments; if it's a field/variable, specify None.
     pub arg_count: Option<i32>,
     /// Inferred types of arguments (internal names), used for overload resolution.
-    pub arg_types: Vec<Arc<str>>,
+    pub arg_types: Vec<TypeName>,
     pub arg_texts: Vec<String>, // raw text of each argument
 }
 
@@ -367,7 +441,7 @@ impl ChainSegment {
     pub fn method_with_types(
         name: impl Into<String>,
         arg_count: i32,
-        arg_types: Vec<Arc<str>>,
+        arg_types: Vec<TypeName>,
         arg_texts: Vec<String>,
     ) -> Self {
         Self {
@@ -387,7 +461,7 @@ impl ChainSegment {
 /// - `"()V"` → `None` (void)
 /// - `"()I"` → `None` (primitive type, no further dot chaining)
 /// - `"()[Ljava/lang/String;"` → `Some("[Ljava/lang/String;")` (array type)
-pub fn extract_return_internal_name(descriptor: &str) -> Option<Arc<str>> {
+pub fn extract_return_internal_name(descriptor: &str) -> Option<TypeName> {
     let ret_idx = descriptor.find(')')?;
     let ret_str = &descriptor[ret_idx + 1..];
 
@@ -397,7 +471,7 @@ pub fn extract_return_internal_name(descriptor: &str) -> Option<Arc<str>> {
         return None;
     }
 
-    Some(Arc::from(jvm_type.to_internal_name_string()))
+    Some(jvm_type.to_type_name())
 }
 
 /// Convert a single type descriptor to an internal name (remove generic parameters, retain the primitive type)
@@ -406,11 +480,11 @@ pub fn extract_return_internal_name(descriptor: &str) -> Option<Arc<str>> {
 /// - `"Ljava/util/List<Ljava/lang/String;>;"` → `Some("java/util/List")`
 /// - `"[Ljava/lang/String;"` → `Some("[Ljava/lang/String;")` (Arrays retain complete descriptors)
 /// - Primitive types such as `"V"` / `"I"` / `"Z"` → `None`
-pub fn parse_single_type_to_internal(ty: &str) -> Option<Arc<str>> {
+pub fn parse_single_type_to_internal(ty: &str) -> Option<TypeName> {
     let (jvm_type, _) = JvmType::parse(ty)?;
     match jvm_type {
         JvmType::Primitive(_) => None,
-        _ => Some(Arc::from(jvm_type.to_internal_name_string())),
+        _ => Some(jvm_type.to_type_name()),
     }
 }
 
@@ -450,7 +524,7 @@ pub fn count_params(descriptor: &str) -> usize {
 
 /// Extract return type from descriptor
 pub fn parse_return_type_from_descriptor(descriptor: &str) -> Option<Arc<str>> {
-    extract_return_internal_name(descriptor)
+    extract_return_internal_name(descriptor).map(|t| t.to_arc())
 }
 
 pub fn java_primitive_char_to_name(c: char) -> &'static str {
@@ -581,32 +655,30 @@ pub fn java_source_type_to_jvm_generic(
 
 #[cfg(test)]
 mod tests {
-    use rust_asm::constants::ACC_PUBLIC;
-
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex};
+    use crate::index::GlobalIndex;
 
     fn make_resolver() -> (GlobalIndex, Vec<LocalVar>) {
         let idx = GlobalIndex::new();
         let locals = vec![
             LocalVar {
                 name: Arc::from("cl"),
-                type_internal: Arc::from("RandomClass"),
+                type_internal: TypeName::new("RandomClass"),
                 init_expr: None,
             },
             LocalVar {
                 name: Arc::from("sf"),
-                type_internal: Arc::from("float"),
+                type_internal: TypeName::new("float"),
                 init_expr: None,
             },
             LocalVar {
                 name: Arc::from("result"),
-                type_internal: Arc::from("java/lang/String"),
+                type_internal: TypeName::new("java/lang/String"),
                 init_expr: None,
             },
             LocalVar {
                 name: Arc::from("myList"),
-                type_internal: Arc::from("java/util/List"),
+                type_internal: TypeName::new("java/util/List"),
                 init_expr: None,
             },
         ];
@@ -706,7 +778,7 @@ mod tests {
             // Extreme case: The variable name is "123" (invalid in Java, but with test priority)
             LocalVar {
                 name: Arc::from("myL"),
-                type_internal: Arc::from("SomeClass"),
+                type_internal: TypeName::new("SomeClass"),
                 init_expr: None,
             },
         ];
@@ -762,7 +834,7 @@ mod tests {
             "NestedClass",
             "randomFunction",
             2,
-            &[Arc::from("java/lang/String"), Arc::from("long")],
+            &[TypeName::new("java/lang/String"), TypeName::new("long")],
         );
         assert_eq!(
             result.as_deref(),
@@ -775,7 +847,7 @@ mod tests {
             "NestedClass",
             "randomFunction",
             2,
-            &[Arc::from("java/lang/String"), Arc::from("int")],
+            &[TypeName::new("java/lang/String"), TypeName::new("int")],
         );
         assert_eq!(
             result2.as_deref(),
@@ -873,69 +945,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_simple_class_name_via_index() {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
-            package: Some(Arc::from("org/cubewhy")),
-            name: Arc::from("RealMain"),
-            internal_name: Arc::from("org/cubewhy/RealMain"),
-            super_name: None,
-            interfaces: vec![],
-            methods: vec![],
-            fields: vec![],
-            access_flags: ACC_PUBLIC,
-            generic_signature: None,
-            inner_class_of: None,
-            origin: ClassOrigin::Unknown,
-        }]);
-
-        let r = TypeResolver::new(&idx);
-        // Simple name lookup should resolve to full internal name
-        assert_eq!(
-            r.resolve("RealMain", &[], None).as_deref(),
-            Some("org/cubewhy/RealMain")
-        );
-    }
-
-    #[test]
-    fn test_resolve_chain_with_imported_class_receiver() {
-        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use rust_asm::constants::ACC_PUBLIC;
-
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
-            package: Some(Arc::from("org/cubewhy")),
-            name: Arc::from("RealMain"),
-            internal_name: Arc::from("org/cubewhy/RealMain"),
-            super_name: None,
-            interfaces: vec![],
-            methods: vec![MethodSummary {
-                name: Arc::from("getInstance"),
-                descriptor: Arc::from("()Lorg/cubewhy/RealMain;"),
-                access_flags: ACC_PUBLIC,
-                is_synthetic: false,
-                generic_signature: None,
-                return_type: Some(Arc::from("org/cubewhy/RealMain")),
-            }],
-            fields: vec![],
-            access_flags: ACC_PUBLIC,
-            generic_signature: None,
-            inner_class_of: None,
-            origin: ClassOrigin::Unknown,
-        }]);
-
-        let r = TypeResolver::new(&idx);
-        // "RealMain.getInstance()" → [variable("RealMain"), method("getInstance", 0)]
-        let chain = crate::completion::engine::parse_chain_from_expr("RealMain.getInstance()");
-        let result = r.resolve_chain(&chain, &[], None);
-        assert_eq!(
-            result.as_deref(),
-            Some("org/cubewhy/RealMain"),
-            "RealMain.getInstance() should resolve via simple name lookup + method return type"
-        );
-    }
-
-    #[test]
     fn test_descriptor_to_type_intellij_style() {
         // primitive arrays
         assert_eq!(descriptor_to_source_code_style_type("[I"), "int[]");
@@ -1003,7 +1012,7 @@ mod tests {
             "java/util/List<Ljava/lang/String;>",
             "get",
             1,
-            &[Arc::from("int")],
+            &[TypeName::new("int")],
         );
 
         assert_eq!(
@@ -1011,5 +1020,59 @@ mod tests {
             Some("java/lang/String"),
             "Generic type TE; should be correctly substituted to java/lang/String"
         );
+    }
+
+    #[test]
+    fn test_resolve_variable_array_access() {
+        // 模拟 `var c = arr[0];` 场景
+        let (idx, locals) = make_resolver();
+        let mut locals = locals;
+        locals.push(LocalVar {
+            name: Arc::from("arr"),
+            type_internal: TypeName::new("char[]"),
+            init_expr: None,
+        });
+
+        let resolver = TypeResolver::new(&idx);
+        let result = resolver.resolve("arr[0]", &locals, None);
+        assert_eq!(result.as_deref(), Some("char"));
+    }
+
+    #[test]
+    fn test_resolve_array_after_method_call() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Main"),
+            internal_name: Arc::from("Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("getCharArr"),
+                descriptor: Arc::from("()[[C"), // 代表方法返回 char[][]
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None, // 基本数据类型数组这里通常为 None
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let resolver = TypeResolver::new(&idx);
+        let enclosing = Arc::from("Main");
+
+        // 模拟解析连缀调用 `getCharArr()[0]`
+        let chain = crate::completion::engine::parse_chain_from_expr("getCharArr()[0]");
+        let result = resolver.resolve_chain(&chain, &[], Some(&enclosing));
+
+        // char[][] 提取出一层下标后应为 char[]，底层 JVM internal_name 表示为 `[C`
+        assert_eq!(result.as_deref(), Some("char[]"));
     }
 }

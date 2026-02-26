@@ -40,7 +40,7 @@ impl CompletionProvider for LocalVarProvider {
                     Arc::clone(&lv.name),
                     lv.name.to_string(),
                     CandidateKind::LocalVariable {
-                        type_descriptor: Arc::clone(&lv.type_internal),
+                        type_descriptor: lv.type_internal.to_arc(),
                     },
                     self.name(),
                 )
@@ -55,6 +55,7 @@ impl CompletionProvider for LocalVarProvider {
 mod tests {
     use super::*;
     use crate::completion::context::{CompletionContext, CursorLocation, LocalVar};
+    use crate::completion::type_resolver::type_name::TypeName;
     use crate::index::GlobalIndex;
     use std::sync::Arc;
 
@@ -67,7 +68,7 @@ mod tests {
             vars.into_iter()
                 .map(|(name, ty)| LocalVar {
                     name: Arc::from(name),
-                    type_internal: Arc::from(ty),
+                    type_internal: TypeName::new(ty),
                     init_expr: None,
                 })
                 .collect(),
@@ -136,7 +137,7 @@ mod tests {
             "aV",
             vec![LocalVar {
                 name: Arc::from("aVar"),
-                type_internal: Arc::from("java/lang/String"),
+                type_internal: TypeName::new("java/lang/String"),
                 init_expr: None,
             }],
             None,
@@ -186,7 +187,7 @@ mod tests {
             "",
             vec![LocalVar {
                 name: Arc::from("cl"),
-                type_internal: Arc::from("RandomClass"),
+                type_internal: TypeName::new("RandomClass"),
                 init_expr: None,
             }],
             None,
@@ -212,7 +213,7 @@ mod tests {
             "aV",
             vec![LocalVar {
                 name: Arc::from("aVar"),
-                type_internal: Arc::from("java/lang/String"),
+                type_internal: TypeName::new("java/lang/String"),
                 init_expr: None,
             }],
             None,

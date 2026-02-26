@@ -18,7 +18,10 @@ use crate::completion::providers::name_suggestion::NameSuggestionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
-use crate::completion::type_resolver::{ChainSegment, singleton_descriptor_to_type};
+use crate::completion::type_resolver::type_name::TypeName;
+use crate::completion::type_resolver::{
+    ChainSegment, parse_single_type_to_internal, singleton_descriptor_to_type,
+};
 use crate::index::GlobalIndex;
 use std::sync::Arc;
 
@@ -137,25 +140,22 @@ impl CompletionEngine {
             tracing::debug!(?resolved, "enrich_context: resolved before final match");
 
             // If the result is a simple name (without '/'), it needs to be further parsed into an internal name.
-            *receiver_type = match resolved.as_deref() {
+            *receiver_type = match resolved {
                 None => {
                     tracing::debug!("enrich_context: final match -> None");
                     None
                 }
-                Some(ty) if ty.contains('/') => {
-                    tracing::debug!(ty, "enrich_context: final match -> Contains '/'");
-                    resolved
-                }
+                Some(ref ty) if ty.contains_slash() => Some(ty.to_arc()),
                 Some(ty) => {
                     let r = resolve_simple_to_internal(
-                        ty,
+                        ty.as_str(),
                         &ctx.existing_imports,
                         ctx.enclosing_package.as_deref(),
                         index,
                     );
                     tracing::debug!(
                         ?r,
-                        ty,
+                        ?ty,
                         "enrich_context: final match -> resolve_simple_to_internal returned"
                     );
                     r
@@ -205,12 +205,10 @@ impl CompletionEngine {
                 })
                 .collect();
 
-            let locals_snapshot: Vec<LocalVar> = ctx.local_variables.clone();
-
             for (idx_in_vec, init_expr) in to_resolve {
                 if let Some(resolved) = resolve_var_init_expr(
                     &init_expr,
-                    &locals_snapshot,
+                    &ctx.local_variables,
                     ctx.enclosing_internal_name.as_ref(),
                     &resolver,
                     &ctx.existing_imports,
@@ -236,7 +234,7 @@ fn resolve_array_access_type(
     _existing_imports: &[Arc<str>],
     _enclosing_package: Option<&str>,
     _index: &GlobalIndex,
-) -> Option<Arc<str>> {
+) -> Option<TypeName> {
     let bracket = expr.rfind('[')?;
     if !expr.trim_end().ends_with(']') {
         return None;
@@ -246,7 +244,7 @@ fn resolve_array_access_type(
         return None;
     }
     let array_type = resolver.resolve(array_expr, locals, enclosing_internal)?;
-    element_type_of_array(&array_type)
+    array_type.element_type()
 }
 
 fn resolve_var_init_expr(
@@ -257,27 +255,39 @@ fn resolve_var_init_expr(
     existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
     index: &GlobalIndex,
-) -> Option<Arc<str>> {
+) -> Option<TypeName> {
     let expr = expr.trim();
     if let Some(rest) = expr.strip_prefix("new ") {
-        let class_name = rest.split('(').next()?.split('<').next()?.trim();
-        return crate::completion::import_utils::resolve_simple_to_internal(
-            class_name,
-            existing_imports,
-            enclosing_package,
-            index,
-        );
-    }
-    if let Some(array_type) = resolve_array_access_type(
-        expr,
-        locals,
-        enclosing_internal,
-        resolver,
-        existing_imports,
-        enclosing_package,
-        index,
-    ) {
-        return Some(array_type);
+        // 寻找类型声明的边界：可能是普通构造函数 '('、泛型 '<'，或者是数组的 '['、'{'
+        let boundary_idx = rest.find(['(', '<', '[', '{']).unwrap_or(rest.len());
+        let type_name = rest[..boundary_idx].trim();
+
+        // 解析基础类型，同时为 primitive 类型做白名单兜底
+        let resolved_base: TypeName = match type_name {
+            "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" => {
+                TypeName::new(type_name)
+            }
+            _ => TypeName::from(crate::completion::import_utils::resolve_simple_to_internal(
+                type_name,
+                existing_imports,
+                enclosing_package,
+                index,
+            )?),
+        };
+
+        let after_type = rest[boundary_idx..].trim_start();
+
+        if after_type.starts_with('[') || after_type.starts_with('{') {
+            let brace_idx = after_type.find('{').unwrap_or(after_type.len());
+            let dimensions = after_type[..brace_idx].matches('[').count();
+            let mut array_ty = resolved_base;
+            for _ in 0..dimensions {
+                array_ty = array_ty.wrap_array();
+            }
+            return Some(array_ty);
+        }
+
+        return Some(resolved_base);
     }
 
     let chain = crate::completion::engine::parse_chain_from_expr(expr);
@@ -292,7 +302,16 @@ fn resolve_var_init_expr(
             index,
         );
     }
-    None
+
+    resolve_array_access_type(
+        expr,
+        locals,
+        enclosing_internal,
+        resolver,
+        existing_imports,
+        enclosing_package,
+        index,
+    )
 }
 
 /// 统一且健壮的调用链类型推导逻辑 (支持连缀方法调用和字段读取)
@@ -304,18 +323,18 @@ fn evaluate_chain(
     existing_imports: &[Arc<str>],
     enclosing_package: Option<&str>,
     index: &GlobalIndex,
-) -> Option<Arc<str>> {
-    let mut current: Option<Arc<str>> = None;
+) -> Option<TypeName> {
+    let mut current: Option<TypeName> = None;
     for (i, seg) in chain.iter().enumerate() {
         if i == 0 {
             if seg.arg_count.is_some() {
                 let recv_internal = enclosing_internal?;
-                let arg_types: Vec<Arc<str>> = seg
+                let arg_types: Vec<TypeName> = seg
                     .arg_texts
                     .iter()
                     .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
                     .collect();
-                let arg_types_ref: &[Arc<str>] = if arg_types.len() == seg.arg_texts.len() {
+                let arg_types_ref: &[TypeName] = if arg_types.len() == seg.arg_texts.len() {
                     &arg_types
                 } else {
                     &[]
@@ -345,7 +364,7 @@ fn evaluate_chain(
                             .unwrap_or(enclosing);
 
                         if seg.name == enclosing_simple {
-                            current = Some(Arc::clone(enclosing));
+                            current = Some(TypeName::new(enclosing.as_ref()));
                         }
                     }
 
@@ -356,7 +375,8 @@ fn evaluate_chain(
                             existing_imports,
                             enclosing_package,
                             index,
-                        );
+                        )
+                        .map(TypeName::from);
 
                         tracing::debug!(
                             ?current,
@@ -367,37 +387,56 @@ fn evaluate_chain(
                 }
             }
         } else {
-            let recv = current.as_deref()?;
-            let recv_full = if recv.contains('/') || index.get_class(recv).is_some() {
-                Arc::from(recv)
+            let recv = current.as_ref()?;
+
+            // === 新增：数组下标 segment，如 "[0]" ===
+            if seg.arg_count.is_none() && seg.name.starts_with('[') && seg.name.ends_with(']') {
+                let dimensions = seg.name.matches('[').count();
+                let mut ty = recv.clone();
+                for _ in 0..dimensions {
+                    ty = ty.element_type()?;
+                }
+                current = Some(ty);
+                continue;
+            }
+
+            let recv_str = recv.as_str();
+            let recv_full: TypeName = if recv_str.contains('/')
+                || index.get_class(recv_str).is_some()
+            {
+                recv.clone()
             } else {
-                resolve_simple_to_internal(recv, existing_imports, enclosing_package, index)?
+                resolve_simple_to_internal(recv_str, existing_imports, enclosing_package, index)?
+                    .into()
             };
 
             if seg.arg_count.is_some() {
-                // Method call
-                let arg_types: Vec<Arc<str>> = seg
+                let arg_types: Vec<TypeName> = seg
                     .arg_texts
                     .iter()
                     .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
                     .collect();
-                let arg_types_ref: &[Arc<str>] = if arg_types.len() == seg.arg_texts.len() {
+                let arg_types_ref = if arg_types.len() == seg.arg_texts.len() {
                     &arg_types
                 } else {
-                    &[]
+                    &vec![]
                 };
                 current = resolver.resolve_method_return(
-                    &recv_full,
+                    recv_full.as_str(),
                     &seg.name,
                     seg.arg_count.unwrap_or(-1),
                     arg_types_ref,
                 );
             } else {
-                // Field access
+                // 字段访问，支持数组字段
                 let mut found = None;
-                for m in index.mro(&recv_full) {
+                for m in index.mro(recv_full.base()) {
                     if let Some(f) = m.fields.iter().find(|f| f.name.as_ref() == seg.name) {
-                        found = singleton_descriptor_to_type(&f.descriptor).map(Arc::from);
+                        if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
+                            found = Some(TypeName::new(ty));
+                        } else {
+                            found = parse_single_type_to_internal(&f.descriptor);
+                        }
                         break;
                     }
                 }
@@ -537,27 +576,6 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
     segments
 }
 
-pub(crate) fn element_type_of_array(array_internal: &str) -> Option<Arc<str>> {
-    if let Some(stripped) = array_internal.strip_prefix('[') {
-        return match stripped.chars().next()? {
-            'L' => {
-                let inner = stripped[1..].split(';').next()?;
-                Some(Arc::from(inner.split('<').next()?))
-            }
-            '[' => Some(Arc::from(stripped)),
-            _ => singleton_descriptor_to_type(stripped).map(Arc::from),
-        };
-    }
-    if let Some(base) = array_internal.strip_suffix("[]") {
-        let base = base.trim();
-        match base {
-            "" => return None,
-            _ => return Some(Arc::from(base)),
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,7 +682,7 @@ mod tests {
             "f",
             vec![LocalVar {
                 name: Arc::from("cl"),
-                type_internal: Arc::from("RandomClass"),
+                type_internal: TypeName::new("RandomClass"),
                 init_expr: None,
             }],
             Some(Arc::from("Main")),
@@ -695,7 +713,7 @@ mod tests {
             "",
             vec![LocalVar {
                 name: Arc::from("cl"),
-                type_internal: Arc::from("RandomClass"),
+                type_internal: TypeName::new("RandomClass"),
                 init_expr: None,
             }],
             Some(Arc::from("Main")),
@@ -722,7 +740,7 @@ mod tests {
             "f",
             vec![LocalVar {
                 name: Arc::from("cl"),
-                type_internal: Arc::from("RandomClass"),
+                type_internal: TypeName::new("RandomClass"),
                 init_expr: None,
             }],
             Some(Arc::from("Main")),
@@ -931,12 +949,12 @@ mod tests {
             vec![
                 LocalVar {
                     name: Arc::from("nc"),
-                    type_internal: Arc::from("NestedClass"),
+                    type_internal: TypeName::new("NestedClass"),
                     init_expr: None,
                 },
                 LocalVar {
                     name: Arc::from("str"),
-                    type_internal: Arc::from("var"),
+                    type_internal: TypeName::new("var"),
                     init_expr: Some("nc.randomFunction()".to_string()),
                 },
             ],
@@ -1001,12 +1019,12 @@ mod tests {
             vec![
                 LocalVar {
                     name: Arc::from("nc"),
-                    type_internal: Arc::from("NestedClass"),
+                    type_internal: TypeName::new("NestedClass"),
                     init_expr: None,
                 },
                 LocalVar {
                     name: Arc::from("str"),
-                    type_internal: Arc::from("var"),
+                    type_internal: TypeName::new("var"),
                     init_expr: Some("nc.randomFunction(\"a\", 1l)".to_string()),
                 },
             ],
@@ -1059,7 +1077,7 @@ mod tests {
             "",
             vec![LocalVar {
                 name: Arc::from("str"),
-                type_internal: Arc::from("var"),
+                type_internal: TypeName::new("var"),
                 init_expr: Some("getString()".to_string()),
             }],
             Some(Arc::from("Main")),
@@ -1211,12 +1229,12 @@ mod tests {
             vec![
                 LocalVar {
                     name: Arc::from("args"),
-                    type_internal: Arc::from("String[]"),
+                    type_internal: TypeName::new("String[]"),
                     init_expr: None,
                 },
                 LocalVar {
                     name: Arc::from("a"),
-                    type_internal: Arc::from("var"),
+                    type_internal: TypeName::new("var"),
                     init_expr: Some("args[0]".to_string()),
                 },
             ],
@@ -1248,12 +1266,12 @@ mod tests {
             vec![
                 LocalVar {
                     name: Arc::from("nums"),
-                    type_internal: Arc::from("int[]"),
+                    type_internal: TypeName::new("int[]"),
                     init_expr: None,
                 },
                 LocalVar {
                     name: Arc::from("x"),
-                    type_internal: Arc::from("var"),
+                    type_internal: TypeName::new("var"),
                     init_expr: Some("nums[0]".to_string()),
                 },
             ],
@@ -1304,7 +1322,7 @@ mod tests {
             "",
             vec![LocalVar {
                 name: Arc::from("b"),
-                type_internal: Arc::from("String[]"),
+                type_internal: TypeName::new("String[]"),
                 init_expr: None,
             }],
             None,
@@ -1316,30 +1334,6 @@ mod tests {
         if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
             assert_eq!(receiver_type.as_deref(), Some("java/lang/String"));
         }
-    }
-
-    #[test]
-    fn test_element_type_source_form() {
-        assert_eq!(element_type_of_array("String[]").as_deref(), Some("String"));
-        assert_eq!(
-            element_type_of_array("java/lang/String[]").as_deref(),
-            Some("java/lang/String")
-        );
-        assert_eq!(element_type_of_array("int[]").as_deref(), Some("int"));
-        assert_eq!(element_type_of_array("double[]").as_deref(), Some("double"));
-    }
-
-    #[test]
-    fn test_element_type_descriptor_form() {
-        assert_eq!(
-            element_type_of_array("[Ljava/lang/String;").as_deref(),
-            Some("java/lang/String")
-        );
-        assert_eq!(element_type_of_array("[I").as_deref(), Some("int"));
-        assert_eq!(
-            element_type_of_array("[[Ljava/lang/String;").as_deref(),
-            Some("[Ljava/lang/String;")
-        );
     }
 
     #[test]
@@ -1403,5 +1397,150 @@ mod tests {
         );
         engine.enrich_context(&mut ctx, &idx);
         assert!(matches!(&ctx.location, CursorLocation::MemberAccess { .. }));
+    }
+
+    #[test]
+    fn test_var_array_initializer_and_access() {
+        use crate::completion::context::LocalVar;
+        use crate::index::{ClassMetadata, ClassOrigin};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "strItem".to_string(), // 触发位置
+            },
+            "",
+            vec![
+                // var arr = new char[]{};
+                LocalVar {
+                    name: Arc::from("arr"),
+                    type_internal: TypeName::new("char[]"),
+                    init_expr: None,
+                },
+                // var c = arr[0];
+                LocalVar {
+                    name: Arc::from("c"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("arr[0]".to_string()),
+                },
+                // var strArr = new String[]{"[1]", "[2]"}; (标准对象数组，带干扰符号)
+                LocalVar {
+                    name: Arc::from("strArr"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("new String[]{\"[1]\", \"[2]\"}".to_string()),
+                },
+                // var strItem = strArr[1];
+                LocalVar {
+                    name: Arc::from("strItem"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("strArr[1]".to_string()),
+                },
+            ],
+            None,
+            None,
+            None,
+            vec![], // 没传 import，String 可以被兜底或者需要完整包名？
+        );
+
+        // 注入默认 java.lang.* import 来确保 String 能正常被 resolve_simple_to_internal 解析
+        ctx.existing_imports.push(Arc::from("java.lang.*"));
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        // 校验 c (arr[0]) 被推断为 char
+        let c_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "c")
+            .unwrap();
+        assert_eq!(c_var.type_internal.as_ref(), "char");
+
+        // 校验 strArr (new String[]...) 被推断为 java/lang/String[]
+        let str_arr_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "strArr")
+            .unwrap();
+        assert_eq!(str_arr_var.type_internal.as_ref(), "java/lang/String[]");
+
+        // 校验 strItem (strArr[1]) 被推断为 java/lang/String
+        let str_item_var = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "strItem")
+            .unwrap();
+        assert_eq!(str_item_var.type_internal.as_ref(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_var_chained_array_access_from_method() {
+        // 验证 getArr()[0] 这种通过方法调用拿到数组再取下标的情况
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: None,
+            name: Arc::from("Main"),
+            internal_name: Arc::from("Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("getArr"),
+                descriptor: Arc::from("()[Ljava/lang/String;"),
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "item".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("item"),
+                type_internal: TypeName::new("var"),
+                init_expr: Some("getArr()[0]".to_string()),
+            }],
+            Some(Arc::from("Main")),
+            Some(Arc::from("Main")),
+            None,
+            vec![],
+        );
+        engine.enrich_context(&mut ctx, &idx);
+        let item = ctx
+            .local_variables
+            .iter()
+            .find(|v| v.name.as_ref() == "item")
+            .unwrap();
+        assert_eq!(item.type_internal.as_ref(), "java/lang/String");
     }
 }

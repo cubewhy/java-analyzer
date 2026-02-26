@@ -6,7 +6,10 @@ use super::super::{
     scorer::{self, AccessFilter},
 };
 use super::CompletionProvider;
-use crate::{completion::fuzzy, index::GlobalIndex};
+use crate::{
+    completion::{fuzzy, type_resolver::type_name::TypeName},
+    index::GlobalIndex,
+};
 use std::sync::Arc;
 
 pub struct MemberProvider;
@@ -424,7 +427,7 @@ fn resolve_receiver_type(
 
         if ty.contains('/') {
             tracing::debug!(ty, "type contains '/', returning directly");
-            return Some(Arc::clone(&lv.type_internal));
+            return Some(lv.type_internal.to_arc());
         }
 
         let result = resolve_complex_type_to_internal(ty, ctx, index);
@@ -638,7 +641,9 @@ fn resolve_method_call_receiver(
 
     let enclosing = ctx.enclosing_internal_name.as_deref()?;
     let resolver = crate::completion::type_resolver::TypeResolver::new(index);
-    resolver.resolve_method_return(enclosing, method_name, arg_count, &[])
+    resolver
+        .resolve_method_return(enclosing, method_name, arg_count, &[])
+        .map(|i| TypeName::to_arc(&i))
 }
 
 /// Resolves simple class names to internal names
@@ -689,6 +694,7 @@ mod tests {
     use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 
     use crate::completion::context::CurrentClassMember;
+    use crate::completion::type_resolver::type_name::TypeName;
     use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodSummary};
     use crate::language::Language;
     use crate::{
@@ -785,7 +791,7 @@ mod tests {
             prefix,
             vec![LocalVar {
                 name: Arc::from(var_name),
-                type_internal: Arc::from(var_type),
+                type_internal: TypeName::new(var_type),
                 init_expr: None,
             }],
             None,
@@ -834,7 +840,7 @@ mod tests {
             prefix,
             vec![LocalVar {
                 name: Arc::from(var_name),
-                type_internal: Arc::from(var_type_simple), // simple name
+                type_internal: TypeName::new(var_type_simple), // simple name
                 init_expr: None,
             }],
             None,
@@ -1458,7 +1464,7 @@ public class RandomClass {
             vec![LocalVar {
                 name: Arc::from("cl"),
                 // extract_locals will store simple names
-                type_internal: Arc::from("RandomClass"),
+                type_internal: TypeName::new("RandomClass"),
                 init_expr: None,
             }],
             Some(Arc::from("Main")),
@@ -1705,7 +1711,7 @@ public class RandomClass {
             "",
             vec![LocalVar {
                 name: Arc::from("m2"),
-                type_internal: Arc::from("Main2"),
+                type_internal: TypeName::new("Main2"),
                 init_expr: None,
             }],
             None,

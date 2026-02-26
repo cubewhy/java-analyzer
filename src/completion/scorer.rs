@@ -166,6 +166,7 @@ pub fn method_detail(
                 class_meta.generic_signature.as_deref(),
                 ret_jvm,
             )
+            .map(|t| t.0)
             .unwrap_or_else(|| {
                 JvmType::parse(ret_jvm)
                     .map(|(t, _)| t.to_internal_name_string())
@@ -179,7 +180,7 @@ pub fn method_detail(
     };
     let source_style_return = descriptor_to_source_code_style_type(&display_return);
 
-    // 2. 处理参数列表的泛型替换 (实现你的 TODO)
+    // 2. 处理参数列表的泛型替换
     let sig_to_use = method
         .generic_signature
         .as_deref()
@@ -203,6 +204,7 @@ pub fn method_detail(
                     class_meta.generic_signature.as_deref(),
                     param_jvm_str,
                 )
+                .map(|t| t.0)
                 .unwrap_or_else(|| {
                     JvmType::parse(param_jvm_str)
                         .map(|(t, _)| t.to_internal_name_string())
@@ -253,6 +255,7 @@ pub fn field_detail(
         class_meta.generic_signature.as_deref(),
         sig_to_use,
     )
+    .map(|t| t.0)
     .unwrap_or_else(|| sig_to_use.to_string());
 
     let source_style_type = descriptor_to_source_code_style_type(&display_type);

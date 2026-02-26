@@ -1,3 +1,5 @@
+use crate::completion::type_resolver::type_name::TypeName;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum JvmType {
     Object(String, Vec<JvmType>),      // e.g. "java/util/List", [String]
@@ -86,30 +88,33 @@ impl JvmType {
     }
 
     /// Convert to the format used internally by TypeResolver: `java/util/List<Ljava/lang/String;>`
-    pub fn to_internal_name_string(&self) -> String {
+    pub fn to_type_name(&self) -> TypeName {
         match self {
             JvmType::Object(name, args) => {
                 if args.is_empty() {
-                    name.clone()
+                    TypeName::new(name)
                 } else {
-                    let arg_strs: Vec<_> =
-                        args.iter().map(|a| a.to_internal_name_string()).collect();
-                    format!("{}<{}>", name, arg_strs.join(""))
+                    let arg_strs: Vec<_> = args.iter().map(|a| a.to_type_name().0).collect();
+                    TypeName::new(format!("{}<{}>", name, arg_strs.join("")))
                 }
             }
-            JvmType::TypeVar(name) => name.clone(),
-            JvmType::Array(inner) => format!("[{}", inner.to_internal_name_string()),
-            JvmType::Wildcard => "*".to_string(),
+            JvmType::TypeVar(name) => TypeName::new(name),
+            JvmType::Array(inner) => inner.to_type_name().wrap_array(),
+            JvmType::Wildcard => TypeName::new("*"),
             JvmType::WildcardBound(c, inner) => {
-                let bound_keyword = match c {
+                let kw = match c {
                     '+' => "? extends ",
                     '-' => "? super ",
                     _ => "",
                 };
-                format!("{}{}", bound_keyword, inner.to_internal_name_string())
+                TypeName::new(format!("{}{}", kw, inner.to_type_name().as_str()))
             }
-            JvmType::Primitive(c) => java_primitive_char_to_name(*c).to_string(),
+            JvmType::Primitive(c) => TypeName::new(java_primitive_char_to_name(*c)),
         }
+    }
+
+    pub fn to_internal_name_string(&self) -> String {
+        self.to_type_name().0
     }
 
     /// Convert to the standard JVM signature format: `Ljava/util/List<Ljava/lang/String;>;`
@@ -234,7 +239,7 @@ pub fn substitute_type(
     receiver_internal: &str,
     class_generic_signature: Option<&str>,
     target_jvm_type_str: &str,
-) -> Option<String> {
+) -> Option<TypeName> {
     let (_, receiver_type_args) = split_internal_name(receiver_internal);
     if receiver_type_args.is_empty() {
         return None;
@@ -251,7 +256,7 @@ pub fn substitute_type(
     let (mut ret_jvm_type, _) = JvmType::parse(target_jvm_type_str)?;
     ret_jvm_type = ret_jvm_type.substitute(&class_type_params, &receiver_type_args);
 
-    Some(ret_jvm_type.to_internal_name_string())
+    Some(ret_jvm_type.to_type_name())
 }
 
 fn java_primitive_char_to_name(c: char) -> &'static str {
@@ -293,6 +298,6 @@ mod tests {
     fn test_array_of_type_var_display() {
         // toArray(T[]) 的情形
         let ty = JvmType::Array(Box::new(JvmType::TypeVar("T".to_string())));
-        assert_eq!(ty.to_internal_name_string(), "[T");
+        assert_eq!(ty.to_internal_name_string(), "T[]");
     }
 }

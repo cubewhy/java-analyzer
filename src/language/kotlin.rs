@@ -5,6 +5,7 @@ use tree_sitter::{Node, Parser, Query};
 
 use super::Language;
 use super::ts_utils::{capture_text, run_query};
+use crate::completion::type_resolver::type_name::TypeName;
 use crate::completion::{
     CompletionCandidate, CompletionContext,
     context::{CursorLocation, LocalVar},
@@ -353,7 +354,7 @@ impl<'s> KotlinContextExtractor<'s> {
                 if let (Some(name), Some(ty)) = (name, ty) {
                     vars.push(LocalVar {
                         name: Arc::from(name),
-                        type_internal: Arc::from(kotlin_type_to_internal(ty)),
+                        type_internal: TypeName::new(kotlin_type_to_internal(ty)),
                         init_expr: None,
                     });
                 }
@@ -372,7 +373,7 @@ impl<'s> KotlinContextExtractor<'s> {
                 if let Some(name) = capture_text(&captures, name_idx, self.bytes) {
                     vars.push(LocalVar {
                         name: Arc::from(name),
-                        type_internal: Arc::from("java/lang/Object"),
+                        type_internal: TypeName::new("java/lang/Object"),
                         init_expr: None,
                     });
                 }
@@ -431,7 +432,7 @@ impl<'s> KotlinContextExtractor<'s> {
                 let ty = capture_text(&captures, type_idx, self.bytes)?;
                 Some(LocalVar {
                     name: Arc::from(name),
-                    type_internal: Arc::from(kotlin_type_to_internal(ty)),
+                    type_internal: TypeName::new(kotlin_type_to_internal(ty)),
                     init_expr: None,
                 })
             })
