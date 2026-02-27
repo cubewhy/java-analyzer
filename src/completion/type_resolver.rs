@@ -656,7 +656,7 @@ pub fn java_source_type_to_jvm_generic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::GlobalIndex;
+    use crate::{completion::parser::parse_chain_from_expr, index::GlobalIndex};
 
     fn make_resolver() -> (GlobalIndex, Vec<LocalVar>) {
         let idx = GlobalIndex::new();
@@ -935,7 +935,7 @@ mod tests {
         let enclosing = Arc::from("Main");
 
         // "getMain2()" → chain = [method("getMain2", 0)]
-        let chain = crate::completion::engine::parse_chain_from_expr("getMain2()");
+        let chain = parse_chain_from_expr("getMain2()");
         let result = resolver.resolve_chain(&chain, &[], Some(&enclosing));
         assert_eq!(
             result.as_deref(),
@@ -1069,7 +1069,7 @@ mod tests {
         let enclosing = Arc::from("Main");
 
         // 模拟解析连缀调用 `getCharArr()[0]`
-        let chain = crate::completion::engine::parse_chain_from_expr("getCharArr()[0]");
+        let chain = parse_chain_from_expr("getCharArr()[0]");
         let result = resolver.resolve_chain(&chain, &[], Some(&enclosing));
 
         // char[][] 提取出一层下标后应为 char[]，底层 JVM internal_name 表示为 `[C`

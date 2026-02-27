@@ -285,16 +285,6 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
     }
 }
 
-fn clean_type_string(ty: &str) -> String {
-    // 移除空白字符，保留泛型符号
-    let ty = ty.trim();
-    if ty == "var" {
-        return "var".to_string();
-    }
-
-    ty.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
