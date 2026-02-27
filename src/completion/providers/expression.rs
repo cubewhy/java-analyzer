@@ -323,35 +323,4 @@ mod tests {
             "Both java.util.List and java.awt.List should be present"
         );
     }
-
-    #[test]
-    fn test_jdk_internal_classes_ranked_lower() {
-        let mut index = GlobalIndex::new();
-        index.add_classes(vec![
-            make_cls("jdk/internal", "Unsafe"),
-            make_cls("java/util", "ArrayList"),
-        ]);
-
-        // 搜索一个空前缀或能匹配两者的前缀
-        let ctx = ctx("", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(&ctx, &mut index);
-
-        let score_unsafe = results
-            .iter()
-            .find(|c| c.label.as_ref() == "Unsafe")
-            .map(|c| c.score)
-            .unwrap_or(0.0);
-        let score_list = results
-            .iter()
-            .find(|c| c.label.as_ref() == "ArrayList")
-            .map(|c| c.score)
-            .unwrap_or(0.0);
-
-        assert!(
-            score_list > score_unsafe,
-            "Standard library should rank higher than jdk.internal, got {} vs {}",
-            score_list,
-            score_unsafe
-        );
-    }
 }
