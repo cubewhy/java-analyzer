@@ -331,6 +331,17 @@ fn is_in_formal_param_name_position(id_node: Node, param_node: Node) -> bool {
 }
 
 fn handle_argument_list(ctx: &JavaContextExtractor, node: Node) -> (CursorLocation, String) {
+    if let Some((receiver_expr, member_prefix)) = detect_member_access_in_arg_list(ctx, node) {
+        return (
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: member_prefix.clone(),
+                receiver_expr,
+            },
+            member_prefix,
+        );
+    }
+
     // Find the nearest identifier node before the cursor in the argument_list as the prefix
     let prefix = find_prefix_in_argument_list(ctx, node);
     (
@@ -339,6 +350,32 @@ fn handle_argument_list(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
         },
         prefix,
     )
+}
+
+fn detect_member_access_in_arg_list(
+    ctx: &JavaContextExtractor,
+    arg_list: Node,
+) -> Option<(String, String)> {
+    let mut walker = arg_list.walk();
+    for child in arg_list.named_children(&mut walker) {
+        let child_end = child.end_byte();
+        // The child must end before the cursor.
+        if child_end > ctx.offset {
+            continue;
+        }
+        // Check if the text between the end of child and the cursor (after removing sentinel) begins with a '.'.
+        let gap = &ctx.source[child_end..ctx.offset];
+        let gap_clean = strip_sentinel(gap);
+        let gap_trimmed = gap_clean.trim_start();
+        if let Some(stripped) = gap_trimmed.strip_prefix('.') {
+            let receiver_expr = ctx.source[child.start_byte()..child_end].to_string();
+            // The member name may have been partially typed after the '.'
+            let after_dot = stripped.trim_start();
+            let member_prefix = strip_sentinel(after_dot).trim_end().to_string();
+            return Some((receiver_expr, member_prefix));
+        }
+    }
+    None
 }
 
 fn find_prefix_in_argument_list(ctx: &JavaContextExtractor, arg_list: Node) -> String {
