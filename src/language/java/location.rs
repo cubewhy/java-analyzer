@@ -63,12 +63,29 @@ fn determine_location_impl(
 }
 
 fn handle_import(ctx: &JavaContextExtractor, node: Node) -> (CursorLocation, String) {
+    let mut is_static = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "static" {
+            is_static = true;
+            break;
+        }
+    }
+
     let mut raw_prefix = String::new();
+    // collect_import_text has automatically skipped the "import" and "static" keywords.
     collect_import_text(ctx, node, &mut raw_prefix);
+
     let prefix = strip_sentinel(&raw_prefix);
     let query = prefix.rsplit('.').next().unwrap_or("").to_string();
 
-    (CursorLocation::Import { prefix }, query)
+    let location = if is_static {
+        CursorLocation::ImportStatic { prefix }
+    } else {
+        CursorLocation::Import { prefix }
+    };
+
+    (location, query)
 }
 
 /// Recursively collect valid text (identifiers, dots, asterisks) in import declarations
@@ -82,7 +99,6 @@ fn collect_import_text(ctx: &JavaContextExtractor, node: Node, out: &mut String)
     // If there are no child nodes, it means it is a leaf node (Token)
     if node.child_count() == 0 {
         let kind = node.kind();
-        // 过滤掉不需要的 Token
         if kind == "import" || kind == "static" || kind == ";" || is_comment_kind(kind) {
             return;
         }

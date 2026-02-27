@@ -14,9 +14,11 @@ use crate::completion::LocalVar;
 use crate::completion::import_utils::resolve_simple_to_internal;
 use crate::completion::providers::annotation::AnnotationProvider;
 use crate::completion::providers::expression::ExpressionProvider;
+use crate::completion::providers::import_static::ImportStaticProvider;
 use crate::completion::providers::name_suggestion::NameSuggestionProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
+use crate::completion::providers::static_import_member::StaticImportMemberProvider;
 use crate::completion::providers::this_member::ThisMemberProvider;
 use crate::completion::type_resolver::type_name::TypeName;
 use crate::completion::type_resolver::{
@@ -41,7 +43,9 @@ impl CompletionEngine {
                 Box::new(PackageProvider),
                 Box::new(ExpressionProvider), // expression/type position: class name
                 Box::new(ImportProvider),     // import statement
-                Box::new(KeywordProvider),    // Keyword (triggered only upon input)
+                Box::new(ImportStaticProvider),
+                Box::new(StaticImportMemberProvider),
+                Box::new(KeywordProvider), // Keyword (triggered only upon input)
                 Box::new(AnnotationProvider),
                 Box::new(SnippetProvider), // Snippets
                 Box::new(NameSuggestionProvider),

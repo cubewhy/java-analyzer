@@ -45,6 +45,40 @@ pub fn extract_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<Arc<str>> 
                 .trim()
                 .trim_end_matches(';')
                 .trim();
+            if cleaned.starts_with("static ") {
+                return None; // handled by extract_static_imports
+            }
+            if cleaned.is_empty() {
+                None
+            } else {
+                Some(Arc::from(cleaned))
+            }
+        })
+        .collect()
+}
+
+pub fn extract_static_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<Arc<str>> {
+    let q = match Query::new(
+        &tree_sitter_java::LANGUAGE.into(),
+        r#"(import_declaration) @import"#,
+    ) {
+        Ok(q) => q,
+        Err(_) => return vec![],
+    };
+    let idx = q.capture_index_for_name("import").unwrap();
+    run_query(&q, root, ctx.bytes, None)
+        .into_iter()
+        .filter_map(|caps| {
+            let text = capture_text(&caps, idx, ctx.bytes)?;
+            let after_import = text.trim_start_matches("import").trim();
+            if !after_import.starts_with("static ") {
+                return None;
+            }
+            let cleaned = after_import
+                .trim_start_matches("static")
+                .trim()
+                .trim_end_matches(';')
+                .trim();
             if cleaned.is_empty() {
                 None
             } else {

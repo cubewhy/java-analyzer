@@ -116,6 +116,7 @@ impl<'s> JavaContextExtractor<'s> {
         let enclosing_internal_name =
             utils::build_internal_name(&enclosing_package, &enclosing_class);
         let existing_imports = scope::extract_imports(&self, root);
+        let existing_static_imports = scope::extract_static_imports(&self, root);
         let current_class_members = cursor_node
             .and_then(|n| utils::find_ancestor(n, "class_declaration"))
             .and_then(|cls| cls.child_by_field_name("body"))
@@ -150,6 +151,7 @@ impl<'s> JavaContextExtractor<'s> {
             enclosing_package,
             existing_imports,
         )
+        .with_static_imports(existing_static_imports)
         .with_class_members(current_class_members)
         .with_enclosing_member(enclosing_class_member)
         .with_char_after_cursor(char_after_cursor)
@@ -2309,22 +2311,6 @@ mod tests {
                 CursorLocation::Import { prefix } if prefix == "java.util.List"
             ),
             "Should ignore inline block comments, got {:?}",
-            ctx.location
-        );
-    }
-
-    #[test]
-    fn test_import_static_handling() {
-        // 验证 AST 遍历跳过了 'import' 和 'static' 关键字
-        let src = "import static java.lang.Math.PI;";
-        let ctx = end_of(src); // 光标在最后
-
-        assert!(
-            matches!(
-                &ctx.location,
-                CursorLocation::Import { prefix } if prefix == "java.lang.Math.PI"
-            ),
-            "Should strip 'import' and 'static' keywords, got {:?}",
             ctx.location
         );
     }

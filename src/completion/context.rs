@@ -15,6 +15,8 @@ pub struct CurrentClassMember {
 pub enum CursorLocation {
     /// `import com.example.|`
     Import { prefix: String },
+    /// `import static java.lang.Math.|`
+    ImportStatic { prefix: String },
     /// `someObj.|` or `someObj.prefix|`
     MemberAccess {
         /// The inferred type of the accessed object (internal name, such as "java/lang/String")
@@ -57,6 +59,7 @@ pub struct CompletionContext {
     pub enclosing_internal_name: Option<Arc<str>>,
     pub enclosing_package: Option<Arc<str>>,
     pub existing_imports: Vec<Arc<str>>,
+    pub static_imports: Vec<Arc<str>>,
     pub query: String,
     /// All members of the current class (parsed directly from the source file, without relying on indexes)
     pub current_class_members: HashMap<Arc<str>, CurrentClassMember>,
@@ -94,6 +97,7 @@ impl CompletionContext {
             enclosing_internal_name,
             enclosing_package,
             existing_imports,
+            static_imports: vec![],
             query: query.into(),
             current_class_members: HashMap::new(),
             enclosing_class_member: None,
@@ -101,6 +105,11 @@ impl CompletionContext {
             file_uri: None,
             inferred_package: None,
         }
+    }
+
+    pub fn with_static_imports(mut self, imports: Vec<Arc<str>>) -> Self {
+        self.static_imports = imports;
+        self
     }
 
     pub fn with_file_uri(mut self, uri: Arc<str>) -> Self {
