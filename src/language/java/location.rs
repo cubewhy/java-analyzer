@@ -624,4 +624,85 @@ mod tests {
         );
         assert_eq!(query, "strings");
     }
+
+    #[test]
+    fn test_member_access_after_array_access_in_arg_list() {
+        let src = indoc::indoc! {r#"
+class A {
+    void f(String[][] matrix) {
+        System.out.println(matrix[0][1].);
+    }
+}
+"#};
+        // 光标在 '.' 之后，')' 之前
+        let marker = "matrix[0][1].";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(
+                loc,
+                CursorLocation::MemberAccess { ref receiver_expr, ref member_prefix, .. }
+                if receiver_expr == "matrix[0][1]" && member_prefix.is_empty()
+            ),
+            "Expected MemberAccess with receiver_expr=matrix[0][1], got {:?}",
+            loc
+        );
+        assert_eq!(query, "");
+    }
+
+    #[test]
+    fn test_member_access_with_partial_member_in_arg_list() {
+        // println(matrix[0][1].toS|) — 已打了部分 member 名称
+        // 此时 tree-sitter 大概率能生成 field_access，走已有路径；
+        // 此测试确保结果仍然正确，不被新逻辑干扰
+        let src = indoc::indoc! {r#"
+class A {
+    void f(String[][] matrix) {
+        System.out.println(matrix[0][1].toS);
+    }
+}
+"#};
+        let marker = "matrix[0][1].toS";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::MemberAccess { .. }),
+            "Expected MemberAccess, got {:?}",
+            loc
+        );
+        assert_eq!(query, "toS");
+    }
+
+    #[test]
+    fn test_normal_method_argument_not_affected() {
+        // 普通方法参数补全不应被新逻辑误伤
+        let src = indoc::indoc! {r#"
+class A {
+    void f(String[][] matrix) {
+        System.out.println(matr);
+    }
+}
+"#};
+        let marker = "println(matr";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::MethodArgument { .. }),
+            "Expected MethodArgument, got {:?}",
+            loc
+        );
+        assert_eq!(query, "matr");
+    }
 }
