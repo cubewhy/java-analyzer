@@ -42,6 +42,10 @@ impl CompletionProvider for ExpressionProvider {
         // Classes that have already been imported in current context
         let imported = index.resolve_imports(&ctx.existing_imports);
         for meta in &imported {
+            // Theoretically, it is not possible to import nested classes.
+            if meta.inner_class_of.is_some() {
+                continue;
+            }
             let score = if prefix.is_empty() {
                 0
             } else {
@@ -71,6 +75,9 @@ impl CompletionProvider for ExpressionProvider {
         // Same package
         if let Some(pkg) = current_pkg {
             for meta in index.classes_in_package(pkg) {
+                if meta.inner_class_of.is_some() {
+                    continue;
+                }
                 if imported_internals.contains(&meta.internal_name) {
                     continue;
                 }
@@ -99,6 +106,10 @@ impl CompletionProvider for ExpressionProvider {
         // Other classes (global, require auto-import)
         if !prefix.is_empty() {
             for meta in index.iter_all_classes() {
+                // skip nested classes
+                if meta.inner_class_of.is_some() {
+                    continue;
+                }
                 if imported_internals.contains(&meta.internal_name) {
                     continue;
                 }
@@ -107,11 +118,9 @@ impl CompletionProvider for ExpressionProvider {
                     None => continue,
                 };
                 let fqn = fqn_of(meta);
-                let base_score = if meta.package.as_deref() == Some("java/lang") {
-                    70.0
-                } else {
-                    40.0
-                };
+
+                let boost = calculate_boost(meta.package.as_deref());
+                let base_score = 40.0;
 
                 let length_penalty = meta.name.len() as f32 * 0.05;
 
@@ -122,7 +131,7 @@ impl CompletionProvider for ExpressionProvider {
                     self.name(),
                 )
                 .with_detail(fqn.clone())
-                .with_score(base_score + score as f32 * 0.1 - length_penalty);
+                .with_score(base_score + score as f32 * 0.1 - length_penalty + boost);
 
                 let needs_import = is_import_needed(
                     &fqn,
@@ -141,6 +150,27 @@ impl CompletionProvider for ExpressionProvider {
 
         results
     }
+}
+
+fn calculate_boost(pkg: Option<&str>) -> f32 {
+    let pkg = match pkg {
+        Some(p) => p,
+        None => return 0.0,
+    };
+
+    let rules = [
+        ("jdk/", -60.0),
+        ("sun/", -60.0),
+        ("com/sun/", -60.0),
+        ("java/util/", 10.0),
+    ];
+
+    for (prefix, score) in rules {
+        if pkg.starts_with(prefix) {
+            return score;
+        }
+    }
+    0.0
 }
 
 fn fqn_of(meta: &crate::index::ClassMetadata) -> String {
@@ -251,6 +281,77 @@ mod tests {
                 c.label.as_ref() == "Main" && c.required_import.as_deref() == Some("com.other.Main")
             }),
             "should also suggest Main from other package with import"
+        );
+    }
+
+    #[test]
+    fn test_nested_classes_are_filtered() {
+        let mut index = GlobalIndex::new();
+        let mut nested_cls = make_cls("java/util", "Entry");
+        nested_cls.inner_class_of = Some(Arc::from("java/util/Map"));
+
+        index.add_classes(vec![nested_cls, make_cls("java/util", "Map")]);
+
+        let ctx = ctx("Map", "Test", "app", vec![]);
+        let results = ExpressionProvider.provide(&ctx, &mut index);
+
+        // Map 应该出现，但 Map$Entry 不应该出现
+        assert!(results.iter().any(|c| c.label.as_ref() == "Map"));
+        assert!(!results.iter().any(|c| c.label.as_ref() == "Entry"));
+    }
+
+    #[test]
+    fn test_duplicate_simple_names_from_different_packages() {
+        let mut index = GlobalIndex::new();
+        index.add_classes(vec![
+            make_cls("java/util", "List"),
+            make_cls("java/awt", "List"),
+        ]);
+
+        let ctx = ctx("List", "Test", "app", vec![]);
+        let results = ExpressionProvider.provide(&ctx, &mut index);
+
+        // 验证两个 List 都存在
+        let list_candidates: Vec<_> = results
+            .iter()
+            .filter(|c| c.label.as_ref() == "List")
+            .collect();
+
+        assert_eq!(
+            list_candidates.len(),
+            2,
+            "Both java.util.List and java.awt.List should be present"
+        );
+    }
+
+    #[test]
+    fn test_jdk_internal_classes_ranked_lower() {
+        let mut index = GlobalIndex::new();
+        index.add_classes(vec![
+            make_cls("jdk/internal", "Unsafe"),
+            make_cls("java/util", "ArrayList"),
+        ]);
+
+        // 搜索一个空前缀或能匹配两者的前缀
+        let ctx = ctx("", "Test", "app", vec![]);
+        let results = ExpressionProvider.provide(&ctx, &mut index);
+
+        let score_unsafe = results
+            .iter()
+            .find(|c| c.label.as_ref() == "Unsafe")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+        let score_list = results
+            .iter()
+            .find(|c| c.label.as_ref() == "ArrayList")
+            .map(|c| c.score)
+            .unwrap_or(0.0);
+
+        assert!(
+            score_list > score_unsafe,
+            "Standard library should rank higher than jdk.internal, got {} vs {}",
+            score_list,
+            score_unsafe
         );
     }
 }

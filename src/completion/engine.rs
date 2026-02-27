@@ -498,6 +498,9 @@ fn dedup(mut candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
                         CandidateKind::Constructor { descriptor: d1, .. },
                         CandidateKind::Constructor { descriptor: d2, .. },
                     ) => d1 == d2,
+                    (CandidateKind::ClassName, CandidateKind::ClassName) => {
+                        last.detail == c.detail && last.required_import == c.required_import
+                    }
                     _ => true,
                 }
             });
