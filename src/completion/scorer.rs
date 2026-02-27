@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rust_asm::constants::ACC_PRIVATE;
 
 use crate::{
@@ -158,7 +160,7 @@ pub fn method_detail(
 ) -> String {
     // 1. 处理返回类型的泛型替换
     let base_return = method.return_type.as_deref().unwrap_or("void");
-    let display_return = if let Some(sig) = method.generic_signature.as_deref() {
+    let display_return: Arc<str> = if let Some(sig) = method.generic_signature.as_deref() {
         if let Some(ret_idx) = sig.find(')') {
             let ret_jvm = &sig[ret_idx + 1..];
             substitute_type(
@@ -166,17 +168,20 @@ pub fn method_detail(
                 class_meta.generic_signature.as_deref(),
                 ret_jvm,
             )
-            .map(|t| t.0)
+            .map(|t| t.0.clone())
             .unwrap_or_else(|| {
                 JvmType::parse(ret_jvm)
-                    .map(|(t, _)| t.to_internal_name_string())
-                    .unwrap_or_else(|| base_return.to_string())
+                    .map(|(t, _)| {
+                        // 2. 将 String 包装进 Arc
+                        Arc::from(t.to_internal_name_string())
+                    })
+                    .unwrap_or_else(|| Arc::from(base_return))
             })
         } else {
-            base_return.to_string()
+            Arc::from(base_return)
         }
     } else {
-        base_return.to_string()
+        Arc::from(base_return)
     };
     let source_style_return = descriptor_to_source_code_style_type(&display_return);
 
@@ -204,11 +209,11 @@ pub fn method_detail(
                     class_meta.generic_signature.as_deref(),
                     param_jvm_str,
                 )
-                .map(|t| t.0)
+                .map(|t| t.0.clone())
                 .unwrap_or_else(|| {
                     JvmType::parse(param_jvm_str)
-                        .map(|(t, _)| t.to_internal_name_string())
-                        .unwrap_or_else(|| param_jvm_str.to_string())
+                        .map(|(t, _)| Arc::from(t.to_internal_name_string()))
+                        .unwrap_or_else(|| Arc::from(base_return))
                 });
 
                 formatted_params.push(descriptor_to_source_code_style_type(&subbed));
@@ -255,8 +260,8 @@ pub fn field_detail(
         class_meta.generic_signature.as_deref(),
         sig_to_use,
     )
-    .map(|t| t.0)
-    .unwrap_or_else(|| sig_to_use.to_string());
+    .map(|t| t.0.clone())
+    .unwrap_or_else(|| Arc::from(sig_to_use));
 
     let source_style_type = descriptor_to_source_code_style_type(&display_type);
 

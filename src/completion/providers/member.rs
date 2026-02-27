@@ -7,7 +7,10 @@ use super::super::{
 };
 use super::CompletionProvider;
 use crate::{
-    completion::{fuzzy, type_resolver::type_name::TypeName},
+    completion::{
+        fuzzy,
+        type_resolver::{TypeResolver, type_name::TypeName},
+    },
     index::GlobalIndex,
 };
 use std::sync::Arc;
@@ -640,7 +643,7 @@ fn resolve_method_call_receiver(
     };
 
     let enclosing = ctx.enclosing_internal_name.as_deref()?;
-    let resolver = crate::completion::type_resolver::TypeResolver::new(index);
+    let resolver = TypeResolver::new(index);
     resolver
         .resolve_method_return(enclosing, method_name, arg_count, &[])
         .map(|i| TypeName::to_arc(&i))

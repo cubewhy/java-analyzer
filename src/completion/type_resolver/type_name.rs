@@ -6,10 +6,10 @@ use std::sync::Arc;
 /// - Arrays: "java/lang/String[]", "int[][]"
 /// - With generics: "java/util/List<Ljava/lang/String;>"
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TypeName(pub(crate) String);
+pub struct TypeName(pub(crate) Arc<str>);
 
 impl TypeName {
-    pub fn new(s: impl Into<String>) -> Self {
+    pub fn new(s: impl Into<Arc<str>>) -> Self {
         TypeName(s.into())
     }
 
@@ -23,19 +23,19 @@ impl TypeName {
 
     pub fn is_primitive(&self) -> bool {
         matches!(
-            self.0.as_str(),
+            self.0.as_ref(),
             "int" | "long" | "short" | "byte" | "char" | "float" | "double" | "boolean" | "void"
         )
     }
 
     /// "java/lang/String[][]" → Some("java/lang/String[]")
     pub fn element_type(&self) -> Option<TypeName> {
-        self.0.strip_suffix("[]").map(|s| TypeName(s.to_string()))
+        self.0.strip_suffix("[]").map(TypeName::from)
     }
 
     /// "java/lang/String" → "java/lang/String[]"
-    pub fn wrap_array(self) -> TypeName {
-        TypeName(format!("{}[]", self.0))
+    pub fn wrap_array(&self) -> TypeName {
+        TypeName::new(format!("{}[]", self.0))
     }
 
     /// Remove generic parameters: "java/util/List<Ljava/lang/String;>" → "java/util/List
@@ -48,19 +48,19 @@ impl TypeName {
     }
 
     pub fn to_arc(&self) -> Arc<str> {
-        Arc::from(self.0.as_str())
+        self.0.clone()
     }
 }
 
 impl From<&str> for TypeName {
     fn from(s: &str) -> Self {
-        TypeName(s.to_string())
+        TypeName(Arc::from(s))
     }
 }
 
 impl From<String> for TypeName {
     fn from(s: String) -> Self {
-        TypeName(s)
+        TypeName(Arc::from(s.as_str()))
     }
 }
 
@@ -85,6 +85,6 @@ impl std::ops::Deref for TypeName {
 
 impl From<Arc<str>> for TypeName {
     fn from(arc: Arc<str>) -> Self {
-        TypeName(arc.to_string())
+        TypeName(arc)
     }
 }

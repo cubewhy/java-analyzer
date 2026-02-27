@@ -92,13 +92,13 @@ impl JvmType {
         match self {
             JvmType::Object(name, args) => {
                 if args.is_empty() {
-                    TypeName::new(name)
+                    TypeName::from(name.as_str())
                 } else {
                     let arg_strs: Vec<_> = args.iter().map(|a| a.to_type_name().0).collect();
                     TypeName::new(format!("{}<{}>", name, arg_strs.join("")))
                 }
             }
-            JvmType::TypeVar(name) => TypeName::new(name),
+            JvmType::TypeVar(name) => TypeName::from(name.as_str()),
             JvmType::Array(inner) => inner.to_type_name().wrap_array(),
             JvmType::Wildcard => TypeName::new("*"),
             JvmType::WildcardBound(c, inner) => {
@@ -114,7 +114,7 @@ impl JvmType {
     }
 
     pub fn to_internal_name_string(&self) -> String {
-        self.to_type_name().0
+        self.to_type_name().0.to_string()
     }
 
     /// Convert to the standard JVM signature format: `Ljava/util/List<Ljava/lang/String;>;`
