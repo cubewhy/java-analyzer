@@ -4,6 +4,7 @@ pub mod engine;
 pub mod fuzzy;
 pub mod import_completion;
 pub mod import_utils;
+pub mod post_processor;
 pub mod providers;
 pub mod scorer;
 pub mod type_resolver;
