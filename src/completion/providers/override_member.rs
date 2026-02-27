@@ -1,0 +1,1034 @@
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_STATIC};
+
+use super::super::{
+    candidate::{CandidateKind, CompletionCandidate},
+    context::{CompletionContext, CursorLocation},
+};
+use super::CompletionProvider;
+use crate::index::{GlobalIndex, MethodSummary};
+
+pub struct OverrideProvider;
+
+impl CompletionProvider for OverrideProvider {
+    fn name(&self) -> &'static str {
+        "override"
+    }
+
+    fn provide(
+        &self,
+        ctx: &CompletionContext,
+        index: &mut GlobalIndex,
+    ) -> Vec<CompletionCandidate> {
+        let prefix = match &ctx.location {
+            CursorLocation::Expression { prefix } => prefix.as_str(),
+            _ => return vec![],
+        };
+
+        if !is_access_modifier_prefix(prefix) {
+            return vec![];
+        }
+
+        let enclosing = match ctx.enclosing_internal_name.as_deref() {
+            Some(e) => e,
+            None => return vec![],
+        };
+
+        // A collection of (name, descriptor) methods that have been overridden in the current class
+        // current_class_members is a HashMap<name, member>, which only keeps the last overridden method
+        // Therefore, it additionally retrieves the current class's own methods from the index for precise deduplication.
+        let already_overridden: HashSet<(Arc<str>, Arc<str>)> =
+            self.collect_current_class_methods(enclosing, index);
+
+        // (name, descriptor) already appearing in this candidate list, to avoid the same method appearing repeatedly from multiple ancestors.
+        let mut emitted: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
+
+        let mut mro = index.mro(enclosing);
+        let has_object = mro
+            .iter()
+            .any(|c| c.internal_name.as_ref() == "java/lang/Object");
+        if !has_object && let Some(object_meta) = index.get_class("java/lang/Object") {
+            mro.push(object_meta);
+        }
+
+        let mut candidates = Vec::new();
+
+        for (i, class_meta) in mro.iter().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            for method in &class_meta.methods {
+                if !is_overridable(method) {
+                    continue;
+                }
+                let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
+                if already_overridden.contains(&key) {
+                    continue;
+                }
+
+                // Source-level member
+                let candidate_param_count =
+                    crate::completion::type_resolver::count_params(&method.descriptor);
+                let blocked_by_source = ctx.current_class_members.values().any(|m| {
+                    if !m.is_method || m.name != method.name {
+                        return false;
+                    }
+                    // bad descriptor ast
+                    if m.descriptor.is_empty() {
+                        return true;
+                    }
+                    crate::completion::type_resolver::count_params(&m.descriptor)
+                        == candidate_param_count
+                });
+
+                if blocked_by_source {
+                    continue;
+                }
+                if !emitted.insert(key) {
+                    // It has been generated from a more recent ancestor.
+                    continue;
+                }
+
+                let Some((params, return_type)) = parse_descriptor(&method.descriptor) else {
+                    continue;
+                };
+
+                let candidate = build_candidate(
+                    method,
+                    &return_type,
+                    &params,
+                    &class_meta.internal_name,
+                    ctx,
+                    self.name(),
+                );
+                candidates.push(candidate);
+            }
+        }
+
+        candidates
+    }
+}
+
+impl OverrideProvider {
+    /// Accurately collect the (name, descriptor) members already present in the current class:
+    // Prioritize index (if the current file has been compiled into index),
+    // Then overlay current_class_members (members resolved at the source level).
+    fn collect_current_class_methods(
+        &self,
+        enclosing: &str,
+        index: &GlobalIndex,
+    ) -> HashSet<(Arc<str>, Arc<str>)> {
+        let mut set: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
+        if let Some(meta) = index.get_class(enclosing) {
+            for m in &meta.methods {
+                set.insert((Arc::clone(&m.name), Arc::clone(&m.descriptor)));
+            }
+        }
+        set
+    }
+}
+
+// ── 方法可重写判断 ─────────────────────────────────────────────────────────────
+
+fn is_overridable(method: &MethodSummary) -> bool {
+    // Constructor / Static Initialization Block
+    if matches!(method.name.as_ref(), "<init>" | "<clinit>") {
+        return false;
+    }
+    // Compiler-generated synthesis method
+    if method.is_synthetic {
+        return false;
+    }
+    // private, cannot be overridden
+    if method.access_flags & ACC_PRIVATE != 0 {
+        return false;
+    }
+    // Static methods can only be hidden, not overridden.
+    if method.access_flags & ACC_STATIC != 0 {
+        return false;
+    }
+    // final cannot be overridden
+    if method.access_flags & ACC_FINAL != 0 {
+        return false;
+    }
+    true
+}
+
+/// The current input prefix is ​​a valid start (at least 2 characters) of "public" or "protected".
+fn is_access_modifier_prefix(prefix: &str) -> bool {
+    let p = prefix.trim();
+    if p.len() < 2 {
+        return false;
+    }
+    "public".starts_with(p) || "protected".starts_with(p)
+}
+
+fn build_candidate(
+    method: &MethodSummary,
+    return_type: &str,
+    params: &[String],
+    defining_class: &Arc<str>,
+    ctx: &CompletionContext,
+    source: &'static str,
+) -> CompletionCandidate {
+    use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC};
+
+    let visibility = if method.access_flags & ACC_PUBLIC != 0 {
+        "public"
+    } else if method.access_flags & ACC_PROTECTED != 0 {
+        "protected"
+    } else {
+        // package-private(0 flags): Preserve visibility
+        ""
+    };
+
+    let params_str = params
+        .iter()
+        .enumerate()
+        .map(|(i, t)| format!("{} arg{}", t, i))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let label_text = format!(
+        "{} {} {}({})",
+        visibility, return_type, method.name, params_str
+    )
+    .trim()
+    .to_string();
+
+    let body_line = if return_type == "void" {
+        "// TODO: implement".to_string()
+    } else {
+        format!(
+            "return {}; // TODO: implement",
+            default_return_value(return_type)
+        )
+    };
+
+    let vis_prefix = if visibility.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", visibility)
+    };
+
+    let insert_text = if ctx.has_paren_after_cursor() {
+        // If there is already a parenthesis after the cursor, only insert the annotation and signature header, without adding parentheses.
+        format!("@Override\n{}{}  {}(", vis_prefix, return_type, method.name)
+    } else {
+        format!(
+            "@Override\n{}{} {}({}) {{\n    {}\n}}",
+            vis_prefix, return_type, method.name, params_str, body_line
+        )
+    };
+
+    let detail = format!("@Override — {}", defining_class.replace(['/', '$'], "."));
+
+    CompletionCandidate::new(
+        Arc::from(label_text.as_str()),
+        insert_text,
+        CandidateKind::Method {
+            descriptor: Arc::clone(&method.descriptor),
+            defining_class: Arc::clone(defining_class),
+        },
+        source,
+    )
+    .with_detail(detail)
+    .with_score(65.0)
+}
+
+fn default_return_value(return_type: &str) -> &str {
+    match return_type {
+        "int" | "byte" | "short" | "char" => "0",
+        "long" => "0L",
+        "float" => "0.0f",
+        "double" => "0.0",
+        "boolean" => "false",
+        "void" => "",
+        _ => "null",
+    }
+}
+
+// TODO: remove duplicated utils
+
+/// `(Ljava/lang/String;I)V` → `(["String", "int"], "void")`
+fn parse_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
+    let params_end = descriptor.find(')')?;
+    let params_str = &descriptor[1..params_end];
+    let return_str = &descriptor[params_end + 1..];
+
+    let (_, params) = parse_type_sequence(params_str);
+    let (_, return_type) = jvm_type_to_java(return_str);
+
+    Some((params, return_type))
+}
+
+fn parse_type_sequence(mut s: &str) -> (&str, Vec<String>) {
+    let mut types = Vec::new();
+    while !s.is_empty() {
+        let (rest, t) = jvm_type_to_java(s);
+        if rest.len() == s.len() {
+            break;
+        }
+        types.push(t);
+        s = rest;
+    }
+    (s, types)
+}
+
+/// Parse a JVM type from the `s` header and return `(remaining string, Java type name)`.
+fn jvm_type_to_java(s: &str) -> (&str, String) {
+    if s.is_empty() {
+        return (s, "void".to_string());
+    }
+    match s.as_bytes()[0] {
+        b'V' => (&s[1..], "void".to_string()),
+        b'I' => (&s[1..], "int".to_string()),
+        b'J' => (&s[1..], "long".to_string()),
+        b'D' => (&s[1..], "double".to_string()),
+        b'F' => (&s[1..], "float".to_string()),
+        b'Z' => (&s[1..], "boolean".to_string()),
+        b'B' => (&s[1..], "byte".to_string()),
+        b'S' => (&s[1..], "short".to_string()),
+        b'C' => (&s[1..], "char".to_string()),
+        b'L' => {
+            let end = s.find(';').unwrap_or(s.len() - 1);
+            let internal = &s[1..end];
+            let simple = internal.rsplit('/').next().unwrap_or(internal);
+            let java_name = simple.replace('$', ".");
+            (&s[end + 1..], java_name)
+        }
+        b'[' => {
+            let (rest, inner) = jvm_type_to_java(&s[1..]);
+            (rest, format!("{}[]", inner))
+        }
+        _ => (&s[1..], s[..1].to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::completion::context::{CompletionContext, CurrentClassMember, CursorLocation};
+    use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex, MethodSummary};
+    use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC};
+    use std::sync::Arc;
+
+    fn method(name: &str, descriptor: &str, flags: u16) -> MethodSummary {
+        MethodSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags: flags,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }
+    }
+
+    fn synthetic_method(name: &str, descriptor: &str) -> MethodSummary {
+        MethodSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags: ACC_PUBLIC,
+            is_synthetic: true,
+            generic_signature: None,
+            return_type: None,
+        }
+    }
+
+    fn make_class(
+        pkg: &str,
+        name: &str,
+        super_name: Option<&str>,
+        methods: Vec<MethodSummary>,
+    ) -> ClassMetadata {
+        ClassMetadata {
+            package: Some(Arc::from(pkg)),
+            name: Arc::from(name),
+            internal_name: Arc::from(format!("{}/{}", pkg, name).as_str()),
+            super_name: super_name.map(Arc::from),
+            interfaces: vec![],
+            methods,
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }
+    }
+
+    fn ctx_with_prefix(prefix: &str, enclosing_internal: &str) -> CompletionContext {
+        CompletionContext::new(
+            CursorLocation::Expression {
+                prefix: prefix.to_string(),
+            },
+            prefix,
+            vec![],
+            Some(Arc::from(
+                enclosing_internal.rsplit('/').next().unwrap_or(""),
+            )),
+            Some(Arc::from(enclosing_internal)),
+            None,
+            vec![],
+        )
+    }
+
+    #[test]
+    fn test_prefix_public_triggers() {
+        assert!(is_access_modifier_prefix("pu"));
+        assert!(is_access_modifier_prefix("pub"));
+        assert!(is_access_modifier_prefix("publ"));
+        assert!(is_access_modifier_prefix("publi"));
+        assert!(is_access_modifier_prefix("public"));
+    }
+
+    #[test]
+    fn test_prefix_protected_triggers() {
+        assert!(is_access_modifier_prefix("pr"));
+        assert!(is_access_modifier_prefix("pro"));
+        assert!(is_access_modifier_prefix("prot"));
+        assert!(is_access_modifier_prefix("protected"));
+    }
+
+    #[test]
+    fn test_prefix_too_short_no_trigger() {
+        assert!(!is_access_modifier_prefix(""));
+        assert!(!is_access_modifier_prefix("p")); // 单字符太模糊
+    }
+
+    #[test]
+    fn test_unrelated_prefix_no_trigger() {
+        assert!(!is_access_modifier_prefix("vo")); // void
+        assert!(!is_access_modifier_prefix("pri")); // private
+        assert!(!is_access_modifier_prefix("abc"));
+    }
+
+    #[test]
+    fn test_full_word_with_space_no_trigger() {
+        // "public void" cannot match "public".starts_with("public void")
+        assert!(!is_access_modifier_prefix("public void"));
+    }
+
+    #[test]
+    fn test_basic_override_from_superclass() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
+
+        assert!(
+            labels.iter().any(|l| l.contains("doWork")),
+            "doWork should appear as overridable: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_insert_text_contains_override_annotation() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let candidate = results.iter().find(|c| c.label.contains("doWork")).unwrap();
+
+        assert!(
+            candidate.insert_text.contains("@Override"),
+            "insert_text must contain @Override: {:?}",
+            candidate.insert_text
+        );
+    }
+
+    #[test]
+    fn test_insert_text_contains_method_body_stub() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let c = results.iter().find(|c| c.label.contains("doWork")).unwrap();
+
+        assert!(c.insert_text.contains('{'), "should have opening brace");
+        assert!(c.insert_text.contains('}'), "should have closing brace");
+    }
+
+    #[test]
+    fn test_already_overridden_excluded_via_index() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class(
+                "com/example",
+                "Child",
+                Some("com/example/Parent"),
+                // Child 已经 override doWork
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
+
+        assert!(
+            labels.iter().all(|l| !l.contains("doWork")),
+            "doWork already overridden, must not appear: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_already_overridden_excluded_via_source_members() {
+        // Child is not compiled into the index, but current_class_members has doWork.
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_class(
+            "com/example",
+            "Parent",
+            None,
+            vec![method("doWork", "()V", ACC_PUBLIC)],
+        )]);
+        // Child only exists at the source level (without add_classes)
+        let child_meta = make_class("com/example", "Child", Some("com/example/Parent"), vec![]);
+        // Manually let the index know the superclass of Child (otherwise the MRO cannot find the Parent).
+        idx.add_classes(vec![child_meta.clone()]);
+
+        let source_member = CurrentClassMember {
+            name: Arc::from("doWork"),
+            is_method: true,
+            is_static: false,
+            is_private: false,
+            descriptor: Arc::from("()V"),
+        };
+        let ctx = ctx_with_prefix("pub", "com/example/Child")
+            .with_class_members(std::iter::once(source_member));
+
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(
+            labels.iter().all(|l| !l.contains("doWork")),
+            "doWork in source members must be excluded: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_overloads_both_shown_when_none_overridden() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![
+                    method("compute", "(I)I", ACC_PUBLIC),
+                    method("compute", "(Ljava/lang/String;)I", ACC_PUBLIC),
+                ],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let compute_count = results
+            .iter()
+            .filter(|c| c.label.contains("compute"))
+            .count();
+        assert_eq!(
+            compute_count,
+            2,
+            "both overloads should appear: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_overloads_only_unoverridden_shown() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![
+                    method("compute", "(I)I", ACC_PUBLIC),
+                    method("compute", "(Ljava/lang/String;)I", ACC_PUBLIC),
+                ],
+            ),
+            make_class(
+                "com/example",
+                "Child",
+                Some("com/example/Parent"),
+                // 只 override 了 int 版本
+                vec![method("compute", "(I)I", ACC_PUBLIC)],
+            ),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let compute: Vec<_> = results
+            .iter()
+            .filter(|c| c.label.contains("compute"))
+            .collect();
+
+        assert_eq!(
+            compute.len(),
+            1,
+            "only unoverridden overload should remain: {:?}",
+            compute.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+        // 剩下的应该是 String 参数版本
+        assert!(
+            compute[0].insert_text.contains("String"),
+            "remaining overload should be String variant: {:?}",
+            compute[0].insert_text
+        );
+    }
+
+    #[test]
+    fn test_private_method_not_overridable() {
+        use rust_asm::constants::ACC_PRIVATE;
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("secret", "()V", ACC_PRIVATE)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("secret")),
+            "private method must not appear"
+        );
+    }
+
+    #[test]
+    fn test_static_method_not_overridable() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("staticFn", "()V", ACC_PUBLIC | ACC_STATIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("staticFn")),
+            "static method must not appear"
+        );
+    }
+
+    #[test]
+    fn test_final_method_not_overridable() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("locked", "()V", ACC_PUBLIC | ACC_FINAL)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("locked")),
+            "final method must not appear"
+        );
+    }
+
+    #[test]
+    fn test_synthetic_method_excluded() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![synthetic_method("access$000", "(Lcom/example/Parent;)V")],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("access$")),
+            "synthetic method must not appear"
+        );
+    }
+
+    #[test]
+    fn test_constructor_excluded() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("<init>", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("<init>")),
+            "<init> must not appear"
+        );
+    }
+
+    #[test]
+    fn test_no_enclosing_class_returns_empty() {
+        let mut idx = GlobalIndex::new();
+        let ctx = CompletionContext::new(
+            CursorLocation::Expression {
+                prefix: "pub".to_string(),
+            },
+            "pub",
+            vec![],
+            None,
+            None, // enclosing_internal_name = None
+            None,
+            vec![],
+        );
+        assert!(OverrideProvider.provide(&ctx, &mut idx).is_empty());
+    }
+
+    #[test]
+    fn test_parse_descriptor_void_no_params() {
+        let (params, ret) = parse_descriptor("()V").unwrap();
+        assert!(params.is_empty());
+        assert_eq!(ret, "void");
+    }
+
+    #[test]
+    fn test_parse_descriptor_primitives() {
+        let (params, ret) = parse_descriptor("(IZJ)D").unwrap();
+        assert_eq!(params, vec!["int", "boolean", "long"]);
+        assert_eq!(ret, "double");
+    }
+
+    #[test]
+    fn test_parse_descriptor_object_return() {
+        let (params, ret) = parse_descriptor("(Ljava/lang/String;)Ljava/util/List;").unwrap();
+        assert_eq!(params, vec!["String"]);
+        assert_eq!(ret, "List");
+    }
+
+    #[test]
+    fn test_parse_descriptor_array_param() {
+        let (params, ret) = parse_descriptor("([Ljava/lang/String;)V").unwrap();
+        assert_eq!(params, vec!["String[]"]);
+        assert_eq!(ret, "void");
+    }
+
+    #[test]
+    fn test_parse_descriptor_2d_array() {
+        let (params, ret) = parse_descriptor("([[I)V").unwrap();
+        assert_eq!(params, vec!["int[][]"]);
+        assert_eq!(ret, "void");
+    }
+
+    #[test]
+    fn test_parse_descriptor_inner_class() {
+        let (params, ret) = parse_descriptor("(Ljava/util/Map$Entry;)V").unwrap();
+        assert_eq!(params, vec!["Map.Entry"]);
+        assert_eq!(ret, "void");
+    }
+
+    #[test]
+    fn test_protected_method_visibility_preserved() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("hook", "()V", ACC_PROTECTED)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pro", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let c = results.iter().find(|c| c.label.contains("hook")).unwrap();
+        assert!(
+            c.insert_text.contains("protected"),
+            "protected visibility should be preserved: {:?}",
+            c.insert_text
+        );
+    }
+
+    #[test]
+    fn test_grandparent_method_appears() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "GrandParent",
+                None,
+                vec![method("ancientMethod", "()V", ACC_PUBLIC)],
+            ),
+            make_class(
+                "com/example",
+                "Parent",
+                Some("com/example/GrandParent"),
+                vec![],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.contains("ancientMethod")),
+            "grandparent method should be overridable: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_no_duplicate_from_multiple_ancestors() {
+        // GrandParent 和 Parent 都声明了同一方法（Parent 没有 override，走继承）
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "GrandParent",
+                None,
+                vec![method("shared", "()V", ACC_PUBLIC)],
+            ),
+            make_class(
+                "com/example",
+                "Parent",
+                Some("com/example/GrandParent"),
+                vec![method("shared", "()V", ACC_PUBLIC)], // 重复声明（模拟 index 含两份）
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let count = results
+            .iter()
+            .filter(|c| c.label.contains("shared"))
+            .count();
+        assert_eq!(
+            count,
+            1,
+            "same method must not appear twice: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_wrong_location_returns_empty() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("doWork", "()V", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "pub".to_string(),
+                receiver_expr: "obj".to_string(),
+            },
+            "pub",
+            vec![],
+            Some(Arc::from("Child")),
+            Some(Arc::from("com/example/Child")),
+            None,
+            vec![],
+        );
+        assert!(OverrideProvider.provide(&ctx, &mut idx).is_empty());
+    }
+
+    #[test]
+    fn test_non_void_return_has_stub_value() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("getValue", "()I", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let c = results
+            .iter()
+            .find(|c| c.label.contains("getValue"))
+            .unwrap();
+        // int 的默认值是 0
+        assert!(
+            c.insert_text.contains("return 0"),
+            "int return should stub 'return 0': {:?}",
+            c.insert_text
+        );
+    }
+
+    #[test]
+    fn test_object_return_has_null_stub() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                None,
+                vec![method("getName", "()Ljava/lang/String;", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let c = results
+            .iter()
+            .find(|c| c.label.contains("getName"))
+            .unwrap();
+        assert!(
+            c.insert_text.contains("return null"),
+            "Object return should stub 'return null': {:?}",
+            c.insert_text
+        );
+    }
+
+    #[test]
+    fn test_object_methods_appear_when_no_explicit_superclass() {
+        // Object 的 toString / equals / hashCode 应当出现
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            // Object 本身
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![
+                    method("toString", "()Ljava/lang/String;", ACC_PUBLIC),
+                    method("equals", "(Ljava/lang/Object;)Z", ACC_PUBLIC),
+                    method("hashCode", "()I", ACC_PUBLIC),
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            // 没有显式 super_name 的类
+            make_class("com/example", "Plain", None, vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Plain");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
+
+        assert!(
+            labels.iter().any(|l| l.contains("toString")),
+            "toString should appear: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("equals")),
+            "equals should appear: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("hashCode")),
+            "hashCode should appear: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_object_methods_not_duplicated_when_already_in_mro() {
+        // 如果 mro 里已经有 Object（通过显式继承链走到），不应重复
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![method("toString", "()Ljava/lang/String;", ACC_PUBLIC)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            make_class("com/example", "Parent", Some("java/lang/Object"), vec![]),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let count = results
+            .iter()
+            .filter(|c| c.label.contains("toString"))
+            .count();
+        assert_eq!(
+            count,
+            1,
+            "toString must appear exactly once: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+}

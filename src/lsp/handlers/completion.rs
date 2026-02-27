@@ -102,6 +102,14 @@ pub async fn handle_completion(
                     item.insert_text_format = None;
                 }
                 item.filter_text = Some(c.label.to_string());
+            } else if c.source == "override" {
+                if let Some(edit) = make_override_text_edit(&c.insert_text, &doc.content, position)
+                {
+                    item.text_edit = Some(edit);
+                    item.insert_text = None;
+                    item.insert_text_format = None;
+                }
+                item.filter_text = Some(c.label.to_string());
             }
 
             item
@@ -119,6 +127,36 @@ pub async fn handle_completion(
     Some(CompletionResponse::List(CompletionList {
         is_incomplete,
         items,
+    }))
+}
+
+/// Override candidate textEdit: Replace the entire access-modifier prefix before the cursor with the full method stub
+fn make_override_text_edit(
+    insert_text: &str,
+    source: &str,
+    position: Position,
+) -> Option<CompletionTextEdit> {
+    let line = source.lines().nth(position.line as usize)?;
+    let before_cursor = &line[..position.character as usize];
+
+    // 找到当前词的起始（连续字母构成 "pub" / "pro" / "protected" 等）
+    let start_char = before_cursor
+        .rfind(|c: char| !c.is_alphabetic())
+        .map(|p| p + 1)
+        .unwrap_or(0) as u32;
+
+    Some(CompletionTextEdit::Edit(TextEdit {
+        range: Range {
+            start: Position {
+                line: position.line,
+                character: start_char,
+            },
+            end: Position {
+                line: position.line,
+                character: position.character,
+            },
+        },
+        new_text: insert_text.to_string(),
     }))
 }
 

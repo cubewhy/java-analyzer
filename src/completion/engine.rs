@@ -15,6 +15,7 @@ use crate::completion::providers::annotation::AnnotationProvider;
 use crate::completion::providers::expression::ExpressionProvider;
 use crate::completion::providers::import_static::ImportStaticProvider;
 use crate::completion::providers::name_suggestion::NameSuggestionProvider;
+use crate::completion::providers::override_member::OverrideProvider;
 use crate::completion::providers::package::PackageProvider;
 use crate::completion::providers::snippet::SnippetProvider;
 use crate::completion::providers::static_import_member::StaticImportMemberProvider;
@@ -45,6 +46,7 @@ impl CompletionEngine {
                 Box::new(ImportProvider),     // import statement
                 Box::new(ImportStaticProvider),
                 Box::new(StaticImportMemberProvider),
+                Box::new(OverrideProvider),
                 Box::new(KeywordProvider), // Keyword (triggered only upon input)
                 Box::new(AnnotationProvider),
                 Box::new(SnippetProvider), // Snippets
