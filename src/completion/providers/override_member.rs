@@ -198,14 +198,7 @@ fn build_candidate(
     .trim()
     .to_string();
 
-    let body_line = if return_type == "void" {
-        "// TODO: implement".to_string()
-    } else {
-        format!(
-            "return {}; // TODO: implement",
-            default_return_value(return_type)
-        )
-    };
+    let body_line = r#"throw new RuntimeException("Not implemented yet");"#;
 
     let vis_prefix = if visibility.is_empty() {
         String::new()
@@ -236,18 +229,6 @@ fn build_candidate(
     )
     .with_detail(detail)
     .with_score(65.0)
-}
-
-fn default_return_value(return_type: &str) -> &str {
-    match return_type {
-        "int" | "byte" | "short" | "char" => "0",
-        "long" => "0L",
-        "float" => "0.0f",
-        "double" => "0.0",
-        "boolean" => "false",
-        "void" => "",
-        _ => "null",
-    }
 }
 
 // TODO: remove duplicated utils
@@ -896,59 +877,6 @@ mod tests {
     }
 
     #[test]
-    fn test_non_void_return_has_stub_value() {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![
-            make_class(
-                "com/example",
-                "Parent",
-                None,
-                vec![method("getValue", "()I", ACC_PUBLIC)],
-            ),
-            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
-        ]);
-
-        let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
-        let c = results
-            .iter()
-            .find(|c| c.label.contains("getValue"))
-            .unwrap();
-        // int 的默认值是 0
-        assert!(
-            c.insert_text.contains("return 0"),
-            "int return should stub 'return 0': {:?}",
-            c.insert_text
-        );
-    }
-
-    #[test]
-    fn test_object_return_has_null_stub() {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![
-            make_class(
-                "com/example",
-                "Parent",
-                None,
-                vec![method("getName", "()Ljava/lang/String;", ACC_PUBLIC)],
-            ),
-            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
-        ]);
-
-        let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(&ctx, &mut idx);
-        let c = results
-            .iter()
-            .find(|c| c.label.contains("getName"))
-            .unwrap();
-        assert!(
-            c.insert_text.contains("return null"),
-            "Object return should stub 'return null': {:?}",
-            c.insert_text
-        );
-    }
-
-    #[test]
     fn test_object_methods_appear_when_no_explicit_superclass() {
         // Object 的 toString / equals / hashCode 应当出现
         let mut idx = GlobalIndex::new();
@@ -1028,6 +956,212 @@ mod tests {
             count,
             1,
             "toString must appear exactly once: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    fn make_interface(pkg: &str, name: &str, methods: Vec<MethodSummary>) -> ClassMetadata {
+        use rust_asm::constants::ACC_INTERFACE;
+        ClassMetadata {
+            package: Some(Arc::from(pkg)),
+            name: Arc::from(name),
+            internal_name: Arc::from(format!("{}/{}", pkg, name).as_str()),
+            super_name: None,
+            interfaces: vec![],
+            methods,
+            fields: vec![],
+            // interface class 自身的 access_flags 带 ACC_INTERFACE，但不影响方法遍历
+            access_flags: ACC_PUBLIC | ACC_INTERFACE,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }
+    }
+
+    fn abstract_method(name: &str, descriptor: &str) -> MethodSummary {
+        use rust_asm::constants::ACC_ABSTRACT;
+        MethodSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }
+    }
+
+    fn default_method(name: &str, descriptor: &str) -> MethodSummary {
+        MethodSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags: ACC_PUBLIC, // default method: public, non-abstract, non-static
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }
+    }
+
+    #[test]
+    fn test_interface_abstract_method_shown() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_interface(
+            "com/example",
+            "Runnable",
+            vec![abstract_method("run", "()V")],
+        )]);
+        // 一个实现了 Runnable 但尚未实现 run() 的类
+        let mut cls = make_class("com/example", "MyTask", None, vec![]);
+        cls.interfaces = vec![Arc::from("com/example/Runnable")];
+        idx.add_classes(vec![cls]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/MyTask");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("run")),
+            "abstract interface method run() should appear: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_interface_default_method_shown() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_interface(
+            "com/example",
+            "Greeter",
+            vec![default_method("greet", "()Ljava/lang/String;")],
+        )]);
+        let mut cls = make_class("com/example", "HelloGreeter", None, vec![]);
+        cls.interfaces = vec![Arc::from("com/example/Greeter")];
+        idx.add_classes(vec![cls]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/HelloGreeter");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().any(|c| c.label.contains("greet")),
+            "default interface method should be overridable: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_interface_method_excluded_when_already_implemented_in_index() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_interface(
+            "com/example",
+            "Runnable",
+            vec![abstract_method("run", "()V")],
+        )]);
+        let mut cls = make_class(
+            "com/example",
+            "MyTask",
+            None,
+            vec![
+                method("run", "()V", ACC_PUBLIC), // 已实现
+            ],
+        );
+        cls.interfaces = vec![Arc::from("com/example/Runnable")];
+        idx.add_classes(vec![cls]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/MyTask");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("run")),
+            "already implemented run() must not appear: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_interface_method_excluded_via_source_members() {
+        // 未编译，只有 source members
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_interface(
+            "com/example",
+            "Runnable",
+            vec![abstract_method("run", "()V")],
+        )]);
+        let mut cls = make_class("com/example", "MyTask", None, vec![]);
+        cls.interfaces = vec![Arc::from("com/example/Runnable")];
+        idx.add_classes(vec![cls]);
+
+        let source_member = CurrentClassMember {
+            name: Arc::from("run"),
+            is_method: true,
+            is_static: false,
+            is_private: false,
+            descriptor: Arc::from("()V"),
+        };
+        let ctx = ctx_with_prefix("pub", "com/example/MyTask")
+            .with_class_members(std::iter::once(source_member));
+
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        assert!(
+            results.iter().all(|c| !c.label.contains("run")),
+            "run() in source members must be excluded: {:?}",
+            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_multiple_interfaces_all_shown() {
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            make_interface(
+                "com/example",
+                "Runnable",
+                vec![abstract_method("run", "()V")],
+            ),
+            make_interface(
+                "com/example",
+                "Closeable",
+                vec![abstract_method("close", "()V")],
+            ),
+        ]);
+        let mut cls = make_class("com/example", "Resource", None, vec![]);
+        cls.interfaces = vec![
+            Arc::from("com/example/Runnable"),
+            Arc::from("com/example/Closeable"),
+        ];
+        idx.add_classes(vec![cls]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Resource");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("run")),
+            "run should appear: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l.contains("close")),
+            "close should appear: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn test_interface_method_not_duplicated_via_superclass_and_interface() {
+        // Parent 实现了 Runnable，Child extends Parent —— run() 只应出现一次
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![make_interface(
+            "com/example",
+            "Runnable",
+            vec![abstract_method("run", "()V")],
+        )]);
+        let mut parent = make_class("com/example", "Parent", None, vec![]);
+        parent.interfaces = vec![Arc::from("com/example/Runnable")];
+        let child = make_class("com/example", "Child", Some("com/example/Parent"), vec![]);
+        idx.add_classes(vec![parent, child]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider.provide(&ctx, &mut idx);
+        let count = results.iter().filter(|c| c.label.contains("run")).count();
+        assert_eq!(
+            count,
+            1,
+            "run() must not be duplicated: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
         );
     }
