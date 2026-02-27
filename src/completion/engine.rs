@@ -1550,4 +1550,50 @@ mod tests {
             .unwrap();
         assert_eq!(item.type_internal.as_ref(), "java/lang/String");
     }
+
+    #[test]
+    fn test_dedup_allows_same_label_different_package() {
+        let c1 = CompletionCandidate::new(
+            Arc::from("List"),
+            "List".to_string(),
+            CandidateKind::ClassName,
+            "test",
+        )
+        .with_detail("java.util.List".to_string());
+        let c2 = CompletionCandidate::new(
+            Arc::from("List"),
+            "List".to_string(),
+            CandidateKind::ClassName,
+            "test",
+        )
+        .with_detail("java.awt.List".to_string());
+
+        let results = dedup(vec![c1, c2]);
+        assert_eq!(
+            results.len(),
+            2,
+            "Should keep both List candidates because FQNs are different"
+        );
+    }
+
+    #[test]
+    fn test_dedup_removes_actual_duplicates() {
+        let c1 = CompletionCandidate::new(
+            Arc::from("List"),
+            "List".to_string(),
+            CandidateKind::ClassName,
+            "test",
+        )
+        .with_detail("java.util.List".to_string());
+        let c2 = CompletionCandidate::new(
+            Arc::from("List"),
+            "List".to_string(),
+            CandidateKind::ClassName,
+            "test",
+        )
+        .with_detail("java.util.List".to_string());
+
+        let results = dedup(vec![c1, c2]);
+        assert_eq!(results.len(), 1, "Should remove identical class candidates");
+    }
 }
