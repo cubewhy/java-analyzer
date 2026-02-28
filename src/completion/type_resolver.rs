@@ -1,8 +1,11 @@
 use super::context::LocalVar;
 use crate::{
-    completion::type_resolver::{
-        generics::{JvmType, split_internal_name, substitute_type},
-        type_name::TypeName,
+    completion::{
+        CompletionContext,
+        type_resolver::{
+            generics::{JvmType, split_internal_name, substitute_type},
+            type_name::TypeName,
+        },
     },
     index::{GlobalIndex, MethodSummary},
 };
@@ -366,94 +369,68 @@ pub fn parse_strict_method_signature(
     Some((params, resolved_return))
 }
 
-/// Convert JVM descriptor into source code style type name
-///
-/// # Examples
-/// - "I" -> "int"
-/// - "[B" -> "byte[]"
-/// - "[[J" -> "long[][]"
-/// - "Ljava/lang/String;" -> "java/lang/String"
-/// - "[Ljava/lang/String;" -> "java/lang/String[]"
-#[deprecated]
-pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
-    let mut array_depth = 0;
-    let mut s = desc;
-    while s.starts_with('[') {
-        array_depth += 1;
-        s = &s[1..];
-    }
-
-    let base_type = match s {
-        "B" => "byte",
-        "C" => "char",
-        "D" => "double",
-        "F" => "float",
-        "I" => "int",
-        "J" => "long",
-        "S" => "short",
-        "Z" => "boolean",
-        "V" => "void",
-        _ if s.starts_with('L') && s.ends_with(';') => {
-            // Strip trailing stray '[' that may precede ';' due to
-            // malformed output from JvmType::to_internal_name_string()
-            let inner = &s[1..s.len() - 1];
-            inner.trim_end_matches('[')
-        }
-        _ => s,
-    };
-
-    let mut result = String::with_capacity(base_type.len() + array_depth * 2);
-    result.push_str(base_type);
-    for _ in 0..array_depth {
-        result.push_str("[]");
-    }
-    result
-}
-
-#[deprecated]
-pub fn parse_method_descriptor(descriptor: &str) -> Vec<String> {
-    let inner = match descriptor.find('(').zip(descriptor.find(')')) {
-        Some((l, r)) => &descriptor[l + 1..r],
-        None => return Vec::new(),
-    };
-
-    let mut types = Vec::new();
-    let mut s = inner;
-
-    while !s.is_empty() {
-        let (ty_desc, rest) = consume_one_descriptor_type(s);
-        types.push(descriptor_to_source_code_style_type(ty_desc));
-        s = rest;
-    }
-
-    types
-}
-
-/// Resolve the complete method signature descriptor
-/// Returns: (parameter type list, return value type)
-/// Example: "(Ljava/lang/String;I)[B" -> (["java/lang/String", "int"], "byte[]")
-pub fn parse_full_method_signature(descriptor: &str) -> Option<(Vec<String>, String)> {
-    let l_paren = descriptor.find('(')?;
-    let r_paren = descriptor.find(')')?;
-
-    let params_part = &descriptor[l_paren + 1..r_paren];
-    let return_part = &descriptor[r_paren + 1..];
-
-    let mut params = Vec::new();
-    let mut s = params_part;
-    while !s.is_empty() {
-        let (one_desc, rest) = consume_one_descriptor_type(s);
-        if one_desc.is_empty() {
-            break;
-        }
-        params.push(descriptor_to_source_code_style_type(one_desc));
-        s = rest;
-    }
-
-    let return_type = descriptor_to_source_code_style_type(return_part);
-
-    Some((params, return_type))
-}
+// /// Convert JVM descriptor into source code style type name
+// ///
+// /// # Examples
+// /// - "I" -> "int"
+// /// - "[B" -> "byte[]"
+// /// - "[[J" -> "long[][]"
+// /// - "Ljava/lang/String;" -> "java/lang/String"
+// /// - "[Ljava/lang/String;" -> "java/lang/String[]"
+// #[deprecated]
+// pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
+//     let mut array_depth = 0;
+//     let mut s = desc;
+//     while s.starts_with('[') {
+//         array_depth += 1;
+//         s = &s[1..];
+//     }
+//
+//     let base_type = match s {
+//         "B" => "byte",
+//         "C" => "char",
+//         "D" => "double",
+//         "F" => "float",
+//         "I" => "int",
+//         "J" => "long",
+//         "S" => "short",
+//         "Z" => "boolean",
+//         "V" => "void",
+//         _ if s.starts_with('L') && s.ends_with(';') => {
+//             // Strip trailing stray '[' that may precede ';' due to
+//             // malformed output from JvmType::to_internal_name_string()
+//             let inner = &s[1..s.len() - 1];
+//             inner.trim_end_matches('[')
+//         }
+//         _ => s,
+//     };
+//
+//     let mut result = String::with_capacity(base_type.len() + array_depth * 2);
+//     result.push_str(base_type);
+//     for _ in 0..array_depth {
+//         result.push_str("[]");
+//     }
+//     result
+// }
+//
+// #[deprecated]
+// pub fn parse_method_descriptor(descriptor: &str) -> Vec<String> {
+//     let inner = match descriptor.find('(').zip(descriptor.find(')')) {
+//         Some((l, r)) => &descriptor[l + 1..r],
+//         None => return Vec::new(),
+//     };
+//
+//     let mut types = Vec::new();
+//     let mut s = inner;
+//
+//     while !s.is_empty() {
+//         let (ty_desc, rest) = consume_one_descriptor_type(s);
+//         types.push(descriptor_to_source_code_style_type(ty_desc));
+//         s = rest;
+//     }
+//
+//     types
+// }
 
 /// Converts a singleton descriptor to an internal type name
 pub(crate) fn singleton_descriptor_to_type(desc: &str) -> Option<&str> {
@@ -490,14 +467,6 @@ fn singleton_descriptor_matches_type(desc: &str, ty: &str) -> bool {
     }
 
     false
-}
-
-pub fn parse_full_signature(descriptor: &str) -> Option<(Vec<String>, String)> {
-    let params = parse_method_descriptor(descriptor);
-    let return_type = extract_return_internal_name(descriptor)
-        .map(|t| descriptor_to_source_code_style_type(t.as_str()))
-        .unwrap_or_else(|| "void".to_string());
-    Some((params, return_type))
 }
 
 pub(crate) fn consume_one_descriptor_type(s: &str) -> (&str, &str) {
@@ -782,6 +751,77 @@ pub fn java_source_type_to_jvm_generic(
     }
 
     result
+}
+
+/// 结合了全局索引和当前文件上下文的解析器。
+/// 严格遵守 Java 语言规范 (JLS) 的类型可见性规则，拒绝任何启发式猜测。
+pub struct ContextualResolver<'a> {
+    pub index: &'a GlobalIndex,
+    pub ctx: &'a CompletionContext,
+}
+
+impl<'a> ContextualResolver<'a> {
+    pub fn new(index: &'a GlobalIndex, ctx: &'a CompletionContext) -> Self {
+        Self { index, ctx }
+    }
+}
+
+impl<'a> SymbolProvider for ContextualResolver<'a> {
+    fn resolve_source_name(&self, type_name: &str) -> Option<String> {
+        // 1. 如果包含 '/'，说明它已经是来自字节码的内部名 (如 "java/util/List")
+        // 直接向 index 查真理
+        if type_name.contains('/') {
+            return self.index.get_source_type_name(type_name);
+        }
+
+        // 2. 如果没有 '/'，说明它是来自当前文件 AST 的简单名 (如 "String", "List")
+        let simple_name = type_name;
+
+        // 规则 A: 精确导入 (Exact Imports)
+        // 例如: import java.util.List;
+        for imp in &self.ctx.existing_imports {
+            // 确保不是通配符，且精确匹配类名 (防止 MyList 匹配到 List)
+            if !imp.ends_with(".*")
+                && (imp.as_ref() == simple_name || imp.ends_with(&format!(".{}", simple_name)))
+            {
+                let internal = imp.replace('.', "/");
+                if let Some(source_name) = self.index.get_source_type_name(&internal) {
+                    return Some(source_name);
+                }
+            }
+        }
+
+        // 规则 B: 同包可见 (Same Package)
+        // 优先使用 effective_package (AST 解析 > 路径推断)
+        if let Some(pkg) = self.ctx.effective_package() {
+            let internal = format!("{}/{}", pkg.replace('.', "/"), simple_name);
+            if let Some(source_name) = self.index.get_source_type_name(&internal) {
+                return Some(source_name);
+            }
+        }
+
+        // 规则 C: Java 隐式导入 (java.lang.*)
+        // 这是解决 String, Object 等核心类的关键
+        let lang_internal = format!("java/lang/{}", simple_name);
+        if let Some(source_name) = self.index.get_source_type_name(&lang_internal) {
+            return Some(source_name);
+        }
+
+        // 规则 D: 通配符导入 (Wildcard Imports)
+        // 例如: import java.util.*; 尝试补全 java/util/List
+        for imp in &self.ctx.existing_imports {
+            if imp.ends_with(".*") {
+                let pkg = imp.trim_end_matches(".*").replace('.', "/");
+                let internal = format!("{}/{}", pkg, simple_name);
+                if let Some(source_name) = self.index.get_source_type_name(&internal) {
+                    return Some(source_name);
+                }
+            }
+        }
+
+        // 走完所有严格的规则都没有？坚决返回 None！
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1077,38 +1117,6 @@ mod tests {
             Some("Main2"),
             "bare method call should resolve via enclosing class"
         );
-    }
-
-    #[test]
-    fn test_descriptor_to_type_intellij_style() {
-        // primitive arrays
-        assert_eq!(descriptor_to_source_code_style_type("[I"), "int[]");
-        assert_eq!(descriptor_to_source_code_style_type("[[D"), "double[][]");
-
-        // objects
-        assert_eq!(
-            descriptor_to_source_code_style_type("Ljava/lang/String;"),
-            "java/lang/String"
-        );
-
-        // object arrays
-        assert_eq!(
-            descriptor_to_source_code_style_type("[Ljava/lang/Object;"),
-            "java/lang/Object[]"
-        );
-        assert_eq!(
-            descriptor_to_source_code_style_type("[[Ljava/util/List;"),
-            "java/util/List[][]"
-        );
-    }
-
-    #[test]
-    fn test_parse_method() {
-        // void method(int[], String[][])
-        let desc = "([I[[Ljava/lang/String;)V";
-        let params = parse_method_descriptor(desc);
-
-        assert_eq!(params, vec!["int[]", "java/lang/String[][]"]);
     }
 
     #[test]

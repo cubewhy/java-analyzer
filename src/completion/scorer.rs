@@ -4,7 +4,7 @@ use rust_asm::constants::ACC_PRIVATE;
 
 use crate::{
     completion::type_resolver::{
-        descriptor_to_source_code_style_type,
+        SymbolProvider, descriptor_to_source_type,
         generics::{JvmType, substitute_type},
     },
     index::{ClassMetadata, FieldSummary, MethodSummary},
@@ -157,8 +157,9 @@ pub fn method_detail(
     receiver_internal: &str,
     class_meta: &ClassMetadata,
     method: &MethodSummary,
+    provider: &impl SymbolProvider,
 ) -> String {
-    // 1. 处理返回类型 (保持不变)
+    // 1. 处理返回类型
     let base_return = method.return_type.as_deref().unwrap_or("void");
     let display_return: Arc<str> = if let Some(sig) = method.generic_signature.as_deref() {
         if let Some(ret_idx) = sig.find(')') {
@@ -180,7 +181,9 @@ pub fn method_detail(
     } else {
         Arc::from(base_return)
     };
-    let source_style_return = descriptor_to_source_code_style_type(&display_return);
+
+    let source_style_return = descriptor_to_source_type(&display_return, provider)
+        .unwrap_or_else(|| display_return.to_string());
 
     // 2. 处理参数列表
     let sig_to_use = method
@@ -206,10 +209,13 @@ pub fn method_detail(
                 .unwrap_or_else(|| {
                     JvmType::parse(param_jvm_str)
                         .map(|(t, _)| Arc::from(t.to_signature_string()))
-                        .unwrap_or_else(|| Arc::from("void")) // 理论上参数不会是 void
+                        .unwrap_or_else(|| Arc::from("void"))
                 });
 
-                param_types.push(descriptor_to_source_code_style_type(&subbed));
+                param_types.push(
+                    descriptor_to_source_type(&subbed, provider)
+                        .unwrap_or_else(|| subbed.to_string()),
+                );
                 params_str = rest;
             } else {
                 break;
@@ -221,7 +227,6 @@ pub fn method_detail(
         .into_iter()
         .enumerate()
         .map(|(i, type_name)| {
-            // 尝试获取对应的参数名，如果没有则使用 argN
             let param_name = method
                 .param_names
                 .get(i)
@@ -231,7 +236,7 @@ pub fn method_detail(
         })
         .collect();
 
-    // 3. 提取类名 (保持不变)
+    // 3. 提取类名
     let base_class_name = receiver_internal
         .split('<')
         .next()
@@ -254,14 +259,13 @@ pub fn field_detail(
     receiver_internal: &str,
     class_meta: &ClassMetadata,
     field: &FieldSummary,
+    provider: &impl SymbolProvider,
 ) -> String {
-    // 1. 优先使用字段的泛型签名，否则回退到基础描述符
     let sig_to_use = field
         .generic_signature
         .as_deref()
         .unwrap_or(&field.descriptor);
 
-    // 2. 尝试替换 (比如把 T item 替换为 String item)
     let display_type = substitute_type(
         receiver_internal,
         class_meta.generic_signature.as_deref(),
@@ -270,7 +274,8 @@ pub fn field_detail(
     .map(|t| t.0.clone())
     .unwrap_or_else(|| Arc::from(sig_to_use));
 
-    let source_style_type = descriptor_to_source_code_style_type(&display_type);
+    let source_style_type = descriptor_to_source_type(&display_type, provider)
+        .unwrap_or_else(|| display_type.to_string());
 
     let base_class_name = receiver_internal
         .split('<')

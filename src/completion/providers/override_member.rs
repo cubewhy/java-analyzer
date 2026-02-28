@@ -8,7 +8,10 @@ use super::super::{
     context::{CompletionContext, CursorLocation},
 };
 use super::CompletionProvider;
-use crate::index::{GlobalIndex, MethodSummary};
+use crate::{
+    completion::type_resolver::ContextualResolver,
+    index::{GlobalIndex, MethodSummary},
+};
 
 pub struct OverrideProvider;
 
@@ -91,10 +94,12 @@ impl CompletionProvider for OverrideProvider {
                     continue;
                 }
 
+                let resolver = ContextualResolver::new(index, ctx);
+
                 let Some((params_source, return_type_source)) =
                     crate::completion::type_resolver::parse_strict_method_signature(
                         &method.descriptor,
-                        index,
+                        &resolver,
                     )
                 else {
                     continue;

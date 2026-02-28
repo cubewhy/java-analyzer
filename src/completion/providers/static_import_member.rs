@@ -7,7 +7,7 @@ use super::super::{
 };
 use super::CompletionProvider;
 use crate::{
-    completion::scorer,
+    completion::{scorer, type_resolver::ContextualResolver},
     index::{ClassMetadata, GlobalIndex},
 };
 
@@ -47,6 +47,7 @@ impl CompletionProvider for StaticImportMemberProvider {
                         &query_lower,
                         ctx,
                         self.name(),
+                        index,
                     ));
                 }
             } else {
@@ -68,6 +69,7 @@ impl CompletionProvider for StaticImportMemberProvider {
                         member_name,
                         ctx,
                         self.name(),
+                        index,
                     ));
                 }
             }
@@ -83,7 +85,10 @@ fn all_static_members(
     query_lower: &str,
     ctx: &CompletionContext,
     source: &'static str,
+    index: &GlobalIndex,
 ) -> Vec<CompletionCandidate> {
+    let resolver = ContextualResolver::new(index, ctx);
+
     let mut out = Vec::new();
     for method in &meta.methods {
         if matches!(method.name.as_ref(), "<init>" | "<clinit>") {
@@ -109,7 +114,7 @@ fn all_static_members(
                 },
                 source,
             )
-            .with_detail(scorer::method_detail(class_path, meta, method))
+            .with_detail(scorer::method_detail(class_path, meta, method, &resolver))
             .with_score(75.0),
         );
     }
@@ -130,7 +135,7 @@ fn all_static_members(
                 },
                 source,
             )
-            .with_detail(scorer::field_detail(class_path, meta, field))
+            .with_detail(scorer::field_detail(class_path, meta, field, &resolver))
             .with_score(75.0),
         );
     }
@@ -143,7 +148,10 @@ fn specific_static_member(
     member_name: &str,
     ctx: &CompletionContext,
     source: &'static str,
+    index: &GlobalIndex,
 ) -> Vec<CompletionCandidate> {
+    let resolver = ContextualResolver::new(index, ctx);
+
     let mut out = Vec::new();
     for method in &meta.methods {
         if method.name.as_ref() != member_name {
@@ -166,10 +174,11 @@ fn specific_static_member(
                 },
                 source,
             )
-            .with_detail(scorer::method_detail(class_path, meta, method))
+            .with_detail(scorer::method_detail(class_path, meta, method, &resolver))
             .with_score(80.0),
         );
     }
+
     for field in &meta.fields {
         if field.name.as_ref() != member_name {
             continue;
@@ -187,7 +196,7 @@ fn specific_static_member(
                 },
                 source,
             )
-            .with_detail(scorer::field_detail(class_path, meta, field))
+            .with_detail(scorer::field_detail(class_path, meta, field, &resolver))
             .with_score(80.0),
         );
     }

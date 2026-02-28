@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::completion::type_resolver::type_name::TypeName;
 
 #[derive(Debug, Clone, PartialEq)]

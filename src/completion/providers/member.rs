@@ -9,7 +9,7 @@ use super::CompletionProvider;
 use crate::{
     completion::{
         fuzzy,
-        type_resolver::{TypeResolver, type_name::TypeName},
+        type_resolver::{ContextualResolver, TypeResolver, type_name::TypeName},
     },
     index::GlobalIndex,
 };
@@ -47,6 +47,8 @@ impl CompletionProvider for MemberProvider {
             imports = ?ctx.existing_imports,
             "MemberProvider.provide"
         );
+
+        let resolver = ContextualResolver::new(index, ctx);
 
         if receiver_expr == "this" {
             if ctx.is_in_static_context() {
@@ -117,6 +119,7 @@ impl CompletionProvider for MemberProvider {
                                 ctx.enclosing_internal_name.as_deref().unwrap_or(""),
                                 class_meta,
                                 method,
+                                index,
                             )
                         } else {
                             format!("inherited from {}", class_meta.name)
@@ -172,6 +175,7 @@ impl CompletionProvider for MemberProvider {
                                 ctx.enclosing_internal_name.as_deref().unwrap_or(""),
                                 class_meta,
                                 field,
+                                &resolver,
                             )
                         } else {
                             format!("inherited from {}", class_meta.name)
@@ -238,6 +242,8 @@ impl CompletionProvider for MemberProvider {
         let mut seen_methods = std::collections::HashSet::new();
         let mut seen_fields = std::collections::HashSet::new();
 
+        let resolver = ContextualResolver::new(index, ctx);
+
         for class_meta in &mro {
             for method in &class_meta.methods {
                 // skip <init>, <clinit>
@@ -285,6 +291,7 @@ impl CompletionProvider for MemberProvider {
                         class_internal,
                         class_meta,
                         method,
+                        &resolver,
                     )),
                 );
             }
@@ -322,6 +329,7 @@ impl CompletionProvider for MemberProvider {
                         class_internal,
                         class_meta,
                         field,
+                        &resolver,
                     )),
                 );
             }

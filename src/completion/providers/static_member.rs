@@ -4,7 +4,10 @@ use super::super::{
     scorer,
 };
 use super::CompletionProvider;
-use crate::{completion::scorer::AccessFilter, index::GlobalIndex};
+use crate::{
+    completion::{scorer::AccessFilter, type_resolver::ContextualResolver},
+    index::GlobalIndex,
+};
 use rust_asm::constants::ACC_STATIC;
 use std::sync::Arc;
 
@@ -116,9 +119,12 @@ impl CompletionProvider for StaticMemberProvider {
                     class_name,
                     &class_meta,
                     method,
+                    index,
                 )),
             );
         }
+
+        let resolver = ContextualResolver::new(index, ctx);
 
         for field in &class_meta.fields {
             if field.access_flags & ACC_STATIC == 0 {
@@ -140,7 +146,12 @@ impl CompletionProvider for StaticMemberProvider {
                     },
                     self.name(),
                 )
-                .with_detail(scorer::field_detail(class_name, &class_meta, field)),
+                .with_detail(scorer::field_detail(
+                    class_name,
+                    &class_meta,
+                    field,
+                    &resolver,
+                )),
             );
         }
 
