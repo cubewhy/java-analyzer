@@ -91,16 +91,22 @@ impl CompletionProvider for OverrideProvider {
                     continue;
                 }
 
-                let Some((params, return_type)) = parse_descriptor(&method.descriptor) else {
+                let Some((params_source, return_type_source)) =
+                    crate::completion::type_resolver::parse_strict_method_signature(
+                        &method.descriptor,
+                        index,
+                    )
+                else {
                     continue;
                 };
 
                 let candidate = build_candidate(
                     method,
-                    &return_type,
-                    &params,
+                    &return_type_source,
+                    &params_source,
                     &class_meta.internal_name,
                     ctx,
+                    index,
                     self.name(),
                 );
                 candidates.push(candidate);
@@ -129,8 +135,6 @@ impl OverrideProvider {
         set
     }
 }
-
-// ── 方法可重写判断 ─────────────────────────────────────────────────────────────
 
 fn is_overridable(method: &MethodSummary) -> bool {
     // Constructor / Static Initialization Block
@@ -167,10 +171,11 @@ fn is_access_modifier_prefix(prefix: &str) -> bool {
 
 fn build_candidate(
     method: &MethodSummary,
-    return_type: &str,
-    params: &[String],
-    defining_class: &Arc<str>,
+    return_type_source: &str,
+    params_source: &[String],
+    defining_class_internal: &Arc<str>,
     ctx: &CompletionContext,
+    index: &GlobalIndex,
     source: &'static str,
 ) -> CompletionCandidate {
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC};
@@ -180,11 +185,12 @@ fn build_candidate(
     } else if method.access_flags & ACC_PROTECTED != 0 {
         "protected"
     } else {
-        // package-private(0 flags): Preserve visibility
+        // package-private
         ""
     };
 
-    let params_str = params
+    // 组装参数列表：如 "java.lang.Object arg0, int arg1"
+    let params_str = params_source
         .iter()
         .enumerate()
         .map(|(i, t)| format!("{} arg{}", t, i))
@@ -193,7 +199,7 @@ fn build_candidate(
 
     let label_text = format!(
         "{} {} {}({})",
-        visibility, return_type, method.name, params_str
+        visibility, return_type_source, method.name, params_str
     )
     .trim()
     .to_string();
@@ -207,85 +213,35 @@ fn build_candidate(
     };
 
     let insert_text = if ctx.has_paren_after_cursor() {
-        // If there is already a parenthesis after the cursor, only insert the annotation and signature header, without adding parentheses.
-        format!("@Override\n{}{}  {}(", vis_prefix, return_type, method.name)
+        format!(
+            "@Override\n{}{}  {}(",
+            vis_prefix, return_type_source, method.name
+        )
     } else {
         format!(
             "@Override\n{}{} {}({}) {{\n    {}\n}}",
-            vis_prefix, return_type, method.name, params_str, body_line
+            vis_prefix, return_type_source, method.name, params_str, body_line
         )
     };
 
-    let detail = format!("@Override — {}", defining_class.replace(['/', '$'], "."));
+    // 查找展示名称，如果因为某些极端的并发原因没查到，做个兜底展示
+    let defining_class_display = index
+        .get_source_type_name(defining_class_internal)
+        .unwrap_or_else(|| defining_class_internal.replace(['/', '$'], "."));
+
+    let detail = format!("@Override — {}", defining_class_display);
 
     CompletionCandidate::new(
         Arc::from(label_text.as_str()),
         insert_text,
         CandidateKind::Method {
             descriptor: Arc::clone(&method.descriptor),
-            defining_class: Arc::clone(defining_class),
+            defining_class: Arc::clone(defining_class_internal),
         },
         source,
     )
     .with_detail(detail)
     .with_score(65.0)
-}
-
-// TODO: remove duplicated utils
-
-/// `(Ljava/lang/String;I)V` → `(["String", "int"], "void")`
-fn parse_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
-    let params_end = descriptor.find(')')?;
-    let params_str = &descriptor[1..params_end];
-    let return_str = &descriptor[params_end + 1..];
-
-    let (_, params) = parse_type_sequence(params_str);
-    let (_, return_type) = jvm_type_to_java(return_str);
-
-    Some((params, return_type))
-}
-
-fn parse_type_sequence(mut s: &str) -> (&str, Vec<String>) {
-    let mut types = Vec::new();
-    while !s.is_empty() {
-        let (rest, t) = jvm_type_to_java(s);
-        if rest.len() == s.len() {
-            break;
-        }
-        types.push(t);
-        s = rest;
-    }
-    (s, types)
-}
-
-/// Parse a JVM type from the `s` header and return `(remaining string, Java type name)`.
-fn jvm_type_to_java(s: &str) -> (&str, String) {
-    if s.is_empty() {
-        return (s, "void".to_string());
-    }
-    match s.as_bytes()[0] {
-        b'V' => (&s[1..], "void".to_string()),
-        b'I' => (&s[1..], "int".to_string()),
-        b'J' => (&s[1..], "long".to_string()),
-        b'D' => (&s[1..], "double".to_string()),
-        b'F' => (&s[1..], "float".to_string()),
-        b'Z' => (&s[1..], "boolean".to_string()),
-        b'B' => (&s[1..], "byte".to_string()),
-        b'S' => (&s[1..], "short".to_string()),
-        b'C' => (&s[1..], "char".to_string()),
-        b'L' => {
-            let end = s.find(';').unwrap_or(s.len() - 1);
-            let internal = &s[1..end];
-            let simple = internal.rsplit('/').next().unwrap_or(internal);
-            let java_name = simple.replace('$', ".");
-            (&s[end + 1..], java_name)
-        }
-        b'[' => {
-            let (rest, inner) = jvm_type_to_java(&s[1..]);
-            (rest, format!("{}[]", inner))
-        }
-        _ => (&s[1..], s[..1].to_string()),
-    }
 }
 
 #[cfg(test)]
@@ -530,6 +486,7 @@ mod tests {
     fn test_overloads_both_shown_when_none_overridden() {
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
             make_class(
                 "com/example",
                 "Parent",
@@ -560,6 +517,7 @@ mod tests {
     fn test_overloads_only_unoverridden_shown() {
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
             make_class(
                 "com/example",
                 "Parent",
@@ -723,48 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_descriptor_void_no_params() {
-        let (params, ret) = parse_descriptor("()V").unwrap();
-        assert!(params.is_empty());
-        assert_eq!(ret, "void");
-    }
-
-    #[test]
-    fn test_parse_descriptor_primitives() {
-        let (params, ret) = parse_descriptor("(IZJ)D").unwrap();
-        assert_eq!(params, vec!["int", "boolean", "long"]);
-        assert_eq!(ret, "double");
-    }
-
-    #[test]
-    fn test_parse_descriptor_object_return() {
-        let (params, ret) = parse_descriptor("(Ljava/lang/String;)Ljava/util/List;").unwrap();
-        assert_eq!(params, vec!["String"]);
-        assert_eq!(ret, "List");
-    }
-
-    #[test]
-    fn test_parse_descriptor_array_param() {
-        let (params, ret) = parse_descriptor("([Ljava/lang/String;)V").unwrap();
-        assert_eq!(params, vec!["String[]"]);
-        assert_eq!(ret, "void");
-    }
-
-    #[test]
-    fn test_parse_descriptor_2d_array() {
-        let (params, ret) = parse_descriptor("([[I)V").unwrap();
-        assert_eq!(params, vec!["int[][]"]);
-        assert_eq!(ret, "void");
-    }
-
-    #[test]
-    fn test_parse_descriptor_inner_class() {
-        let (params, ret) = parse_descriptor("(Ljava/util/Map$Entry;)V").unwrap();
-        assert_eq!(params, vec!["Map.Entry"]);
-        assert_eq!(ret, "void");
-    }
-
-    #[test]
     fn test_protected_method_visibility_preserved() {
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![
@@ -883,6 +799,7 @@ mod tests {
         // Object 的 toString / equals / hashCode 应当出现
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
             // Object 本身
             ClassMetadata {
                 package: Some(Arc::from("java/lang")),
@@ -931,6 +848,7 @@ mod tests {
         // 如果 mro 里已经有 Object（通过显式继承链走到），不应重复
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
             ClassMetadata {
                 package: Some(Arc::from("java/lang")),
                 name: Arc::from("Object"),
@@ -1031,11 +949,14 @@ mod tests {
     #[test]
     fn test_interface_default_method_shown() {
         let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![make_interface(
-            "com/example",
-            "Greeter",
-            vec![default_method("greet", "()Ljava/lang/String;")],
-        )]);
+        idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
+            make_interface(
+                "com/example",
+                "Greeter",
+                vec![default_method("greet", "()Ljava/lang/String;")],
+            ),
+        ]);
         let mut cls = make_class("com/example", "HelloGreeter", None, vec![]);
         cls.interfaces = vec![Arc::from("com/example/Greeter")];
         idx.add_classes(vec![cls]);

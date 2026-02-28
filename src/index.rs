@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
 
-use crate::completion::type_resolver::parse_return_type_from_descriptor;
+use crate::completion::type_resolver::{SymbolProvider, parse_return_type_from_descriptor};
 
 pub mod cache;
 pub mod codebase;
@@ -32,6 +32,24 @@ pub struct ClassMetadata {
     pub generic_signature: Option<Arc<str>>,
     pub inner_class_of: Option<Arc<str>>,
     pub origin: ClassOrigin,
+}
+
+impl ClassMetadata {
+    /// Get the fully qualified name of the source code that conforms to Java syntax
+    pub fn source_name(&self) -> String {
+        let mut out = String::new();
+        if let Some(ref pkg) = self.package {
+            out.push_str(&pkg.replace('/', "."));
+            out.push('.');
+        }
+
+        if self.inner_class_of.is_some() {
+            out.push_str(&self.name.replace('$', "."));
+        } else {
+            out.push_str(&self.name);
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -445,6 +463,11 @@ impl GlobalIndex {
         self.exact_match.get(internal_name).cloned()
     }
 
+    /// Attempt to retrieve the source code format name; return None if the index does not exist.
+    pub fn get_source_type_name(&self, internal: &str) -> Option<String> {
+        self.get_class(internal).map(|meta| meta.source_name())
+    }
+
     pub fn get_classes_by_simple_name(&self, simple_name: &str) -> &[Arc<ClassMetadata>] {
         self.simple_name_index
             .get(simple_name)
@@ -665,6 +688,12 @@ impl GlobalIndex {
 impl Default for GlobalIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl SymbolProvider for GlobalIndex {
+    fn resolve_source_name(&self, internal_name: &str) -> Option<String> {
+        self.get_source_type_name(internal_name)
     }
 }
 
@@ -1282,5 +1311,22 @@ public class Calc {
             .find(|m| m.name.as_ref() == "add")
             .unwrap();
         assert_eq!(method.param_names, vec![Arc::from("a"), Arc::from("b")]);
+    }
+
+    #[test]
+    fn test_strict_source_name_generation() {
+        // 场景 1：合法的嵌套类 (内部有明确的 inner_class_of)
+        let mut nested = make_class("com/example", "Outer$Inner", ClassOrigin::Unknown);
+        nested.inner_class_of = Some(Arc::from("Outer"));
+        assert_eq!(nested.source_name(), "com.example.Outer.Inner");
+
+        // 场景 2：带 $ 的普通类 (比如混淆后的类 a$b)
+        let obfuscated = make_class("com/example", "a$b", ClassOrigin::Unknown);
+        // 注意：没有设置 inner_class_of，所以不认为是嵌套类
+        assert_eq!(obfuscated.source_name(), "com.example.a$b");
+
+        // 场景 3：普通顶层类
+        let normal = make_class("java/lang", "String", ClassOrigin::Unknown);
+        assert_eq!(normal.source_name(), "java.lang.String");
     }
 }

@@ -11,6 +11,13 @@ use std::sync::Arc;
 pub mod generics;
 pub mod type_name;
 
+pub trait SymbolProvider {
+    /// Strict query: Given internal_name (e.g., "java/util/Map$Entry")
+    // If it exists in the index, return its absolutely correct source code name (e.g., "java.util.Map.Entry")
+    // If it does not exist, strictly return None
+    fn resolve_source_name(&self, internal_name: &str) -> Option<String>;
+}
+
 pub struct TypeResolver<'idx> {
     index: &'idx GlobalIndex,
 }
@@ -296,6 +303,69 @@ fn params_match(descriptor: &str, arg_types: &[TypeName]) -> bool {
         .all(|(desc, arg_ty)| singleton_descriptor_matches_type(desc, arg_ty.as_str()))
 }
 
+pub fn descriptor_to_source_type(desc: &str, provider: &impl SymbolProvider) -> Option<String> {
+    let mut array_depth = 0;
+    let mut s = desc;
+    while s.starts_with('[') {
+        array_depth += 1;
+        s = &s[1..];
+    }
+
+    let base_type = match s {
+        "B" => "byte".to_string(),
+        "C" => "char".to_string(),
+        "D" => "double".to_string(),
+        "F" => "float".to_string(),
+        "I" => "int".to_string(),
+        "J" => "long".to_string(),
+        "S" => "short".to_string(),
+        "Z" => "boolean".to_string(),
+        "V" => "void".to_string(),
+        _ if s.starts_with('L') && s.ends_with(';') => {
+            let internal = &s[1..s.len() - 1];
+            provider.resolve_source_name(internal)?
+        }
+        _ => return None, // 格式异常的描述符
+    };
+
+    let mut result = String::with_capacity(base_type.len() + array_depth * 2);
+    result.push_str(&base_type);
+    for _ in 0..array_depth {
+        result.push_str("[]");
+    }
+    Some(result)
+}
+
+/// Return: Option<(parameters, return_type)>
+pub fn parse_strict_method_signature(
+    descriptor: &str,
+    provider: &impl SymbolProvider,
+) -> Option<(Vec<String>, String)> {
+    let l_paren = descriptor.find('(')?;
+    let r_paren = descriptor.find(')')?;
+
+    let params_str = &descriptor[l_paren + 1..r_paren];
+    let return_str = &descriptor[r_paren + 1..];
+
+    let mut params = Vec::new();
+    let mut s = params_str;
+    while !s.is_empty() {
+        let (one_desc, rest) = consume_one_descriptor_type(s);
+        if one_desc.is_empty() {
+            break;
+        }
+        // 如果任何一个参数类型查不到，整个方法解析宣告失败
+        let resolved_param = descriptor_to_source_type(one_desc, provider)?;
+        params.push(resolved_param);
+        s = rest;
+    }
+
+    // 如果返回值类型查不到，宣告失败
+    let resolved_return = descriptor_to_source_type(return_str, provider)?;
+
+    Some((params, resolved_return))
+}
+
 /// Convert JVM descriptor into source code style type name
 ///
 /// # Examples
@@ -304,6 +374,7 @@ fn params_match(descriptor: &str, arg_types: &[TypeName]) -> bool {
 /// - "[[J" -> "long[][]"
 /// - "Ljava/lang/String;" -> "java/lang/String"
 /// - "[Ljava/lang/String;" -> "java/lang/String[]"
+#[deprecated]
 pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
     let mut array_depth = 0;
     let mut s = desc;
@@ -339,6 +410,7 @@ pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
     result
 }
 
+#[deprecated]
 pub fn parse_method_descriptor(descriptor: &str) -> Vec<String> {
     let inner = match descriptor.find('(').zip(descriptor.find(')')) {
         Some((l, r)) => &descriptor[l + 1..r],
@@ -355,6 +427,32 @@ pub fn parse_method_descriptor(descriptor: &str) -> Vec<String> {
     }
 
     types
+}
+
+/// Resolve the complete method signature descriptor
+/// Returns: (parameter type list, return value type)
+/// Example: "(Ljava/lang/String;I)[B" -> (["java/lang/String", "int"], "byte[]")
+pub fn parse_full_method_signature(descriptor: &str) -> Option<(Vec<String>, String)> {
+    let l_paren = descriptor.find('(')?;
+    let r_paren = descriptor.find(')')?;
+
+    let params_part = &descriptor[l_paren + 1..r_paren];
+    let return_part = &descriptor[r_paren + 1..];
+
+    let mut params = Vec::new();
+    let mut s = params_part;
+    while !s.is_empty() {
+        let (one_desc, rest) = consume_one_descriptor_type(s);
+        if one_desc.is_empty() {
+            break;
+        }
+        params.push(descriptor_to_source_code_style_type(one_desc));
+        s = rest;
+    }
+
+    let return_type = descriptor_to_source_code_style_type(return_part);
+
+    Some((params, return_type))
 }
 
 /// Converts a singleton descriptor to an internal type name
@@ -394,7 +492,15 @@ fn singleton_descriptor_matches_type(desc: &str, ty: &str) -> bool {
     false
 }
 
-fn consume_one_descriptor_type(s: &str) -> (&str, &str) {
+pub fn parse_full_signature(descriptor: &str) -> Option<(Vec<String>, String)> {
+    let params = parse_method_descriptor(descriptor);
+    let return_type = extract_return_internal_name(descriptor)
+        .map(|t| descriptor_to_source_code_style_type(t.as_str()))
+        .unwrap_or_else(|| "void".to_string());
+    Some((params, return_type))
+}
+
+pub(crate) fn consume_one_descriptor_type(s: &str) -> (&str, &str) {
     match s.chars().next() {
         Some('L') => {
             if let Some(end) = s.find(';') {
