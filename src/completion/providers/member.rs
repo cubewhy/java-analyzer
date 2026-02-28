@@ -726,6 +726,7 @@ mod tests {
         MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
+            param_names: vec![],
             access_flags,
             is_synthetic,
             generic_signature: None,
@@ -1395,6 +1396,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("main"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1403,6 +1405,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("notStartsWithma"), // Contains "ma" but does not start_with
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1550,6 +1553,7 @@ public class RandomClass {
                 methods: vec![MethodSummary {
                     name: Arc::from("getMain2"),
                     descriptor: Arc::from("()LMain2;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1570,6 +1574,7 @@ public class RandomClass {
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1621,6 +1626,7 @@ public class RandomClass {
             methods: vec![MethodSummary {
                 name: Arc::from("func"),
                 descriptor: Arc::from("()V"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
@@ -1672,6 +1678,7 @@ public class RandomClass {
                 methods: vec![MethodSummary {
                     name: Arc::from("funcA"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1692,6 +1699,7 @@ public class RandomClass {
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1751,6 +1759,7 @@ public class RandomClass {
                 methods: vec![MethodSummary {
                     name: Arc::from("funcA"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1771,6 +1780,7 @@ public class RandomClass {
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,

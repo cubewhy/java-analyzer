@@ -300,6 +300,7 @@ mod tests {
         MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
+            param_names: vec![],
             access_flags: flags,
             is_synthetic: false,
             generic_signature: None,
@@ -311,6 +312,7 @@ mod tests {
         MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
+            param_names: vec![],
             access_flags: ACC_PUBLIC,
             is_synthetic: true,
             generic_signature: None,
@@ -983,6 +985,7 @@ mod tests {
         MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
+            param_names: vec![],
             access_flags: ACC_PUBLIC | ACC_ABSTRACT,
             is_synthetic: false,
             generic_signature: None,
@@ -994,6 +997,7 @@ mod tests {
         MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
+            param_names: vec![],
             access_flags: ACC_PUBLIC, // default method: public, non-abstract, non-static
             is_synthetic: false,
             generic_signature: None,

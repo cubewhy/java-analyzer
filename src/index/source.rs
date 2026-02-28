@@ -192,6 +192,7 @@ fn parse_java_method(node: Node, bytes: &[u8]) -> Option<MethodSummary> {
     let mut return_type_text: Option<&str> = None;
     let mut params_text: Option<&str> = None;
     let mut access_flags: u16 = ACC_PUBLIC;
+    let mut param_names: Vec<Arc<str>> = Vec::new();
 
     let mut walker = node.walk();
     for child in node.children(&mut walker) {
@@ -219,6 +220,19 @@ fn parse_java_method(node: Node, bytes: &[u8]) -> Option<MethodSummary> {
             }
             "formal_parameters" => {
                 params_text = Some(node_text(child, bytes));
+                // 收集参数名：formal_parameter > identifier（最后一个 identifier 是参数名）
+                let mut wc = child.walk();
+                for fp in child.named_children(&mut wc) {
+                    if fp.kind() == "formal_parameter" || fp.kind() == "spread_parameter" {
+                        // 取最后一个 identifier 作为参数名
+                        let name = fp.children(&mut fp.walk())
+                            .filter(|c| c.kind() == "identifier")
+                            .last()
+                            .map(|c| Arc::from(node_text(c, bytes)))
+                            .unwrap_or_else(|| Arc::from(""));
+                        param_names.push(name);
+                    }
+                }
             }
             _ => {}
         }
@@ -237,6 +251,7 @@ fn parse_java_method(node: Node, bytes: &[u8]) -> Option<MethodSummary> {
         name: Arc::from(name),
         descriptor: Arc::from(descriptor.as_str()),
         access_flags,
+        param_names,
         is_synthetic: false,
         generic_signature,
         return_type,
@@ -572,10 +587,29 @@ fn extract_kotlin_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
 
         let func_node = name_node.parent().unwrap();
         let generic_signature = extract_generic_signature(func_node, bytes, &descriptor);
+        let param_names: Vec<Arc<str>> = {
+            let params_node = caps
+                .iter()
+                .find(|(idx, _)| *idx == params_idx)
+                .map(|(_, n)| *n);
+            if let Some(pn) = params_node {
+                pn.named_children(&mut pn.walk())
+                    .filter(|n| n.kind() == "parameter" || n.kind() == "function_value_parameter")
+                    .filter_map(|n| {
+                        n.children(&mut n.walk())
+                            .find(|c| c.kind() == "simple_identifier")
+                            .map(|c| Arc::from(node_text(c, bytes)))
+                    })
+                    .collect()
+            } else {
+                vec![]
+            }
+        };
 
         result.push(MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor.as_str()),
+            param_names,
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
             generic_signature,
@@ -778,6 +812,8 @@ fn extract_generic_signature(node: Node, bytes: &[u8], suffix: &str) -> Option<A
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::index::ClassOrigin;
     use crate::index::source::{parse_java_source, parse_kotlin_source};
 
@@ -911,6 +947,21 @@ public class Main {
         assert_eq!(
             meta.generic_signature.as_deref(),
             Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+        );
+    }
+
+    #[test]
+    fn test_kotlin_param_names() {
+        let src = "class Foo { fun greet(name: String, times: Int) {} }";
+        let classes = parse_kotlin_source(src, ClassOrigin::Unknown);
+        let method = classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "greet")
+            .unwrap();
+        assert_eq!(
+            method.param_names.as_slice(),
+            &[Arc::from("name"), Arc::from("times")]
         );
     }
 }

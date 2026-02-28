@@ -158,7 +158,7 @@ pub fn method_detail(
     class_meta: &ClassMetadata,
     method: &MethodSummary,
 ) -> String {
-    // 1. 处理返回类型的泛型替换
+    // 1. 处理返回类型 (保持不变)
     let base_return = method.return_type.as_deref().unwrap_or("void");
     let display_return: Arc<str> = if let Some(sig) = method.generic_signature.as_deref() {
         if let Some(ret_idx) = sig.find(')') {
@@ -171,10 +171,7 @@ pub fn method_detail(
             .map(|t| t.0.clone())
             .unwrap_or_else(|| {
                 JvmType::parse(ret_jvm)
-                    .map(|(t, _)| {
-                        // 2. 将 String 包装进 Arc
-                        Arc::from(t.to_internal_name_string())
-                    })
+                    .map(|(t, _)| Arc::from(t.to_signature_string()))
                     .unwrap_or_else(|| Arc::from(base_return))
             })
         } else {
@@ -185,25 +182,21 @@ pub fn method_detail(
     };
     let source_style_return = descriptor_to_source_code_style_type(&display_return);
 
-    // 2. 处理参数列表的泛型替换
+    // 2. 处理参数列表
     let sig_to_use = method
         .generic_signature
         .as_deref()
         .unwrap_or(&method.descriptor);
-    let mut formatted_params = Vec::new();
+
+    let mut param_types = Vec::new();
 
     if let Some(start) = sig_to_use.find('(')
         && let Some(end) = sig_to_use.find(')')
     {
         let mut params_str = &sig_to_use[start + 1..end];
-
-        // 利用 JvmType::parse 逐个消费参数类型
         while !params_str.is_empty() {
             if let Some((_, rest)) = JvmType::parse(params_str) {
-                // 截取当前消费掉的这一段 (例如 "TE;" 或 "Ljava/lang/String;")
                 let param_jvm_str = &params_str[..params_str.len() - rest.len()];
-
-                // 尝试对其进行替换
                 let subbed = substitute_type(
                     receiver_internal,
                     class_meta.generic_signature.as_deref(),
@@ -212,19 +205,33 @@ pub fn method_detail(
                 .map(|t| t.0.clone())
                 .unwrap_or_else(|| {
                     JvmType::parse(param_jvm_str)
-                        .map(|(t, _)| Arc::from(t.to_internal_name_string()))
-                        .unwrap_or_else(|| Arc::from(base_return))
+                        .map(|(t, _)| Arc::from(t.to_signature_string()))
+                        .unwrap_or_else(|| Arc::from("void")) // 理论上参数不会是 void
                 });
 
-                formatted_params.push(descriptor_to_source_code_style_type(&subbed));
-                params_str = rest; // 游标前移
+                param_types.push(descriptor_to_source_code_style_type(&subbed));
+                params_str = rest;
             } else {
-                break; // 解析异常，安全退出
+                break;
             }
         }
     }
 
-    // 3. 提取一个干净的简短类名以美化 UI (例如 "java/util/List<String>" -> "List")
+    let full_params: Vec<String> = param_types
+        .into_iter()
+        .enumerate()
+        .map(|(i, type_name)| {
+            // 尝试获取对应的参数名，如果没有则使用 argN
+            let param_name = method
+                .param_names
+                .get(i)
+                .cloned()
+                .unwrap_or_else(|| Arc::from(format!("arg{}", i).as_str()));
+            format!("{} {}", type_name, param_name)
+        })
+        .collect();
+
+    // 3. 提取类名 (保持不变)
     let base_class_name = receiver_internal
         .split('<')
         .next()
@@ -239,7 +246,7 @@ pub fn method_detail(
         short_class_name,
         source_style_return,
         method.name,
-        formatted_params.join(", ")
+        full_params.join(", ")
     )
 }
 

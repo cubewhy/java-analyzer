@@ -322,8 +322,12 @@ pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
         "S" => "short",
         "Z" => "boolean",
         "V" => "void",
-        _ if s.starts_with('L') && s.ends_with(';') => &s[1..s.len() - 1],
-        // unknown type
+        _ if s.starts_with('L') && s.ends_with(';') => {
+            // Strip trailing stray '[' that may precede ';' due to
+            // malformed output from JvmType::to_internal_name_string()
+            let inner = &s[1..s.len() - 1];
+            inner.trim_end_matches('[')
+        }
         _ => s,
     };
 
@@ -332,7 +336,6 @@ pub fn descriptor_to_source_code_style_type(desc: &str) -> String {
     for _ in 0..array_depth {
         result.push_str("[]");
     }
-
     result
 }
 
@@ -806,6 +809,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("randomFunction"),
                     descriptor: Arc::from("(Ljava/lang/String;I)LRandomClass;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -814,6 +818,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("randomFunction"),
                     descriptor: Arc::from("(Ljava/lang/String;J)LMain2;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -898,6 +903,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("getMain2"),
                     descriptor: Arc::from("()LMain2;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -918,6 +924,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -991,6 +998,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("get"),
                 descriptor: Arc::from("(I)Ljava/lang/Object;"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 // 这里代表泛型方法返回类型是 E
@@ -1053,6 +1061,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("getCharArr"),
                 descriptor: Arc::from("()[[C"), // 代表方法返回 char[][]
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,

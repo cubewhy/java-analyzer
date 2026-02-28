@@ -45,6 +45,7 @@ pub enum ClassOrigin {
 pub struct MethodSummary {
     pub name: Arc<str>,
     pub descriptor: Arc<str>,
+    pub param_names: Vec<Arc<str>>,
     pub access_flags: u16,
     pub is_synthetic: bool,
     pub generic_signature: Option<Arc<str>>,
@@ -188,11 +189,41 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                     None
                 }
             });
+            let param_names: Vec<Arc<str>> = md
+                .attributes
+                .iter()
+                .find_map(|a| {
+                    if let AttributeInfo::MethodParameters { parameters } = a {
+                        let names: Vec<Arc<str>> = parameters
+                            .iter()
+                            .map(|p| {
+                                if p.name_index == 0 {
+                                    return Arc::from("");
+                                }
+                                cn.constant_pool
+                                    .get(p.name_index as usize)
+                                    .and_then(|cp| {
+                                        if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                                            Some(Arc::from(s.as_str()))
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_else(|| Arc::from(""))
+                            })
+                            .collect();
+                        Some(names)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
             let return_type = parse_return_type_from_descriptor(&md.descriptor);
             MethodSummary {
                 name: Arc::from(md.name.as_str()),
                 descriptor: Arc::from(md.descriptor.as_str()),
                 access_flags: md.access_flags,
+                param_names,
                 is_synthetic,
                 generic_signature,
                 return_type,
@@ -689,6 +720,7 @@ mod tests {
             descriptor: Arc::from(descriptor),
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
+            param_names: vec![],
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
         }
@@ -1232,5 +1264,23 @@ class Main {
         )]);
         assert!(!idx.has_classes_in_package("java"));
         assert!(idx.has_classes_in_package("java/lang"));
+    }
+
+    #[test]
+    fn test_param_names_from_java_source() {
+        use crate::index::codebase::index_source_text;
+        let src = r#"
+package com.example;
+public class Calc {
+    public int add(int a, int b) { return a + b; }
+}
+"#;
+        let classes = index_source_text("file:///Calc.java", src, "java");
+        let method = classes[0]
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "add")
+            .unwrap();
+        assert_eq!(method.param_names, vec![Arc::from("a"), Arc::from("b")]);
     }
 }

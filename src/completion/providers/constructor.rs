@@ -220,6 +220,7 @@ mod tests {
             vec![MethodSummary {
                 name: Arc::from("<init>"),
                 descriptor: Arc::from("()V"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
@@ -369,6 +370,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("<init>"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,

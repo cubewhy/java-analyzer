@@ -214,6 +214,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("abs"),
                     descriptor: Arc::from("(I)I"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -222,6 +223,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("pow"),
                     descriptor: Arc::from("(DD)D"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,

@@ -522,6 +522,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("f"),
                 descriptor: Arc::from("()V"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
@@ -712,6 +713,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("<init>"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -762,6 +764,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("randomFunction"),
                 descriptor: Arc::from("(Ljava/lang/String;)LNestedClass;"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
@@ -823,6 +826,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("randomFunction"),
                     descriptor: Arc::from("(Ljava/lang/String;I)LRandomClass;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -831,6 +835,7 @@ mod tests {
                 MethodSummary {
                     name: Arc::from("randomFunction"),
                     descriptor: Arc::from("(Ljava/lang/String;J)LMain2;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -891,6 +896,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("getString"),
                 descriptor: Arc::from("()Ljava/lang/String;"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
@@ -944,6 +950,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("getValue"),
                     descriptor: Arc::from("()Ljava/lang/String;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -987,6 +994,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("getMain2"),
                     descriptor: Arc::from("()LMain2;"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1007,6 +1015,7 @@ mod tests {
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
                     descriptor: Arc::from("()V"),
+                    param_names: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
@@ -1136,6 +1145,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("length"),
                 descriptor: Arc::from("()I"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
@@ -1340,6 +1350,7 @@ mod tests {
             methods: vec![MethodSummary {
                 name: Arc::from("getArr"),
                 descriptor: Arc::from("()[Ljava/lang/String;"),
+                param_names: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
