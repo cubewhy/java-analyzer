@@ -4,7 +4,8 @@ use super::CompletionProvider;
 use crate::completion::{
     candidate::{CandidateKind, CompletionCandidate},
     context::{CompletionContext, CursorLocation},
-    fuzzy,
+    fuzzy, scorer,
+    type_resolver::ContextualResolver,
 };
 use crate::index::GlobalIndex;
 use std::sync::Arc;
@@ -53,6 +54,8 @@ impl CompletionProvider for ThisMemberProvider {
             |m| m.name.as_ref(),
         );
 
+        let resolver = ContextualResolver::new(index, ctx);
+
         let mut results: Vec<CompletionCandidate> = scored
             .into_iter()
             .map(|(m, score)| {
@@ -83,27 +86,24 @@ impl CompletionProvider for ThisMemberProvider {
                 } else {
                     m.name.to_string()
                 };
-                let detail = format!(
-                    "{} {} {}",
-                    if m.is_private { "private" } else { "public" },
-                    if m.is_static { "static" } else { "" },
-                    m.name
-                );
+                let detail = scorer::source_member_detail(enclosing, m, &resolver);
+
                 CompletionCandidate::new(Arc::clone(&m.name), insert_text, kind, self.name())
                     .with_detail(detail)
                     .with_score(60.0 + score as f32 * 0.1)
             })
             .collect();
 
-        // ── 2. 继承链成员（从 index MRO 查，跳过当前类自身已有的）────────────
+        // Inheritance chain members (search from index MRO, skipping those already existing in the current class)
         if !enclosing.is_empty() {
-            // 当前类 source 里已有的名字，避免重复
+            // Avoid duplicate names that already exist in the current class source.
             let source_names: std::collections::HashSet<Arc<str>> =
                 ctx.current_class_members.keys().map(Arc::clone).collect();
 
             let prefix_lower = prefix.to_lowercase();
 
             let mro = index.mro(enclosing);
+            let resolver = ContextualResolver::new(index, ctx);
 
             tracing::debug!(
                 "  mro: {:?}",
@@ -164,7 +164,12 @@ impl CompletionProvider for ThisMemberProvider {
                             kind,
                             self.name(),
                         )
-                        .with_detail(format!("inherited from {}", class_meta.name))
+                        .with_detail(scorer::method_detail(
+                            class_meta.internal_name.as_ref(),
+                            class_meta,
+                            method,
+                            &resolver,
+                        ))
                         .with_score(50.0),
                     );
                 }
@@ -207,7 +212,12 @@ impl CompletionProvider for ThisMemberProvider {
                             kind,
                             self.name(),
                         )
-                        .with_detail(format!("inherited from {}", class_meta.name))
+                        .with_detail(scorer::field_detail(
+                            class_meta.internal_name.as_ref(),
+                            class_meta,
+                            field,
+                            &resolver,
+                        ))
                         .with_score(50.0),
                     );
                 }

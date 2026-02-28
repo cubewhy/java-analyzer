@@ -3,9 +3,12 @@ use std::sync::Arc;
 use rust_asm::constants::ACC_PRIVATE;
 
 use crate::{
-    completion::type_resolver::{
-        SymbolProvider, descriptor_to_source_type,
-        generics::{JvmType, substitute_type},
+    completion::{
+        context::CurrentClassMember,
+        type_resolver::{
+            SymbolProvider, descriptor_to_source_type,
+            generics::{JvmType, substitute_type},
+        },
     },
     index::{ClassMetadata, FieldSummary, MethodSummary},
 };
@@ -290,6 +293,122 @@ pub fn field_detail(
         "{} — {} : {}",
         short_class_name, field.name, source_style_type
     )
+}
+
+pub fn source_member_detail(
+    receiver_internal: &str,
+    member: &CurrentClassMember,
+    provider: &impl SymbolProvider,
+) -> String {
+    // TODO: display argument name
+    let base_class_name = receiver_internal
+        .split('<')
+        .next()
+        .unwrap_or(receiver_internal);
+    let short_class_name = base_class_name
+        .rsplit('/')
+        .next()
+        .unwrap_or(base_class_name);
+
+    // 安全网：专门处理 provider 无法解析 (返回 None) 的情况
+    // 确保即使 provider 匹配失败，也不泄漏 L...; 或 / 等 JVM 内部特征
+    let clean_fallback = |jvm_sig: &str| -> String {
+        let mut array_dims = 0;
+        let mut base = jvm_sig.trim();
+        while base.starts_with('[') {
+            array_dims += 1;
+            base = &base[1..];
+        }
+        let type_name = match base {
+            "B" => "byte",
+            "C" => "char",
+            "D" => "double",
+            "F" => "float",
+            "I" => "int",
+            "J" => "long",
+            "S" => "short",
+            "Z" => "boolean",
+            "V" => "void",
+            _ if base.starts_with('L') && base.ends_with(';') => &base[1..base.len() - 1],
+            _ => base,
+        };
+        let source_type = type_name.replace('/', ".");
+        let source_type = source_type.replace('$', "."); // 处理内部类 Map$Entry -> Map.Entry
+        format!("{}{}", source_type, "[]".repeat(array_dims))
+    };
+
+    if member.is_method {
+        let sig = member.descriptor.as_ref();
+
+        // 1. 解析返回类型
+        let ret_jvm = if let Some(ret_idx) = sig.find(')') {
+            &sig[ret_idx + 1..]
+        } else {
+            "V"
+        };
+
+        let display_return: Arc<str> = JvmType::parse(ret_jvm)
+            .map(|(t, _)| Arc::from(t.to_signature_string()))
+            .unwrap_or_else(|| Arc::from(ret_jvm));
+
+        // 核心：优先信任 provider！只有失败才 fallback 到清理函数
+        let source_style_return = descriptor_to_source_type(&display_return, provider)
+            .unwrap_or_else(|| clean_fallback(ret_jvm));
+
+        // 2. 解析参数列表
+        let mut param_types = Vec::new();
+        if let Some(start) = sig.find('(')
+            && let Some(end) = sig.find(')')
+        {
+            let mut params_str = &sig[start + 1..end];
+            while !params_str.is_empty() {
+                if let Some((t, rest)) = JvmType::parse(params_str) {
+                    let param_jvm_str = &params_str[..params_str.len() - rest.len()];
+
+                    let subbed: Arc<str> = Arc::from(t.to_signature_string());
+
+                    // 核心：优先信任 provider！
+                    param_types.push(
+                        descriptor_to_source_type(&subbed, provider)
+                            .unwrap_or_else(|| clean_fallback(param_jvm_str)),
+                    );
+
+                    params_str = rest;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let full_params: Vec<String> = param_types
+            .into_iter()
+            .enumerate()
+            .map(|(i, type_name)| format!("{} arg{}", type_name, i))
+            .collect();
+
+        format!(
+            "{} — {} {}({})",
+            short_class_name,
+            source_style_return,
+            member.name,
+            full_params.join(", ")
+        )
+    } else {
+        // == 处理字段 ==
+        let sig_to_use = member.descriptor.as_ref();
+        let display_type: Arc<str> = JvmType::parse(sig_to_use)
+            .map(|(t, _)| Arc::from(t.to_signature_string()))
+            .unwrap_or_else(|| Arc::from(sig_to_use));
+
+        // 核心：优先信任 provider！
+        let source_style_type = descriptor_to_source_type(&display_type, provider)
+            .unwrap_or_else(|| clean_fallback(sig_to_use));
+
+        format!(
+            "{} — {} : {}",
+            short_class_name, member.name, source_style_type
+        )
+    }
 }
 
 /// Extract the first letter (lowercase) of each word in camelCase naming
