@@ -568,10 +568,32 @@ pub fn java_source_type_to_descriptor(ty: &str) -> String {
 
 /// Java source code type name → JVM descriptor (used for fields)
 pub fn java_type_to_descriptor(ty: &str) -> String {
-    let base = ty.split('<').next().unwrap_or(ty).trim();
-    let array_depth = ty.chars().filter(|&c| c == '[').count();
-    let brackets: String = (0..array_depth).map(|_| '[').collect();
-    format!("{}{}", brackets, java_source_type_to_descriptor(base))
+    let ty = ty.trim();
+    let dims = ty.matches("[]").count();
+    let base = ty.split('[').next().unwrap_or(ty).trim();
+
+    let mut desc = String::new();
+    for _ in 0..dims {
+        desc.push('[');
+    }
+
+    match base {
+        "byte" => desc.push('B'),
+        "char" => desc.push('C'),
+        "double" => desc.push('D'),
+        "float" => desc.push('F'),
+        "int" => desc.push('I'),
+        "long" => desc.push('J'),
+        "short" => desc.push('S'),
+        "boolean" => desc.push('Z'),
+        "void" => desc.push('V'),
+        _ => {
+            desc.push('L');
+            desc.push_str(&base.replace('.', "/"));
+            desc.push(';');
+        }
+    }
+    desc
 }
 
 /// 将 Java 源码类型转换为携带泛型的 JVM internal name

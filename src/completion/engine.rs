@@ -77,6 +77,36 @@ impl CompletionEngine {
     }
 
     fn enrich_context(&self, ctx: &mut CompletionContext, index: &GlobalIndex) {
+        {
+            let resolver = TypeResolver::new(index);
+            let to_resolve: Vec<(usize, String)> = ctx
+                .local_variables
+                .iter()
+                .enumerate()
+                .filter_map(|(i, lv)| {
+                    if lv.type_internal.as_ref() == "var" {
+                        lv.init_expr.as_deref().map(|e| (i, e.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            for (idx_in_vec, init_expr) in to_resolve {
+                if let Some(resolved) = resolve_var_init_expr(
+                    &init_expr,
+                    &ctx.local_variables,
+                    ctx.enclosing_internal_name.as_ref(),
+                    &resolver,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                    index,
+                ) {
+                    ctx.local_variables[idx_in_vec].type_internal = resolved;
+                }
+            }
+        }
+
         if let CursorLocation::MemberAccess {
             receiver_type,
             receiver_expr,
@@ -221,9 +251,9 @@ fn resolve_array_access_type(
     locals: &[LocalVar],
     enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
-    _existing_imports: &[Arc<str>],
-    _enclosing_package: Option<&str>,
-    _index: &GlobalIndex,
+    existing_imports: &[Arc<str>],
+    enclosing_package: Option<&str>,
+    index: &GlobalIndex,
 ) -> Option<TypeName> {
     let bracket = expr.rfind('[')?;
     if !expr.trim_end().ends_with(']') {
@@ -233,7 +263,23 @@ fn resolve_array_access_type(
     if array_expr.is_empty() {
         return None;
     }
-    let array_type = resolver.resolve(array_expr, locals, enclosing_internal)?;
+
+    // 统一走解析链，让 evaluate_chain 去应对多级调用
+    let chain = parse_chain_from_expr(array_expr);
+    let array_type = if chain.is_empty() {
+        resolver.resolve(array_expr, locals, enclosing_internal)
+    } else {
+        evaluate_chain(
+            &chain,
+            locals,
+            enclosing_internal,
+            resolver,
+            existing_imports,
+            enclosing_package,
+            index,
+        )
+    }?;
+
     array_type.element_type()
 }
 
@@ -316,6 +362,15 @@ fn evaluate_chain(
 ) -> Option<TypeName> {
     let mut current: Option<TypeName> = None;
     for (i, seg) in chain.iter().enumerate() {
+        // 提取 base_name 和 数组维度 (彻底解决 parser 不拆分 [0] 的问题)
+        let bracket_idx = seg.name.find('[');
+        let base_name = if let Some(idx) = bracket_idx {
+            &seg.name[..idx]
+        } else {
+            &seg.name
+        };
+        let dimensions = seg.name.matches('[').count();
+
         if i == 0 {
             if seg.arg_count.is_some() {
                 let recv_internal = enclosing_internal?;
@@ -331,18 +386,12 @@ fn evaluate_chain(
                 };
                 current = resolver.resolve_method_return(
                     recv_internal.as_ref(),
-                    &seg.name,
+                    base_name,
                     seg.arg_count.unwrap_or(-1),
                     arg_types_ref,
                 );
             } else {
-                current = resolver.resolve(&seg.name, locals, enclosing_internal);
-                tracing::debug!(
-                    ?current,
-                    seg_name = seg.name,
-                    "evaluate_chain: i=0 resolver.resolve returned"
-                );
-
+                current = resolver.resolve(base_name, locals, enclosing_internal);
                 if current.is_none() {
                     if let Some(enclosing) = enclosing_internal {
                         let enclosing_simple = enclosing
@@ -353,84 +402,99 @@ fn evaluate_chain(
                             .next()
                             .unwrap_or(enclosing);
 
-                        if seg.name == enclosing_simple {
+                        if base_name == enclosing_simple {
                             current = Some(TypeName::new(enclosing.as_ref()));
                         }
                     }
 
-                    // 如果还不是当前类，再走 Import 和全局解析
                     if current.is_none() {
                         current = resolve_simple_to_internal(
-                            &seg.name,
+                            base_name,
                             existing_imports,
                             enclosing_package,
                             index,
                         )
                         .map(TypeName::from);
-
-                        tracing::debug!(
-                            ?current,
-                            seg_name = seg.name,
-                            "evaluate_chain: i=0 resolve_simple_to_internal returned"
-                        );
                     }
                 }
             }
         } else {
             let recv = current.as_ref()?;
 
-            // === 新增：数组下标 segment，如 "[0]" ===
-            if seg.arg_count.is_none() && seg.name.starts_with('[') && seg.name.ends_with(']') {
-                let dimensions = seg.name.matches('[').count();
-                let mut ty = recv.clone();
-                for _ in 0..dimensions {
-                    ty = ty.element_type()?;
-                }
-                current = Some(ty);
-                continue;
-            }
-
-            let recv_str = recv.as_str();
-            let recv_full: TypeName = if recv_str.contains('/')
-                || index.get_class(recv_str).is_some()
-            {
-                recv.clone()
+            // 处理形如 `getArr()[0]` 被解析为独立的无名 segment 的情况
+            if base_name.is_empty() {
+                current = Some(recv.clone());
             } else {
-                resolve_simple_to_internal(recv_str, existing_imports, enclosing_package, index)?
-                    .into()
-            };
+                let recv_str = recv.as_str();
+                let recv_full: TypeName =
+                    if recv_str.contains('/') || index.get_class(recv_str).is_some() {
+                        recv.clone()
+                    } else {
+                        resolve_simple_to_internal(
+                            recv_str,
+                            existing_imports,
+                            enclosing_package,
+                            index,
+                        )?
+                        .into()
+                    };
 
-            if seg.arg_count.is_some() {
-                let arg_types: Vec<TypeName> = seg
-                    .arg_texts
-                    .iter()
-                    .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
-                    .collect();
-                let arg_types_ref = if arg_types.len() == seg.arg_texts.len() {
-                    &arg_types
+                if seg.arg_count.is_some() {
+                    let arg_types: Vec<TypeName> = seg
+                        .arg_texts
+                        .iter()
+                        .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
+                        .collect();
+                    let arg_types_ref = if arg_types.len() == seg.arg_texts.len() {
+                        &arg_types
+                    } else {
+                        &vec![]
+                    };
+                    current = resolver.resolve_method_return(
+                        recv_full.as_str(),
+                        base_name,
+                        seg.arg_count.unwrap_or(-1),
+                        arg_types_ref,
+                    );
                 } else {
-                    &vec![]
-                };
-                current = resolver.resolve_method_return(
-                    recv_full.as_str(),
-                    &seg.name,
-                    seg.arg_count.unwrap_or(-1),
-                    arg_types_ref,
-                );
-            } else {
-                // 字段访问，支持数组字段
-                let mut found = None;
-                for m in index.mro(recv_full.base()) {
-                    if let Some(f) = m.fields.iter().find(|f| f.name.as_ref() == seg.name) {
-                        if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
-                            found = Some(TypeName::new(ty));
-                        } else {
-                            found = parse_single_type_to_internal(&f.descriptor);
+                    let mut found = None;
+                    for m in index.mro(recv_full.base()) {
+                        if let Some(f) = m.fields.iter().find(|f| f.name.as_ref() == base_name) {
+                            tracing::debug!(field_name = ?f.name, descriptor = ?f.descriptor, "Evaluate_chain found field in index");
+
+                            if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
+                                found = Some(TypeName::new(ty));
+                            } else {
+                                found = parse_single_type_to_internal(&f.descriptor);
+                            }
+
+                            tracing::debug!(parsed_type = ?found, "Evaluate_chain parsed descriptor to TypeName");
+                            break;
                         }
+                    }
+                    current = found;
+                }
+            }
+        }
+
+        // 根据 [ ] 的数量进行循环剥壳降维
+        if dimensions > 0 {
+            // 使用 take() 拿走所有权，此时 current 自动变为 None
+            if let Some(mut ty) = current.take() {
+                let mut success = true;
+                for _ in 0..dimensions {
+                    if let Some(el) = ty.element_type() {
+                        ty = el;
+                    } else {
+                        success = false; // 超出数组维度访问
                         break;
                     }
                 }
-                current = found;
+                // 只有成功降维完毕，才把新的类型装回去
+                // 如果失败了，current 保持为 take() 留下的 None
+                if success {
+                    current = Some(ty);
+                }
             }
         }
     }
@@ -1388,5 +1452,180 @@ mod tests {
             .find(|v| v.name.as_ref() == "item")
             .unwrap();
         assert_eq!(item.type_internal.as_ref(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_enrich_context_resolves_var_receiver_first() {
+        use crate::index::{ClassMetadata, ClassOrigin};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("org/cubewhy")),
+            name: Arc::from("Main"),
+            internal_name: Arc::from("org/cubewhy/Main"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "m".to_string(), // m.a
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("m"),
+                type_internal: TypeName::new("var"),
+                init_expr: Some("new Main()".to_string()),
+            }],
+            Some(Arc::from("org/cubewhy/Main")),
+            Some(Arc::from("org/cubewhy/Main")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        // 如果 var 优先被解析，这里就能推导出 receiver_expr 是 org/cubewhy/Main
+        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+            assert_eq!(receiver_type.as_deref(), Some("org/cubewhy/Main"));
+        } else {
+            panic!("Expected MemberAccess");
+        }
+    }
+
+    #[test]
+    fn test_resolve_multi_dimensional_array_access() {
+        use crate::index::{ClassMetadata, ClassOrigin};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: None,
+            interfaces: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "res[0][0]".to_string(), // 多维数组访问
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("res"),
+                type_internal: TypeName::new("java/lang/String[][]"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+            assert_eq!(
+                receiver_type.as_deref(),
+                Some("java/lang/String"),
+                "res[0][0] should drop two dimensions"
+            );
+        } else {
+            panic!("Expected MemberAccess");
+        }
+    }
+
+    #[test]
+    fn test_resolve_multi_dimensional_field_access() {
+        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary};
+        use rust_asm::constants::ACC_PUBLIC;
+
+        let mut idx = GlobalIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Main"),
+                internal_name: Arc::from("org/cubewhy/Main"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![FieldSummary {
+                    name: Arc::from("arr"),
+                    // 这里模拟一个 4维数组 String[][][][]
+                    descriptor: Arc::from("[[[[Ljava/lang/String;"),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                }],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: None,
+                interfaces: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let engine = CompletionEngine::new();
+        let mut ctx = CompletionContext::new(
+            CursorLocation::MemberAccess {
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "m.arr[0][0][0][0]".to_string(), // 4层访问
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("m"),
+                type_internal: TypeName::new("org/cubewhy/Main"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        );
+
+        engine.enrich_context(&mut ctx, &idx);
+
+        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+            assert_eq!(
+                receiver_type.as_deref(),
+                Some("java/lang/String"),
+                "m.arr[0][0][0][0] should drop four dimensions successfully"
+            );
+        } else {
+            panic!("Expected MemberAccess");
+        }
     }
 }

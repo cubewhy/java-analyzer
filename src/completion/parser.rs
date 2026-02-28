@@ -54,6 +54,18 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
                 }
                 current = String::new();
             }
+            '[' if depth == 0 && !in_method => {
+                let trimmed = current.trim().to_string();
+                if !trimmed.is_empty() {
+                    segments.push(ChainSegment::variable(trimmed));
+                }
+                current = "[".to_string();
+            }
+            ']' if depth == 0 && !in_method && current.starts_with('[') => {
+                current.push(']');
+                segments.push(ChainSegment::variable(current.clone()));
+                current = String::new();
+            }
             c => {
                 if depth == 0 {
                     current.push(c);
@@ -62,11 +74,46 @@ pub(crate) fn parse_chain_from_expr(expr: &str) -> Vec<ChainSegment> {
         }
     }
 
-    // [修复点]: 循环结束后不要丢弃最后一个字段段落
     let trimmed = current.trim();
     if !trimmed.is_empty() && depth == 0 && !in_method {
         segments.push(ChainSegment::variable(trimmed.to_string()));
     }
 
     segments
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::completion::parser::parse_chain_from_expr;
+
+    #[test]
+    fn test_chain_multi_dimensional_array() {
+        // 测试解析 m.arr[0][0] 是否被正确切割
+        let segments = parse_chain_from_expr("m.arr[0][1]");
+        let names: Vec<String> = segments.into_iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "m".to_string(),
+                "arr".to_string(),
+                "[0]".to_string(),
+                "[1]".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_chain_method_returning_array() {
+        // 测试解析 getMatrix()[0][1].
+        let segments = parse_chain_from_expr("getMatrix()[0][1]");
+        let names: Vec<String> = segments.into_iter().map(|s| s.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "getMatrix".to_string(),
+                "[0]".to_string(),
+                "[1]".to_string()
+            ]
+        );
+    }
 }

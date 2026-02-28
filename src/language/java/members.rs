@@ -345,6 +345,11 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
                 for vchild in c.children(&mut vc) {
                     if vchild.kind() == "identifier" {
                         let n = ctx.node_text(vchild);
+                        tracing::debug!(
+                            field_name = n,
+                            field_type = field_type,
+                            "AST extracted field"
+                        );
                         if !is_java_keyword(n) {
                             names.push(n.to_string());
                         }
@@ -355,14 +360,25 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
             _ => {}
         }
     }
+
     names
         .into_iter()
-        .map(|name| CurrentClassMember {
-            name: Arc::from(name.as_str()),
-            is_method: false,
-            is_static,
-            is_private,
-            descriptor: Arc::from(java_type_to_descriptor(field_type).as_str()),
+        .map(|name| {
+            let desc = java_type_to_descriptor(field_type);
+            tracing::debug!(
+                field_name = name.as_str(),
+                field_type = field_type,
+                descriptor = desc.as_str(),
+                "Generated field descriptor"
+            );
+
+            CurrentClassMember {
+                name: Arc::from(name.as_str()),
+                is_method: false,
+                is_static,
+                is_private,
+                descriptor: Arc::from(desc.as_str()),
+            }
         })
         .collect()
 }
