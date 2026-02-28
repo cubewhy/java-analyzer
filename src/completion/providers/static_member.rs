@@ -88,6 +88,8 @@ impl CompletionProvider for StaticMemberProvider {
         let class_name = class_meta.internal_name.as_ref();
         let mut results = Vec::new();
 
+        let resolver = ContextualResolver::new(index, ctx);
+
         for method in &class_meta.methods {
             if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
                 continue;
@@ -119,7 +121,7 @@ impl CompletionProvider for StaticMemberProvider {
                     class_name,
                     &class_meta,
                     method,
-                    index,
+                    &resolver,
                 )),
             );
         }
