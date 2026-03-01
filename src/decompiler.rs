@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub mod backend;
 pub mod cache;
@@ -8,12 +8,6 @@ pub mod cache;
 pub enum DecompilerBackend {
     Vineflower,
     Cfr,
-}
-
-pub struct DecompilerOptions {
-    pub java_home: PathBuf,
-    pub decompiler_jar: PathBuf,
-    pub backend: DecompilerBackend,
 }
 
 #[async_trait::async_trait]
