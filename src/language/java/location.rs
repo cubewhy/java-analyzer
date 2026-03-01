@@ -426,7 +426,7 @@ fn cursor_truncated_text(ctx: &JavaContextExtractor, node: Node) -> String {
     if end <= start {
         return String::new();
     }
-    ctx.source[start..end].to_string()
+    ctx.byte_slice(start, end).to_string()
 }
 
 fn extract_type_from_decl(ctx: &JavaContextExtractor, decl_node: Node) -> String {
@@ -483,7 +483,6 @@ fn infer_expected_type_from_lhs(ctx: &JavaContextExtractor, node: Node) -> Optio
 
 #[cfg(test)]
 mod tests {
-    use ropey::Rope;
     use tree_sitter::Parser;
 
     use crate::{
@@ -491,18 +490,13 @@ mod tests {
         language::java::{JavaContextExtractor, location::determine_location},
     };
 
-    fn setup_with(source: &'_ str, offset: usize) -> (JavaContextExtractor<'_>, tree_sitter::Tree) {
+    fn setup_with(source: &str, offset: usize) -> (JavaContextExtractor, tree_sitter::Tree) {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
-        let ctx = JavaContextExtractor {
-            source,
-            bytes: source.as_bytes(),
-            offset,
-            rope: Rope::from_str(source),
-        };
+        let ctx = JavaContextExtractor::new(source, offset);
         (ctx, tree)
     }
 

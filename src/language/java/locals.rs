@@ -40,7 +40,7 @@ pub fn extract_locals(
     };
     let type_idx = q.capture_index_for_name("type").unwrap();
     let name_idx = q.capture_index_for_name("name").unwrap();
-    let mut vars: Vec<LocalVar> = run_query(&q, search_root, ctx.bytes, None)
+    let mut vars: Vec<LocalVar> = run_query(&q, search_root, ctx.bytes(), None)
         .into_iter()
         .filter_map(|captures| {
             let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
@@ -71,8 +71,8 @@ pub fn extract_locals(
                 }
             }
 
-            let ty = ty_node.utf8_text(ctx.bytes).ok()?;
-            let name = name_node.utf8_text(ctx.bytes).ok()?;
+            let ty = ty_node.utf8_text(ctx.bytes()).ok()?;
+            let name = name_node.utf8_text(ctx.bytes()).ok()?;
             tracing::debug!(
                 ty,
                 name,
@@ -86,7 +86,7 @@ pub fn extract_locals(
                 return Some(LocalVar {
                     name: Arc::from(name),
                     type_internal: TypeName::new("var"),
-                    init_expr: get_initializer_text(ty_node, ctx.bytes),
+                    init_expr: get_initializer_text(ty_node, ctx.bytes()),
                 });
             }
 
@@ -204,11 +204,11 @@ fn extract_params(
     };
     let type_idx = q.capture_index_for_name("type").unwrap();
     let name_idx = q.capture_index_for_name("name").unwrap();
-    run_query(&q, method, ctx.bytes, None)
+    run_query(&q, method, ctx.bytes(), None)
         .into_iter()
         .filter_map(|captures| {
-            let ty = capture_text(&captures, type_idx, ctx.bytes)?;
-            let name = capture_text(&captures, name_idx, ctx.bytes)?;
+            let ty = capture_text(&captures, type_idx, ctx.bytes())?;
+            let name = capture_text(&captures, name_idx, ctx.bytes())?;
             let raw_ty = ty.split('<').next().unwrap_or(ty).trim();
             Some(LocalVar {
                 name: Arc::from(name),
@@ -239,7 +239,7 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
             if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src) {
                 let type_idx = q.capture_index_for_name("type").unwrap();
                 let name_idx = q.capture_index_for_name("name").unwrap();
-                let found: Vec<LocalVar> = run_query(&q, child, ctx.bytes, None)
+                let found: Vec<LocalVar> = run_query(&q, child, ctx.bytes(), None)
                     .into_iter()
                     .filter_map(|captures| {
                         let ty_node = captures.iter().find(|(idx, _)| *idx == type_idx)?.1;
@@ -247,12 +247,12 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                         if ty_node.start_byte() >= ctx.offset {
                             return None;
                         }
-                        let ty = ty_node.utf8_text(ctx.bytes).ok()?;
-                        let name = name_node.utf8_text(ctx.bytes).ok()?;
+                        let ty = ty_node.utf8_text(ctx.bytes()).ok()?;
+                        let name = name_node.utf8_text(ctx.bytes()).ok()?;
                         let raw_ty = ty.trim();
 
                         if raw_ty == "var" {
-                            return Some(match infer_type_from_initializer(ty_node, ctx.bytes) {
+                            return Some(match infer_type_from_initializer(ty_node, ctx.bytes()) {
                                 Some(t) => LocalVar {
                                     name: Arc::from(name),
                                     type_internal: TypeName::new(
@@ -263,7 +263,7 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                                 None => LocalVar {
                                     name: Arc::from(name),
                                     type_internal: TypeName::new("var"),
-                                    init_expr: get_initializer_text(ty_node, ctx.bytes),
+                                    init_expr: get_initializer_text(ty_node, ctx.bytes()),
                                 },
                             });
                         }
@@ -288,22 +288,16 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ropey::Rope;
     use tree_sitter::Parser;
 
-    fn setup(source: &'_ str, offset: usize) -> (JavaContextExtractor<'_>, tree_sitter::Tree) {
+    fn setup(source: &str, offset: usize) -> (JavaContextExtractor, tree_sitter::Tree) {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
 
-        let ctx = JavaContextExtractor {
-            source,
-            bytes: source.as_bytes(),
-            offset,
-            rope: Rope::from_str(source),
-        };
+        let ctx = JavaContextExtractor::new(source, offset);
         (ctx, tree)
     }
 

@@ -315,7 +315,7 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
     let params_text = params_node.map(|n| ctx.node_text(n)).unwrap_or("()");
     let descriptor = crate::index::source::build_java_descriptor(params_text, ret_type);
 
-    let generic_signature = extract_generic_signature(node, ctx.bytes, &descriptor);
+    let generic_signature = extract_generic_signature(node, ctx.bytes(), &descriptor);
 
     Some(CurrentClassMember::Method(Arc::new(MethodSummary {
         name: Arc::from(name),
@@ -446,22 +446,16 @@ fn parse_misread_method(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ropey::Rope;
     use tree_sitter::Parser;
 
-    fn setup(source: &'_ str) -> (JavaContextExtractor<'_>, tree_sitter::Tree) {
+    fn setup(source: &str) -> (JavaContextExtractor, tree_sitter::Tree) {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
 
-        let ctx = JavaContextExtractor {
-            source,
-            bytes: source.as_bytes(),
-            offset: source.len(),
-            rope: Rope::from_str(source),
-        };
+        let ctx = JavaContextExtractor::new(source, source.len());
         (ctx, tree)
     }
 

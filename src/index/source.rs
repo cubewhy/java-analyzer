@@ -136,9 +136,9 @@ fn parse_java_class(
             let q_src = r#"(type_identifier) @t"#;
             if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src) {
                 let idx = q.capture_index_for_name("t").unwrap();
-                run_query(&q, iface_node, ctx.bytes, None)
+                run_query(&q, iface_node, ctx.bytes(), None)
                     .into_iter()
-                    .filter_map(|caps| capture_text(&caps, idx, ctx.bytes).map(intern_str))
+                    .filter_map(|caps| capture_text(&caps, idx, ctx.bytes()).map(intern_str))
                     .collect()
             } else {
                 vec![]
@@ -151,7 +151,7 @@ fn parse_java_class(
     let mut fields = Vec::new();
 
     let body = node.child_by_field_name("body");
-    let full_source = std::str::from_utf8(ctx.bytes).unwrap_or("");
+    let full_source = std::str::from_utf8(ctx.bytes()).unwrap_or("");
     let ctx = JavaContextExtractor::for_indexing(full_source);
     if let Some(b) = body {
         for member in extract_class_members_from_body(&ctx, b) {
@@ -173,7 +173,7 @@ fn parse_java_class(
         fields,
         access_flags,
         inner_class_of: outer_class,
-        generic_signature: extract_generic_signature(node, ctx.bytes, "Ljava/lang/Object;"),
+        generic_signature: extract_generic_signature(node, ctx.bytes(), "Ljava/lang/Object;"),
         origin: origin.clone(),
     })
 }

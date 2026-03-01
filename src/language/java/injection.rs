@@ -1,4 +1,3 @@
-use ropey::Rope;
 use tree_sitter::Node;
 
 use crate::{
@@ -19,12 +18,12 @@ pub fn build_injected_source(
     extractor: &JavaContextExtractor,
     cursor_node: Option<Node>,
 ) -> String {
-    let before = &extractor.source[..extractor.offset];
+    let before = extractor.byte_slice(0, extractor.offset);
     let trimmed = before.trim_end();
 
     // Case 1: cursor right after `new` keyword (bare `new` or `new `)
     if trimmed.ends_with("new") {
-        let immediate_suffix = &extractor.source[extractor.offset..];
+        let immediate_suffix = &extractor.source_str()[extractor.offset..];
         // Check if there are newlines before the next token
         let separated_by_newline = immediate_suffix
             .chars()
@@ -167,9 +166,9 @@ fn inject_at(
     replacement: &str,
 ) -> String {
     let mut s = String::with_capacity(extractor.source.len() + replacement.len() + 16);
-    s.push_str(&extractor.source[..replace_start]);
+    s.push_str(extractor.byte_slice(0, replace_start));
     s.push_str(replacement);
-    s.push_str(&extractor.source[replace_end..]);
+    s.push_str(&extractor.source_str()[replace_end..]);
     let tail = close_open_brackets(&s);
     s.push_str(&tail);
     s
@@ -198,12 +197,7 @@ pub fn inject_and_determine(
     );
 
     if sentinel_node.kind() == "identifier" || sentinel_node.kind() == "type_identifier" {
-        let tmp = JavaContextExtractor {
-            source: &injected_source,
-            bytes: injected_source.as_bytes(),
-            offset: sentinel_end,
-            rope: Rope::from_str(&injected_source),
-        };
+        let tmp = JavaContextExtractor::new(injected_source.clone(), sentinel_end);
         let (loc, q) = determine_location(&tmp, Some(sentinel_node), trigger_char);
         let clean_q = if q == SENTINEL {
             String::new()
@@ -217,12 +211,7 @@ pub fn inject_and_determine(
     let mut cur = sentinel_node;
     loop {
         if cur.kind() == "identifier" || cur.kind() == "type_identifier" {
-            let tmp = JavaContextExtractor {
-                source: &injected_source,
-                bytes: injected_source.as_bytes(),
-                offset: sentinel_end,
-                rope: Rope::from_str(&injected_source),
-            };
+            let tmp = JavaContextExtractor::new(injected_source.clone(), sentinel_end);
             let (loc, q) = determine_location(&tmp, Some(cur), trigger_char);
             let clean_q = strip_sentinel(&q);
             let clean_loc = strip_sentinel_from_location(loc);
@@ -271,25 +260,16 @@ fn requires_semicolon(cursor_node: Option<Node>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ropey::Rope;
     use tree_sitter::Parser;
 
-    fn setup_ctx<'a>(
-        source: &'a str,
-        offset: usize,
-    ) -> (JavaContextExtractor<'a>, tree_sitter::Tree) {
+    fn setup_ctx<'a>(source: &'a str, offset: usize) -> (JavaContextExtractor, tree_sitter::Tree) {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())
             .expect("failed to load java grammar");
         let tree = parser.parse(source, None).unwrap();
 
-        let ctx = JavaContextExtractor {
-            source,
-            bytes: source.as_bytes(),
-            offset,
-            rope: Rope::from_str(source),
-        };
+        let ctx = JavaContextExtractor::new(source, offset);
         (ctx, tree)
     }
 

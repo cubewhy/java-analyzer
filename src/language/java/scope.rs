@@ -14,10 +14,10 @@ pub fn extract_package(ctx: &JavaContextExtractor, root: Node) -> Option<Arc<str
     )
     .ok()?;
     let idx = q.capture_index_for_name("pkg")?;
-    let results = run_query(&q, root, ctx.bytes, None);
+    let results = run_query(&q, root, ctx.bytes(), None);
     let text = results
         .first()
-        .and_then(|caps| capture_text(caps, idx, ctx.bytes))?;
+        .and_then(|caps| capture_text(caps, idx, ctx.bytes()))?;
     let pkg = text
         .trim_start_matches("package")
         .trim()
@@ -36,10 +36,10 @@ pub fn extract_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<Arc<str>> 
         Err(_) => return vec![],
     };
     let idx = q.capture_index_for_name("import").unwrap();
-    run_query(&q, root, ctx.bytes, None)
+    run_query(&q, root, ctx.bytes(), None)
         .into_iter()
         .filter_map(|caps| {
-            let text = capture_text(&caps, idx, ctx.bytes)?;
+            let text = capture_text(&caps, idx, ctx.bytes())?;
             let cleaned = text
                 .trim_start_matches("import")
                 .trim()
@@ -66,10 +66,10 @@ pub fn extract_static_imports(ctx: &JavaContextExtractor, root: Node) -> Vec<Arc
         Err(_) => return vec![],
     };
     let idx = q.capture_index_for_name("import").unwrap();
-    run_query(&q, root, ctx.bytes, None)
+    run_query(&q, root, ctx.bytes(), None)
         .into_iter()
         .filter_map(|caps| {
-            let text = capture_text(&caps, idx, ctx.bytes)?;
+            let text = capture_text(&caps, idx, ctx.bytes())?;
             let after_import = text.trim_start_matches("import").trim();
             if !after_import.starts_with("static ") {
                 return None;
@@ -130,6 +130,6 @@ pub(crate) fn extract_enclosing_class_by_offset(
             dfs(child, offset, bytes, result);
         }
     }
-    dfs(root, ctx.offset, ctx.bytes, &mut result);
+    dfs(root, ctx.offset, ctx.bytes(), &mut result);
     result
 }
