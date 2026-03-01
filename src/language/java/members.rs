@@ -195,6 +195,7 @@ pub fn parse_partial_methods_from_error(
             is_synthetic: false,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(&descriptor),
+            javadoc: None,
         })));
     }
 
@@ -277,6 +278,7 @@ pub fn parse_partial_methods_from_error(
             is_synthetic: false,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(&descriptor),
+            javadoc: None,
         })));
     }
 
@@ -327,6 +329,7 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
         is_synthetic: false,
         generic_signature,
         return_type: parse_return_type_from_descriptor(&descriptor),
+        javadoc: extract_javadoc(node, ctx.bytes()),
     })))
 }
 
@@ -376,6 +379,7 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
                 access_flags: flags,
                 is_synthetic: false,
                 generic_signature: None,
+                javadoc: extract_javadoc(node, ctx.bytes()),
             }))
         })
         .collect()
@@ -440,7 +444,27 @@ fn parse_misread_method(
         is_synthetic: false,
         generic_signature: None,
         return_type: parse_return_type_from_descriptor(&descriptor),
+        javadoc: None,
     })))
+}
+
+/// Walk backwards to find a block comment starting with `/**`
+pub fn extract_javadoc(node: Node, bytes: &[u8]) -> Option<Arc<str>> {
+    let mut prev = node.prev_sibling();
+    while let Some(n) = prev {
+        if n.kind() == "block_comment" {
+            let text = n.utf8_text(bytes).unwrap_or("");
+            if text.starts_with("/**") {
+                return Some(Arc::from(text));
+            }
+            break; // Standard block comment, not javadoc
+        } else if n.kind() == "line_comment" {
+            prev = n.prev_sibling(); // Skip over normal comments
+        } else {
+            break; // Found code, stop looking
+        }
+    }
+    None
 }
 
 #[cfg(test)]

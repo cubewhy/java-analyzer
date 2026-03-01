@@ -7,25 +7,37 @@ use tracing::{error, info};
 use super::capabilities::server_capabilities;
 use super::handlers::completion::handle_completion;
 use crate::completion::engine::CompletionEngine;
+use crate::decompiler::cache::DecompilerCache;
 use crate::index::ClassOrigin;
 use crate::index::codebase::{index_codebase, index_source_text};
 use crate::language::LanguageRegistry;
+use crate::lsp::config::JavaAnalyzerConfig;
+use crate::lsp::handlers::goto_definition::handle_goto_definition;
 use crate::workspace::{Workspace, document::Document};
 
 pub struct Backend {
     client: Client,
-    workspace: Arc<Workspace>,
+    pub workspace: Arc<Workspace>,
     engine: Arc<CompletionEngine>,
-    registry: Arc<LanguageRegistry>,
+    pub registry: Arc<LanguageRegistry>,
+    pub config: tokio::sync::RwLock<JavaAnalyzerConfig>,
+    pub decompiler_cache: crate::decompiler::cache::DecompilerCache,
 }
 
 impl Backend {
     pub fn new(client: Client) -> Self {
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("java-analyzer")
+            .join("decompiled");
+
         Self {
             client,
             workspace: Arc::new(Workspace::new()),
             engine: Arc::new(CompletionEngine::new()),
             registry: Arc::new(LanguageRegistry::new()),
+            config: tokio::sync::RwLock::new(JavaAnalyzerConfig::default()),
+            decompiler_cache: DecompilerCache::new(cache_dir),
         }
     }
 
@@ -114,6 +126,16 @@ impl Backend {
                 .await;
         });
     }
+
+    pub async fn update_config(&self, params: serde_json::Value) {
+        let mut config_guard = self.config.write().await;
+        if let Ok(new_config) = serde_json::from_value::<JavaAnalyzerConfig>(params) {
+            info!(config = ?new_config, "Config updated");
+            *config_guard = new_config;
+        } else {
+            error!("Failed to parse incoming config");
+        }
+    }
 }
 
 /// Locate common JAR directories within the workspace
@@ -134,7 +156,7 @@ fn find_jar_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Infer Language ID from LSP URI
-fn language_id_from_uri(uri: &Url) -> &'static str {
+pub(crate) fn language_id_from_uri(uri: &Url) -> &'static str {
     match uri.path().rsplit('.').next() {
         Some("kt") | Some("kts") => "kotlin",
         _ => "java",
@@ -145,6 +167,10 @@ fn language_id_from_uri(uri: &Url) -> &'static str {
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> LspResult<InitializeResult> {
         info!("LSP initialize");
+
+        if let Some(options) = params.initialization_options {
+            self.update_config(options).await;
+        }
 
         // Trigger workspace index
         if let Some(root) = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok()) {
@@ -299,13 +325,19 @@ impl LanguageServer for Backend {
         Ok(None) // TODO
     }
 
-    // ── 预留：go to definition ────────────────────────────────────────────────
-
     async fn goto_definition(
         &self,
-        _params: GotoDefinitionParams,
+        params: GotoDefinitionParams,
     ) -> LspResult<Option<GotoDefinitionResponse>> {
-        Ok(None) // TODO
+        info!("LSP goto_definition request received");
+
+        let result = handle_goto_definition(self, params).await;
+
+        if result.is_none() {
+            tracing::warn!("Goto definition could not resolve any target");
+        }
+
+        Ok(result)
     }
 
     async fn semantic_tokens_full(

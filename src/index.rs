@@ -32,6 +32,7 @@ pub struct ClassMetadata {
     pub generic_signature: Option<Arc<str>>,
     pub inner_class_of: Option<Arc<str>>,
     pub origin: ClassOrigin,
+    pub javadoc: Option<Arc<str>>,
 }
 
 impl ClassMetadata {
@@ -56,6 +57,10 @@ impl ClassMetadata {
 pub enum ClassOrigin {
     Jar(Arc<str>),
     SourceFile(Arc<str>),
+    ZipSource {
+        zip_path: Arc<str>,
+        entry_name: Arc<str>,
+    },
     Unknown,
 }
 
@@ -68,6 +73,7 @@ pub struct MethodSummary {
     pub is_synthetic: bool,
     pub generic_signature: Option<Arc<str>>,
     pub return_type: Option<Arc<str>>,
+    pub javadoc: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +83,7 @@ pub struct FieldSummary {
     pub access_flags: u16,
     pub is_synthetic: bool,
     pub generic_signature: Option<Arc<str>>,
+    pub javadoc: Option<Arc<str>>,
 }
 
 pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> {
@@ -245,6 +252,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                 is_synthetic,
                 generic_signature,
                 return_type,
+                javadoc: None,
             }
         })
         .collect();
@@ -279,6 +287,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                 access_flags: fd.access_flags,
                 is_synthetic,
                 generic_signature,
+                javadoc: None,
             }
         })
         .collect();
@@ -308,6 +317,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
         generic_signature,
         inner_class_of,
         origin,
+        javadoc: None,
     })
 }
 
@@ -376,10 +386,26 @@ impl GlobalIndex {
                 f.name = intern_str(&f.name);
                 f.descriptor = intern_str(&f.descriptor);
             }
-            if let ClassOrigin::Jar(j) = &class.origin {
-                class.origin = ClassOrigin::Jar(intern_str(j));
-            } else if let ClassOrigin::SourceFile(s) = &class.origin {
-                class.origin = ClassOrigin::SourceFile(intern_str(s));
+
+            match &class.origin {
+                ClassOrigin::Jar(j) => {
+                    class.origin = ClassOrigin::Jar(intern_str(j));
+                }
+                ClassOrigin::SourceFile(s) => {
+                    class.origin = ClassOrigin::SourceFile(intern_str(s));
+                }
+                ClassOrigin::ZipSource {
+                    zip_path,
+                    entry_name,
+                } => {
+                    class.origin = ClassOrigin::ZipSource {
+                        zip_path: intern_str(zip_path),
+                        entry_name: intern_str(entry_name),
+                    };
+                }
+                _ => {
+                    tracing::error!("Unknown class source found for class {}", class.name);
+                }
             }
 
             let internal = Arc::clone(&class.internal_name);
@@ -740,6 +766,7 @@ mod tests {
             inner_class_of: None,
             generic_signature: None,
             origin,
+            javadoc: None,
         }
     }
 
@@ -752,6 +779,7 @@ mod tests {
             param_names: vec![],
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
+            javadoc: None,
         }
     }
 

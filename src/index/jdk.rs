@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::index::{cache, parse_class_data_bytes};
+use crate::index::{ClassOrigin, cache, parse_class_data_bytes};
 
 use super::{ClassMetadata, index_jar};
 
@@ -14,6 +14,7 @@ impl JdkIndexer {
     /// Try to find and index JDK classes.
     /// Returns empty vec if JAVA_HOME is not set or JDK cannot be parsed.
     pub fn index() -> Vec<ClassMetadata> {
+        // TODO: use the jdk path from lsp config
         let java_home = match std::env::var("JAVA_HOME") {
             Ok(h) => PathBuf::from(h),
             Err(_) => {
@@ -24,21 +25,39 @@ impl JdkIndexer {
 
         info!(java_home = %java_home.display(), "indexing JDK");
 
+        // Try to locate JDK sources
+        let src_zip = java_home.join("lib").join("src.zip");
+        let src_zip = if src_zip.exists() {
+            src_zip
+        } else {
+            java_home.join("src.zip")
+        };
+
         // JDK 9+: lib/modules (jimage)
         let modules = java_home.join("lib").join("modules");
         if modules.exists() {
             info!("detected JDK 9+ (jimage)");
-            return Self::index_jimage(&modules);
+            let mut bytecode_classes = Self::index_jimage(&modules);
+            if src_zip.exists() {
+                let source_classes = Self::parse_jdk_source_zip(&src_zip);
+                Self::merge_source_into_bytecode(&mut bytecode_classes, source_classes);
+            }
+            return bytecode_classes;
         }
 
         // JDK 8: jre/lib/rt.jar
         let rt_jar = java_home.join("jre").join("lib").join("rt.jar");
         if rt_jar.exists() {
             info!("detected JDK 8 (rt.jar)");
-            return index_jar(&rt_jar).unwrap_or_else(|e| {
+            let mut bytecode_classes = index_jar(&rt_jar).unwrap_or_else(|e| {
                 warn!(error = %e, "failed to index rt.jar");
                 vec![]
             });
+            if src_zip.exists() {
+                let source_classes = Self::parse_jdk_source_zip(&src_zip);
+                Self::merge_source_into_bytecode(&mut bytecode_classes, source_classes);
+            }
+            return bytecode_classes;
         }
 
         // JDK 8 alternative layout (some distros)
@@ -127,6 +146,85 @@ impl JdkIndexer {
 
         info!(count = results.len(), "JDK jimage indexed");
         results
+    }
+
+    fn parse_jdk_source_zip(path: &Path) -> Vec<ClassMetadata> {
+        use rayon::prelude::*;
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(_) => return vec![],
+        };
+        let mut archive = match zip::ZipArchive::new(std::io::BufReader::new(file)) {
+            Ok(a) => a,
+            Err(_) => return vec![],
+        };
+
+        let mut source_files = Vec::new();
+        for i in 0..archive.len() {
+            let mut entry = match archive.by_index(i) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let name = entry.name().to_string();
+            if name.ends_with(".java") {
+                let mut buf = String::new();
+                if std::io::Read::read_to_string(&mut entry, &mut buf).is_ok() {
+                    source_files.push((name, buf));
+                }
+            }
+        }
+
+        let zip_path = Arc::from(path.to_string_lossy().as_ref());
+        info!(
+            count = source_files.len(),
+            "found java files in JDK src.zip"
+        );
+
+        source_files
+            .into_par_iter()
+            .flat_map(|(name, content)| {
+                let origin = ClassOrigin::ZipSource {
+                    zip_path: Arc::clone(&zip_path),
+                    entry_name: Arc::from(name.as_str()),
+                };
+                crate::index::source::parse_source_str(&content, "java", origin)
+            })
+            .collect()
+    }
+
+    fn merge_source_into_bytecode(bytecode: &mut Vec<ClassMetadata>, source: Vec<ClassMetadata>) {
+        let mut source_map: rustc_hash::FxHashMap<Arc<str>, ClassMetadata> = source
+            .into_iter()
+            .map(|c| (c.internal_name.clone(), c))
+            .collect();
+
+        for b_class in bytecode.iter_mut() {
+            if let Some(s_class) = source_map.remove(&b_class.internal_name) {
+                b_class.origin = s_class.origin; // Upgrade origin to point to the Zip file
+                b_class.javadoc = s_class.javadoc;
+
+                for b_method in b_class.methods.iter_mut() {
+                    let b_param_count =
+                        crate::completion::type_resolver::count_params(&b_method.descriptor);
+                    if let Some(s_method) = s_class
+                        .methods
+                        .iter()
+                        .find(|m| m.name == b_method.name && m.param_names.len() == b_param_count)
+                    {
+                        b_method.param_names = s_method.param_names.clone();
+                        b_method.javadoc = s_method.javadoc.clone();
+                    }
+                }
+
+                for b_field in b_class.fields.iter_mut() {
+                    if let Some(s_field) = s_class.fields.iter().find(|f| f.name == b_field.name) {
+                        b_field.javadoc = s_field.javadoc.clone();
+                    }
+                }
+            }
+        }
+        info!("merged JDK source metadata into bytecode index");
     }
 }
 

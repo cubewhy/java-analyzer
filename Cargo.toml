@@ -16,6 +16,7 @@ rust-asm = "0.1.4"
 zip = "8.1.0"
 tower-lsp = "0.20.0"
 serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
 dirs = "6.0.0"
 nucleo = "0.5.0"
@@ -27,7 +28,8 @@ tree-sitter-kotlin = { git = "https://github.com/fwcd/tree-sitter-kotlin.git" }
 walkdir = "2.5.0"
 jimage-rs = "0.0.4"
 ropey = "1.6.1"
+tempfile = "3.26.0"
+async-trait = "0.1.89"
 
 [dev-dependencies]
-tempfile = "3.25.0"
 insta = { version = "1", features = ["ron"] }

@@ -1,4 +1,5 @@
 pub mod capabilities;
+pub mod config;
 pub mod converters;
 pub mod handlers;
 pub mod semantic_tokens;

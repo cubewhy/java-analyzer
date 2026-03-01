@@ -225,6 +225,7 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
+                javadoc: None,
             }]
         } else {
             vec![]
@@ -245,6 +246,7 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
+            javadoc: None,
         }]);
         idx
     }
@@ -375,12 +377,14 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
+                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
+                javadoc: None,
             }]);
         }
 

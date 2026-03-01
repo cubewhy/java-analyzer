@@ -11,7 +11,9 @@ use crate::{
     index::intern_str,
     language::{
         java::{
-            JavaContextExtractor, members::extract_class_members_from_body, scope::extract_package,
+            JavaContextExtractor,
+            members::{extract_class_members_from_body, extract_javadoc},
+            scope::extract_package,
             utils::parse_java_modifiers,
         },
         ts_utils::{capture_text, run_query},
@@ -65,34 +67,37 @@ pub fn parse_java_source(source: &str, origin: ClassOrigin) -> Vec<ClassMetadata
 
 fn collect_java_classes(
     ctx: &JavaContextExtractor,
-    node: Node,
+    root_node: Node,
     package: &Option<Arc<str>>,
-    outer_class: Option<Arc<str>>,
+    initial_outer: Option<Arc<str>>,
     origin: &ClassOrigin,
     out: &mut Vec<ClassMetadata>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "class_declaration"
-            | "interface_declaration"
-            | "enum_declaration"
-            | "annotation_type_declaration"
-            | "record_declaration" => {
-                if let Some(meta) =
-                    parse_java_class(ctx, child, package, outer_class.clone(), origin)
-                {
-                    // Recursive processing of inner classes
-                    let inner_outer = Some(Arc::clone(&meta.name));
-                    if let Some(body) = child.child_by_field_name("body") {
-                        collect_java_classes(ctx, body, package, inner_outer, origin, out);
+    let mut stack = vec![(root_node, initial_outer)];
+
+    while let Some((node, outer_class)) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "annotation_type_declaration"
+                | "record_declaration" => {
+                    if let Some(meta) =
+                        parse_java_class(ctx, child, package, outer_class.clone(), origin)
+                    {
+                        let inner_outer = Some(Arc::clone(&meta.name));
+                        if let Some(body) = child.child_by_field_name("body") {
+                            stack.push((body, inner_outer));
+                        }
+                        out.push(meta);
                     }
-                    out.push(meta);
                 }
-            }
-            _ => {
-                // Continue searching downwards (e.g., inner classes within class_body)
-                collect_java_classes(ctx, child, package, outer_class.clone(), origin, out);
+                _ => {
+                    // Continue searching downwards
+                    stack.push((child, outer_class.clone()));
+                }
             }
         }
     }
@@ -175,6 +180,7 @@ fn parse_java_class(
         inner_class_of: outer_class,
         generic_signature: extract_generic_signature(node, ctx.bytes(), "Ljava/lang/Object;"),
         origin: origin.clone(),
+        javadoc: extract_javadoc(node, ctx.bytes()),
     })
 }
 
@@ -262,33 +268,36 @@ pub fn parse_kotlin_source(source: &str, origin: ClassOrigin) -> Vec<ClassMetada
 }
 
 fn collect_kotlin_classes(
-    node: Node,
+    root_node: Node,
     bytes: &[u8],
     package: &Option<Arc<str>>,
-    outer_class: Option<Arc<str>>,
+    initial_outer: Option<Arc<str>>,
     origin: &ClassOrigin,
     out: &mut Vec<ClassMetadata>,
 ) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "class_declaration" | "object_declaration" | "companion_object" => {
-                if let Some(meta) =
-                    parse_kotlin_class(child, bytes, package, outer_class.clone(), origin)
-                {
-                    let inner_outer = Some(Arc::clone(&meta.name));
-                    // Recursively process inner classes within class_body
-                    if let Some(body) = child
-                        .named_children(&mut child.walk())
-                        .find(|n| n.kind() == "class_body")
+    let mut stack = vec![(root_node, initial_outer)];
+
+    while let Some((node, outer_class)) = stack.pop() {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            match child.kind() {
+                "class_declaration" | "object_declaration" | "companion_object" => {
+                    if let Some(meta) =
+                        parse_kotlin_class(child, bytes, package, outer_class.clone(), origin)
                     {
-                        collect_kotlin_classes(body, bytes, package, inner_outer, origin, out);
+                        let inner_outer = Some(Arc::clone(&meta.name));
+                        if let Some(body) = child
+                            .named_children(&mut child.walk())
+                            .find(|n| n.kind() == "class_body")
+                        {
+                            stack.push((body, inner_outer));
+                        }
+                        out.push(meta);
                     }
-                    out.push(meta);
                 }
-            }
-            _ => {
-                collect_kotlin_classes(child, bytes, package, outer_class.clone(), origin, out);
+                _ => {
+                    stack.push((child, outer_class.clone()));
+                }
             }
         }
     }
@@ -365,6 +374,7 @@ fn parse_kotlin_class(
         generic_signature: extract_generic_signature(node, bytes, "Ljava/lang/Object;"),
         inner_class_of: outer_class,
         origin: origin.clone(),
+        javadoc: extract_javadoc(node, bytes),
     })
 }
 
@@ -429,6 +439,7 @@ fn extract_kotlin_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
             is_synthetic: false,
             generic_signature,
             return_type,
+            javadoc: extract_javadoc(name_node.parent().unwrap(), bytes),
         });
     }
     result
@@ -465,6 +476,15 @@ fn extract_kotlin_fields(body: Node, bytes: &[u8]) -> Vec<FieldSummary> {
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
+                javadoc: extract_javadoc(
+                    caps.iter()
+                        .find(|(i, _)| *i == name_idx)
+                        .unwrap()
+                        .1
+                        .parent()
+                        .unwrap(),
+                    bytes,
+                ),
             })
         })
         .collect()

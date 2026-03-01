@@ -43,11 +43,8 @@ pub async fn handle_completion(
         .with_file_uri(Arc::from(uri_str));
 
     let ctx = if ctx.enclosing_package.is_none() {
-        if let Some(pkg) = workspace.infer_package_from_uri(uri_str).await {
-            ctx.with_inferred_package(pkg)
-        } else {
-            ctx
-        }
+        // TODO: infer source root from build tools
+        ctx
     } else {
         ctx
     };

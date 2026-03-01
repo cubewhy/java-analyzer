@@ -12,6 +12,7 @@ use crate::{
 use std::sync::Arc;
 
 pub mod generics;
+pub mod symbol_resolver;
 pub mod type_name;
 
 pub trait SymbolProvider {
@@ -968,6 +969,7 @@ mod tests {
 
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![ClassMetadata {
+            javadoc: None,
             package: None,
             name: Arc::from("NestedClass"),
             internal_name: Arc::from("NestedClass"),
@@ -982,6 +984,7 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("RandomClass")),
+                    javadoc: None,
                 },
                 MethodSummary {
                     name: Arc::from("randomFunction"),
@@ -991,6 +994,7 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("Main2")),
+                    javadoc: None,
                 },
             ],
             fields: vec![],
@@ -1076,12 +1080,14 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("Main2")),
+                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
+                javadoc: None,
             },
             ClassMetadata {
                 package: None,
@@ -1097,12 +1103,14 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
+                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
+                javadoc: None,
             },
         ]);
 
@@ -1140,12 +1148,14 @@ mod tests {
                 // 这里代表泛型方法返回类型是 E
                 generic_signature: Some(Arc::from("(I)TE;")),
                 return_type: None,
+                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             inner_class_of: None,
             generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
             origin: ClassOrigin::Unknown,
+            javadoc: None,
         }]);
 
         let resolver = TypeResolver::new(&idx);
@@ -1202,12 +1212,14 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None, // 基本数据类型数组这里通常为 None
+                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
+            javadoc: None,
         }]);
 
         let resolver = TypeResolver::new(&idx);

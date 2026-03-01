@@ -16,6 +16,7 @@ pub fn server_capabilities() -> ServerCapabilities {
                 work_done_progress: Some(true),
             },
         }),
+        definition_provider: Some(OneOf::Left(true)),
         document_symbol_provider: Some(OneOf::Left(true)),
         semantic_tokens_provider: Some(
             SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(

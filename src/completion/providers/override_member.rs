@@ -266,6 +266,7 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
+            javadoc: None,
         }
     }
 
@@ -278,6 +279,7 @@ mod tests {
             is_synthetic: true,
             generic_signature: None,
             return_type: None,
+            javadoc: None,
         }
     }
 
@@ -299,6 +301,7 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
+            javadoc: None,
         }
     }
 
@@ -476,6 +479,7 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
+            javadoc: None,
         }));
         let ctx = ctx_with_prefix("pub", "com/example/Child")
             .with_class_members(std::iter::once(source_member));
@@ -824,6 +828,7 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
+                javadoc: None,
             },
             // 没有显式 super_name 的类
             make_class("com/example", "Plain", None, vec![]),
@@ -868,6 +873,7 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
+                javadoc: None,
             },
             make_class("com/example", "Parent", Some("java/lang/Object"), vec![]),
             make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
@@ -902,6 +908,7 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
+            javadoc: None,
         }
     }
 
@@ -915,6 +922,7 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
+            javadoc: None,
         }
     }
 
@@ -927,6 +935,7 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
+            javadoc: None,
         }
     }
 
