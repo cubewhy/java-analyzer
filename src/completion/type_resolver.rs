@@ -181,7 +181,6 @@ impl<'idx> TypeResolver<'idx> {
             return candidates[0];
         }
 
-        // 1. 严格按参数数量过滤
         let by_count: Vec<&MethodSummary> = candidates
             .iter()
             .copied()
@@ -200,15 +199,12 @@ impl<'idx> TypeResolver<'idx> {
             return by_count[0];
         }
 
-        // 2. 寻找得分最高者
         let mut best_score = -1;
-        // 初始值设为 None，而不是 by_count[0]，防止 -1 分时误选
         let mut best_match: Option<&MethodSummary> = None;
 
         for m in &by_count {
             let score = self.score_params(&m.descriptor, arg_types);
 
-            // 【添加关键日志】
             tracing::debug!(
                 method = %m.name,
                 desc = %m.descriptor,
@@ -364,9 +360,8 @@ impl<'idx> TypeResolver<'idx> {
         let _enter = span.enter();
 
         // 1. 数组处理
-        if desc.starts_with('[') {
+        if let Some(desc_elem) = desc.strip_prefix('[') {
             if ty.ends_with("[]") {
-                let desc_elem = &desc[1..];
                 let ty_elem = ty.strip_suffix("[]").unwrap().trim();
                 tracing::debug!("recursive array match: {} -> {}", desc_elem, ty_elem);
                 return self.score_single_descriptor(desc_elem, ty_elem);
