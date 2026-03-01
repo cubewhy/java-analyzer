@@ -64,18 +64,18 @@ impl Language for JavaLanguage {
 
 pub struct JavaContextExtractor<'s> {
     source: &'s str,
-    bytes: &'s [u8],
+    pub bytes: &'s [u8],
     offset: usize,
     rope: Rope,
 }
 
 impl<'s> JavaContextExtractor<'s> {
-    #[cfg(test)]
-    fn new(source: &'s str, offset: usize) -> Self {
+    /// Create a simplified extractor for indexing (no cursor offset/rope needed)
+    pub fn for_indexing(source: &'s str) -> Self {
         Self {
             source,
             bytes: source.as_bytes(),
-            offset,
+            offset: 0,
             rope: Rope::from_str(source),
         }
     }
@@ -174,7 +174,7 @@ impl<'s> JavaContextExtractor<'s> {
         None
     }
 
-    fn node_text(&self, node: Node) -> &str {
+    pub fn node_text(&self, node: Node) -> &str {
         node.utf8_text(self.bytes).unwrap_or("")
     }
 

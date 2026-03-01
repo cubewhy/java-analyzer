@@ -706,23 +706,12 @@ mod tests {
     use std::sync::Arc;
 
     use crate::completion::context::CurrentClassMember;
-    use crate::completion::type_resolver::type_name::TypeName;
-    use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodSummary};
-    use crate::language::Language;
-    use crate::{
-        completion::{
-            context::{CompletionContext, CursorLocation, LocalVar},
-            providers::{CompletionProvider, member::MemberProvider},
-            type_resolver::parse_return_type_from_descriptor,
-        },
-        language::JavaLanguage,
+    use crate::completion::{
+        context::{CompletionContext, CursorLocation},
+        providers::{CompletionProvider, member::MemberProvider},
+        type_resolver::parse_return_type_from_descriptor,
     };
-
-    fn at(src: &str, line: u32, col: u32) -> CompletionContext {
-        JavaLanguage
-            .parse_completion_context(src, line, col, None)
-            .unwrap()
-    }
+    use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodSummary};
 
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
         MethodSummary {
@@ -798,26 +787,6 @@ mod tests {
         )
     }
 
-    fn ctx_with_local(var_name: &str, var_type: &str, prefix: &str) -> CompletionContext {
-        CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: prefix.to_string(),
-                receiver_expr: var_name.to_string(),
-            },
-            prefix,
-            vec![LocalVar {
-                name: Arc::from(var_name),
-                type_internal: TypeName::new(var_type),
-                init_expr: None,
-            }],
-            None,
-            None,
-            None,
-            vec![],
-        )
-    }
-
     fn ctx_this(
         enclosing_simple: &str,
         enclosing_internal: &str,
@@ -838,34 +807,6 @@ mod tests {
             vec![],
         )
     }
-
-    fn ctx_with_local_and_import(
-        var_name: &str,
-        var_type_simple: &str,
-        prefix: &str,
-        imports: Vec<Arc<str>>,
-        enclosing_pkg: &str,
-    ) -> CompletionContext {
-        CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: prefix.to_string(),
-                receiver_expr: var_name.to_string(),
-            },
-            prefix,
-            vec![LocalVar {
-                name: Arc::from(var_name),
-                type_internal: TypeName::new(var_type_simple),
-                init_expr: None,
-            }],
-            None,
-            None,
-            Some(Arc::from(enclosing_pkg)),
-            imports,
-        )
-    }
-
-    // --- 测试用例 ---
 
     #[test]
     fn test_instance_method_found() {

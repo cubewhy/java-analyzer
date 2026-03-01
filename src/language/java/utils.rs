@@ -1,6 +1,9 @@
 use crate::completion::context::CursorLocation;
 use crate::language::java::SENTINEL;
 use ropey::Rope;
+use rust_asm::constants::{
+    ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
+};
 use std::sync::Arc;
 use tree_sitter::Node;
 
@@ -8,6 +11,74 @@ pub(crate) fn find_top_error_node(root: Node) -> Option<Node> {
     let mut cursor = root.walk();
     root.children(&mut cursor)
         .find(|&child| child.kind() == "ERROR")
+}
+
+/// parse access flags from modifiers text
+pub fn parse_java_modifiers(text: &str) -> u16 {
+    let mut flags: u16 = 0;
+    if text.contains("public") {
+        flags |= ACC_PUBLIC;
+    }
+    if text.contains("private") {
+        flags |= ACC_PRIVATE;
+    }
+    if text.contains("protected") {
+        flags |= ACC_PROTECTED;
+    }
+    if text.contains("static") {
+        flags |= ACC_STATIC;
+    }
+    if text.contains("final") {
+        flags |= ACC_FINAL;
+    }
+    if text.contains("abstract") {
+        flags |= ACC_ABSTRACT;
+    }
+    flags
+}
+
+fn node_text<'a>(node: Node, bytes: &'a [u8]) -> &'a str {
+    node.utf8_text(bytes).unwrap_or("")
+}
+
+/// Extracts generic parameters from a class or method and constructs them into a generic signature according to the JVM specification.
+/// For example, extracts `<T:Ljava/lang/Object;E:Ljava/lang/Object;>Ljava/lang/Object;` from `class List<T, E>`.
+pub fn extract_generic_signature(node: Node, bytes: &[u8], suffix: &str) -> Option<Arc<str>> {
+    // Compatible with Java (child_by_field_name) and Kotlin (directly search for kind)
+    let tp_node = node.child_by_field_name("type_parameters").or_else(|| {
+        node.children(&mut node.walk())
+            .find(|n| n.kind() == "type_parameters")
+    })?;
+
+    let mut sig = String::from("<");
+    let mut has_params = false;
+    let mut walker = tp_node.walk();
+
+    for child in tp_node.named_children(&mut walker) {
+        if child.kind() == "type_parameter" {
+            // Java 是 identifier，Kotlin 是 type_identifier
+            if let Some(id_node) = child
+                .children(&mut child.walk())
+                .find(|c| c.kind() == "identifier" || c.kind() == "type_identifier")
+            {
+                let name = node_text(id_node, bytes).trim();
+                if !name.is_empty() {
+                    sig.push_str(name);
+                    // Erasure to Object uniformly, because our engine currently only cares about the name mapping of parameter placeholders.
+                    sig.push_str(":Ljava/lang/Object;");
+                    has_params = true;
+                }
+            }
+        }
+    }
+
+    if !has_params {
+        return None;
+    }
+
+    sig.push('>');
+    sig.push_str(suffix);
+    Some(Arc::from(sig))
 }
 
 pub(crate) fn build_internal_name(
@@ -34,12 +105,12 @@ pub(crate) fn find_ancestor<'a>(mut node: Node<'a>, kind: &str) -> Option<Node<'
     }
 }
 
-/// 去掉字符串里的 SENTINEL（注入路径下 prefix 可能含有它）
+/// Remove SENTINEL from the string (the prefix in the injection path may contain it).
 pub(crate) fn strip_sentinel(s: &str) -> String {
     s.replace(SENTINEL, "")
 }
 
-/// 把 CursorLocation 里残留的 SENTINEL 清掉
+/// Remove any remaining SENTINEL from CursorLocation
 pub(crate) fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocation {
     match loc {
         CursorLocation::MemberAccess {

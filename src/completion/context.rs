@@ -174,10 +174,7 @@ impl CompletionContext {
         mut self,
         members: impl IntoIterator<Item = CurrentClassMember>,
     ) -> Self {
-        self.current_class_members = members
-            .into_iter()
-            .map(|m| (Arc::from(m.name()), m))
-            .collect();
+        self.current_class_members = members.into_iter().map(|m| (m.name(), m)).collect();
         self
     }
 

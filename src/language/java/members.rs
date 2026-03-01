@@ -8,7 +8,10 @@ use crate::{
         type_resolver::{java_type_to_descriptor, parse_return_type_from_descriptor},
     },
     index::{FieldSummary, MethodSummary},
-    language::java::JavaContextExtractor,
+    language::java::{
+        JavaContextExtractor,
+        utils::{extract_generic_signature, parse_java_modifiers},
+    },
 };
 
 /// Extract the list of parameter names from the formal_parameters node
@@ -26,9 +29,8 @@ fn parse_param_names(ctx: &JavaContextExtractor, node: Node) -> Vec<Arc<str>> {
     names
 }
 
-// TODO: duplicate logic, need a refactor
 #[rustfmt::skip]
-fn is_java_keyword(name: &str) -> bool {
+pub fn is_java_keyword(name: &str) -> bool {
     matches!(
         name,
         "public" | "private" | "protected" | "static" | "final" | "abstract"
@@ -152,19 +154,16 @@ pub fn parse_partial_methods_from_error(
             continue;
         }
 
-        let mut flags = ACC_PUBLIC;
+        let mut flags = 0;
         if let Some(n) = children[..param_pos]
             .iter()
             .rev()
             .find(|n| n.kind() == "modifiers")
         {
-            let t = ctx.node_text(*n);
-            if t.contains("static") {
-                flags |= ACC_STATIC;
-            }
-            if t.contains("private") {
-                flags |= ACC_PRIVATE;
-            }
+            flags = parse_java_modifiers(ctx.node_text(*n));
+        }
+        if flags == 0 {
+            flags = ACC_PUBLIC;
         }
 
         let ret_type = children[..param_pos]
@@ -216,19 +215,13 @@ pub fn parse_partial_methods_from_error(
             continue;
         }
 
-        let mut flags = ACC_PUBLIC;
+        let mut flags = 0;
         let mut ret_type = "void";
 
         for prev in children[..mi_pos].iter().rev() {
             match prev.kind() {
                 "identifier" => {
-                    let t = ctx.node_text(*prev);
-                    if t == "static" {
-                        flags |= ACC_STATIC;
-                    }
-                    if t == "private" {
-                        flags |= ACC_PRIVATE;
-                    }
+                    flags |= parse_java_modifiers(ctx.node_text(*prev));
                 }
                 "void_type"
                 | "integral_type"
@@ -245,16 +238,8 @@ pub fn parse_partial_methods_from_error(
                     let mut pc = prev.walk();
                     for pchild in prev.children(&mut pc) {
                         match pchild.kind() {
-                            "static" => flags |= ACC_STATIC,
-                            "private" => flags |= ACC_PRIVATE,
-                            "identifier" => {
-                                let t = ctx.node_text(pchild);
-                                if t == "static" {
-                                    flags |= ACC_STATIC;
-                                }
-                                if t == "private" {
-                                    flags |= ACC_PRIVATE;
-                                }
+                            "identifier" | "static" | "private" | "public" | "protected" => {
+                                flags |= parse_java_modifiers(ctx.node_text(pchild));
                             }
                             "void_type"
                             | "integral_type"
@@ -273,6 +258,9 @@ pub fn parse_partial_methods_from_error(
                 }
                 _ => {}
             }
+        }
+        if flags == 0 {
+            flags = ACC_PUBLIC;
         }
 
         let args = mi_node
@@ -297,22 +285,14 @@ pub fn parse_partial_methods_from_error(
 
 pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<CurrentClassMember> {
     let mut name: Option<&str> = None;
-    let mut flags = ACC_PUBLIC;
+    let mut flags = 0;
     let mut ret_type = "void";
     let mut params_node: Option<Node> = None;
 
     let mut wc = node.walk();
     for c in node.children(&mut wc) {
         match c.kind() {
-            "modifiers" => {
-                let t = ctx.node_text(c);
-                if t.contains("static") {
-                    flags |= ACC_STATIC;
-                }
-                if t.contains("private") {
-                    flags |= ACC_PRIVATE;
-                }
-            }
+            "modifiers" => flags = parse_java_modifiers(ctx.node_text(c)),
             "identifier" if name.is_none() => name = Some(ctx.node_text(c)),
             "void_type"
             | "integral_type"
@@ -327,10 +307,15 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
             _ => {}
         }
     }
+    if flags == 0 {
+        flags = ACC_PUBLIC;
+    }
 
     let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
     let params_text = params_node.map(|n| ctx.node_text(n)).unwrap_or("()");
     let descriptor = crate::index::source::build_java_descriptor(params_text, ret_type);
+
+    let generic_signature = extract_generic_signature(node, ctx.bytes, &descriptor);
 
     Some(CurrentClassMember::Method(Arc::new(MethodSummary {
         name: Arc::from(name),
@@ -340,27 +325,19 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
             .unwrap_or_default(),
         access_flags: flags,
         is_synthetic: false,
-        generic_signature: None,
+        generic_signature,
         return_type: parse_return_type_from_descriptor(&descriptor),
     })))
 }
 
 fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassMember> {
-    let mut flags = ACC_PUBLIC;
+    let mut flags = 0;
     let mut field_type = "Object";
     let mut names = Vec::new();
     let mut wc = node.walk();
     for c in node.children(&mut wc) {
         match c.kind() {
-            "modifiers" => {
-                let t = ctx.node_text(c);
-                if t.contains("static") {
-                    flags |= ACC_STATIC;
-                }
-                if t.contains("private") {
-                    flags |= ACC_PRIVATE;
-                }
-            }
+            "modifiers" => flags = parse_java_modifiers(ctx.node_text(c)),
             "void_type"
             | "integral_type"
             | "floating_point_type"
@@ -384,6 +361,9 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
             }
             _ => {}
         }
+    }
+    if flags == 0 {
+        flags = ACC_PUBLIC;
     }
 
     names

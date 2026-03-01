@@ -1,6 +1,4 @@
-use rust_asm::constants::{
-    ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
-};
+use rust_asm::constants::{ACC_ABSTRACT, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC};
 use std::sync::Arc;
 use tracing::debug;
 use tree_sitter::{Node, Parser, Query};
@@ -9,9 +7,15 @@ use super::{
     ClassMetadata, ClassOrigin, FieldSummary, MethodSummary, parse_return_type_from_descriptor,
 };
 use crate::{
-    completion::type_resolver::{java_source_type_to_descriptor, java_type_to_descriptor},
+    completion::{context::CurrentClassMember, type_resolver::java_source_type_to_descriptor},
     index::intern_str,
-    language::ts_utils::{capture_text, run_query},
+    language::{
+        java::{
+            JavaContextExtractor, members::extract_class_members_from_body, scope::extract_package,
+            utils::parse_java_modifiers,
+        },
+        ts_utils::{capture_text, run_query},
+    },
 };
 
 /// Parse the source file string and return all classes defined within it.
@@ -44,23 +48,24 @@ pub fn parse_source_file(path: &std::path::Path, origin: ClassOrigin) -> Vec<Cla
 }
 
 pub fn parse_java_source(source: &str, origin: ClassOrigin) -> Vec<ClassMetadata> {
+    let ctx = JavaContextExtractor::for_indexing(source);
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => return vec![],
     };
     let root = tree.root_node();
-    let bytes = source.as_bytes();
 
-    let package = extract_java_package(root, bytes);
+    let package = extract_package(&ctx, root);
     let mut results = Vec::new();
-    collect_java_classes(root, bytes, &package, None, &origin, &mut results);
+    collect_java_classes(&ctx, root, &package, None, &origin, &mut results);
+
     results
 }
 
 fn collect_java_classes(
+    ctx: &JavaContextExtractor,
     node: Node,
-    bytes: &[u8],
     package: &Option<Arc<str>>,
     outer_class: Option<Arc<str>>,
     origin: &ClassOrigin,
@@ -75,33 +80,33 @@ fn collect_java_classes(
             | "annotation_type_declaration"
             | "record_declaration" => {
                 if let Some(meta) =
-                    parse_java_class(child, bytes, package, outer_class.clone(), origin)
+                    parse_java_class(ctx, child, package, outer_class.clone(), origin)
                 {
                     // Recursive processing of inner classes
                     let inner_outer = Some(Arc::clone(&meta.name));
                     if let Some(body) = child.child_by_field_name("body") {
-                        collect_java_classes(body, bytes, package, inner_outer, origin, out);
+                        collect_java_classes(ctx, body, package, inner_outer, origin, out);
                     }
                     out.push(meta);
                 }
             }
             _ => {
                 // Continue searching downwards (e.g., inner classes within class_body)
-                collect_java_classes(child, bytes, package, outer_class.clone(), origin, out);
+                collect_java_classes(ctx, child, package, outer_class.clone(), origin, out);
             }
         }
     }
 }
 
 fn parse_java_class(
+    ctx: &JavaContextExtractor,
     node: Node,
-    bytes: &[u8],
     package: &Option<Arc<str>>,
     outer_class: Option<Arc<str>>,
     origin: &ClassOrigin,
 ) -> Option<ClassMetadata> {
     let name_node = node.child_by_field_name("name")?;
-    let class_name = node_text(name_node, bytes);
+    let class_name = ctx.node_text(name_node);
     if class_name.is_empty() {
         return None;
     }
@@ -121,7 +126,7 @@ fn parse_java_class(
             superclass_node
                 .named_children(&mut superclass_node.walk())
                 .find(|c| c.kind() == "type_identifier")
-                .map(|c| intern_str(node_text(c, bytes)))
+                .map(|c| intern_str(ctx.node_text(c)))
         });
 
     // interfaces
@@ -131,9 +136,9 @@ fn parse_java_class(
             let q_src = r#"(type_identifier) @t"#;
             if let Ok(q) = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src) {
                 let idx = q.capture_index_for_name("t").unwrap();
-                run_query(&q, iface_node, bytes, None)
+                run_query(&q, iface_node, ctx.bytes, None)
                     .into_iter()
-                    .filter_map(|caps| capture_text(&caps, idx, bytes).map(intern_str))
+                    .filter_map(|caps| capture_text(&caps, idx, ctx.bytes).map(intern_str))
                     .collect()
             } else {
                 vec![]
@@ -142,16 +147,21 @@ fn parse_java_class(
         .unwrap_or_default();
 
     // methods & fields
-    let body = node.child_by_field_name("body");
-    let (methods, fields) = body
-        .map(|b| {
-            let methods = extract_java_methods(b, bytes);
-            let fields = extract_java_fields(b, bytes);
-            (methods, fields)
-        })
-        .unwrap_or_default();
+    let mut methods = Vec::new();
+    let mut fields = Vec::new();
 
-    let access_flags = extract_java_access_flags(node, bytes);
+    let body = node.child_by_field_name("body");
+    let full_source = std::str::from_utf8(ctx.bytes).unwrap_or("");
+    let ctx = JavaContextExtractor::for_indexing(full_source);
+    if let Some(b) = body {
+        for member in extract_class_members_from_body(&ctx, b) {
+            match member {
+                CurrentClassMember::Method(m) => methods.push((*m).clone()),
+                CurrentClassMember::Field(f) => fields.push((*f).clone()),
+            }
+        }
+    }
+    let access_flags = extract_java_access_flags(&ctx, node);
 
     Some(ClassMetadata {
         package: package.clone(),
@@ -163,212 +173,17 @@ fn parse_java_class(
         fields,
         access_flags,
         inner_class_of: outer_class,
-        generic_signature: extract_generic_signature(node, bytes, "Ljava/lang/Object;"),
+        generic_signature: extract_generic_signature(node, ctx.bytes, "Ljava/lang/Object;"),
         origin: origin.clone(),
     })
 }
 
-fn extract_java_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
-    let mut results = Vec::new();
-    let mut cursor = body.walk();
-
-    for child in body.children(&mut cursor) {
-        if child.kind() != "method_declaration" {
-            continue;
-        }
-        if let Some(m) = parse_java_method(child, bytes) {
-            results.push(m);
-        }
-    }
-    results
-}
-
-fn parse_java_method(node: Node, bytes: &[u8]) -> Option<MethodSummary> {
-    // method_declaration child nodes in order:
-    // modifiers? -> return_type(void_type|integral_type|type_identifier|...) -> identifier(name) -> formal_parameters → block?
-    //
-    // Strategy: Traverse all named child nodes, identifying roles by kind
-    let mut method_name: Option<&str> = None;
-    let mut return_type_text: Option<&str> = None;
-    let mut params_text: Option<&str> = None;
-    let mut access_flags: u16 = ACC_PUBLIC;
-    let mut param_names: Vec<Arc<str>> = Vec::new();
-
-    let mut walker = node.walk();
-    for child in node.children(&mut walker) {
-        match child.kind() {
-            "modifiers" => {
-                access_flags = parse_java_modifiers(node_text(child, bytes));
-            }
-            "void_type"
-            | "integral_type"      // int, long, byte, short, char
-            | "floating_point_type" // float, double
-            | "boolean_type"
-            | "type_identifier"    // references type
-            | "array_type"
-            | "generic_type"
-            | "scoped_type_identifier" => {
-                if return_type_text.is_none() {
-                    return_type_text = Some(node_text(child, bytes));
-                }
-            }
-            "identifier" => {
-                // The first identifier is the method name
-                if method_name.is_none() {
-                    method_name = Some(node_text(child, bytes));
-                }
-            }
-            "formal_parameters" => {
-                params_text = Some(node_text(child, bytes));
-                // 收集参数名：formal_parameter > identifier（最后一个 identifier 是参数名）
-                let mut wc = child.walk();
-                for fp in child.named_children(&mut wc) {
-                    if fp.kind() == "formal_parameter" || fp.kind() == "spread_parameter" {
-                        // 取最后一个 identifier 作为参数名
-                        let name = fp.children(&mut fp.walk())
-                            .filter(|c| c.kind() == "identifier")
-                            .last()
-                            .map(|c| Arc::from(node_text(c, bytes)))
-                            .unwrap_or_else(|| Arc::from(""));
-                        param_names.push(name);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let name = method_name?;
-    let ret = return_type_text.unwrap_or("void");
-    let params = params_text.unwrap_or("()");
-
-    let descriptor = build_java_descriptor(params, ret);
-    let return_type = parse_return_type_from_descriptor(&descriptor);
-
-    let generic_signature = extract_generic_signature(node, bytes, &descriptor);
-
-    Some(MethodSummary {
-        name: Arc::from(name),
-        descriptor: Arc::from(descriptor.as_str()),
-        access_flags,
-        param_names,
-        is_synthetic: false,
-        generic_signature,
-        return_type,
-    })
-}
-
-fn extract_java_fields(body: Node, bytes: &[u8]) -> Vec<FieldSummary> {
-    let mut results = Vec::new();
-    let mut cursor = body.walk();
-
-    for child in body.children(&mut cursor) {
-        if child.kind() != "field_declaration" {
-            continue;
-        }
-        results.extend(parse_java_field(child, bytes));
-    }
-    results
-}
-
-fn parse_java_field(node: Node, bytes: &[u8]) -> Vec<FieldSummary> {
-    // field_declaration:
-    //   modifiers? -> type(integral_type|type_identifier|...) -> variable_declarator+
-    let mut type_text: Option<&str> = None;
-    let mut access_flags = ACC_PUBLIC;
-    let mut names: Vec<&str> = Vec::new();
-
-    let mut walker = node.walk();
-    for child in node.children(&mut walker) {
-        match child.kind() {
-            "modifiers" => {
-                access_flags = parse_java_modifiers(node_text(child, bytes));
-            }
-            "void_type"
-            | "integral_type"
-            | "floating_point_type"
-            | "boolean_type"
-            | "type_identifier"
-            | "array_type"
-            | "generic_type"
-            | "scoped_type_identifier" => {
-                if type_text.is_none() {
-                    type_text = Some(node_text(child, bytes));
-                }
-            }
-            "variable_declarator" => {
-                // variable_declarator: identifier ("=" expression)?
-                let mut vc = child.walk();
-                for vchild in child.children(&mut vc) {
-                    if vchild.kind() == "identifier" {
-                        names.push(node_text(vchild, bytes));
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let ty = type_text.unwrap_or("Object");
-    names
-        .into_iter()
-        .map(|name| {
-            let descriptor = java_type_to_descriptor(ty);
-            FieldSummary {
-                name: Arc::from(name),
-                descriptor: Arc::from(descriptor.as_str()),
-                access_flags,
-                is_synthetic: false,
-                generic_signature: None,
-            }
-        })
-        .collect()
-}
-
-/// parse access flags from modifiers
-fn parse_java_modifiers(text: &str) -> u16 {
-    let mut flags: u16 = 0;
-    if text.contains("public") {
-        flags |= ACC_PUBLIC;
-    }
-    if text.contains("private") {
-        flags |= ACC_PRIVATE;
-    }
-    if text.contains("protected") {
-        flags |= ACC_PROTECTED;
-    }
-    if text.contains("static") {
-        flags |= ACC_STATIC;
-    }
-    if text.contains("final") {
-        flags |= ACC_FINAL;
-    }
-    if text.contains("abstract") {
-        flags |= ACC_ABSTRACT;
-    }
-    // package-private，flags = 0
-    flags
-}
-
-fn extract_java_package(root: Node, bytes: &[u8]) -> Option<Arc<str>> {
-    let q_src = r#"(package_declaration (scoped_identifier) @pkg)"#;
-    let q = Query::new(&tree_sitter_java::LANGUAGE.into(), q_src).ok()?;
-    let idx = q.capture_index_for_name("pkg")?;
-    let results = run_query(&q, root, bytes, None);
-    let pkg_text = results
-        .first()
-        .and_then(|caps| capture_text(caps, idx, bytes))?;
-    // "com.example.foo" → "com/example/foo"
-    Some(Arc::from(pkg_text.replace('.', "/").as_str()))
-}
-
-fn extract_java_access_flags(node: Node, bytes: &[u8]) -> u16 {
-    let mut flags: u16 = 0;
+fn extract_java_access_flags(ctx: &JavaContextExtractor, node: Node) -> u16 {
+    let mut flags: u16 = ACC_PUBLIC;
     let mut walker = node.walk();
     for child in node.children(&mut walker) {
         if child.kind() == "modifiers" {
-            flags = parse_java_modifiers(node_text(child, bytes));
+            flags = parse_java_modifiers(ctx.node_text(child));
             break;
         }
     }
