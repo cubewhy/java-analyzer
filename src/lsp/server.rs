@@ -203,6 +203,9 @@ impl LanguageServer for Backend {
             .write()
             .await
             .update_source(origin, classes);
+
+        // update syntax highlight
+        self.client.semantic_tokens_refresh().await.ok();
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -229,7 +232,7 @@ impl LanguageServer for Backend {
             .documents
             .update(uri, params.text_document.version, content.clone());
 
-        // 增量更新索引（去抖动：生产实现可加 500ms debounce）
+        // 增量更新索引（去抖动 TODO: 生产实现可加 500ms debounce）
         let uri_str = uri.to_string();
         let classes = index_source_text(&uri_str, &content, &lang_id);
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
@@ -238,10 +241,13 @@ impl LanguageServer for Backend {
             .write()
             .await
             .update_source(origin, classes);
+
+        // update syntax highlight
+        self.client.semantic_tokens_refresh().await.ok();
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        // 保存时重新解析（如果有内容的话）
+        // Re-parse upon saving (if there is content).
         if let Some(text) = params.text {
             let uri = &params.text_document.uri;
             let lang_id = self
@@ -260,6 +266,9 @@ impl LanguageServer for Backend {
                     .write()
                     .await
                     .update_source(origin, classes);
+
+                // update syntax highlight
+                self.client.semantic_tokens_refresh().await.ok();
             }
         }
     }
@@ -297,6 +306,18 @@ impl LanguageServer for Backend {
         _params: GotoDefinitionParams,
     ) -> LspResult<Option<GotoDefinitionResponse>> {
         Ok(None) // TODO
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> LspResult<Option<SemanticTokensResult>> {
+        let response = super::handlers::semantic_tokens::handle_semantic_tokens_full(
+            Arc::clone(&self.workspace),
+            params,
+        )
+        .await;
+        Ok(response)
     }
 
     async fn document_symbol(

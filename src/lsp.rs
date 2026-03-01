@@ -1,6 +1,7 @@
 pub mod capabilities;
 pub mod converters;
 pub mod handlers;
+pub mod semantic_tokens;
 pub mod server;
 
 pub use server::Backend;
