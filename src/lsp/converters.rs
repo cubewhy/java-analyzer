@@ -124,6 +124,19 @@ pub fn lsp_pos_to_offset(source: &str, pos: Position) -> Option<usize> {
     line_col_to_offset(source, pos.line, pos.character)
 }
 
+pub fn ts_node_to_range(node: &tree_sitter::Node) -> Range {
+    Range {
+        start: Position {
+            line: node.start_position().row as u32,
+            character: node.start_position().column as u32,
+        },
+        end: Position {
+            line: node.end_position().row as u32,
+            character: node.end_position().column as u32,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,6 +14,7 @@ pub fn server_capabilities() -> ServerCapabilities {
                 work_done_progress: Some(true),
             },
         }),
+        document_symbol_provider: Some(OneOf::Left(true)),
         ..Default::default()
     }
 }

@@ -299,13 +299,14 @@ impl LanguageServer for Backend {
         Ok(None) // TODO
     }
 
-    // ── 预留：document symbols（outline）─────────────────────────────────────
-
     async fn document_symbol(
         &self,
-        _params: DocumentSymbolParams,
+        params: DocumentSymbolParams,
     ) -> LspResult<Option<DocumentSymbolResponse>> {
-        Ok(None) // TODO
+        let response =
+            super::handlers::symbols::handle_document_symbol(Arc::clone(&self.workspace), params)
+                .await;
+        Ok(response)
     }
 }
 
