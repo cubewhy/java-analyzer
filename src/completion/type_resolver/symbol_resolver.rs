@@ -103,7 +103,11 @@ impl<'a> SymbolResolver<'a> {
     fn resolve_bare_id(&self, ctx: &CompletionContext, id: &str) -> Option<ResolvedSymbol> {
         // 1. 局部变量 → 返回其类型（goto 会在调用方提前处理跳到声明处）
         if let Some(local) = ctx.local_variables.iter().find(|v| v.name.as_ref() == id) {
-            return Some(ResolvedSymbol::Class(Arc::from(local.type_internal.base())));
+            let base = local.type_internal.base();
+            let resolved_type = self
+                .resolve_type_name(ctx, base)
+                .unwrap_or_else(|| Arc::from(base));
+            return Some(ResolvedSymbol::Class(resolved_type));
         }
         // 2. 当前类成员（隐式 this）
         if let Some(enclosing) = &ctx.enclosing_internal_name {
@@ -124,6 +128,11 @@ impl<'a> SymbolResolver<'a> {
     }
 
     fn infer_receiver_type(&self, ctx: &CompletionContext, expr: &str) -> Option<Arc<str>> {
+        let as_internal = expr.replace('.', "/");
+        if self.index.get_class(&as_internal).is_some() {
+            return Some(Arc::from(as_internal));
+        }
+
         if expr == "this" {
             return ctx.enclosing_internal_name.clone();
         }
@@ -174,16 +183,13 @@ impl<'a> SymbolResolver<'a> {
         if name.contains('/') {
             return Some(Arc::from(name));
         }
-        // 1. 直接索引查询（简单名 + FQN 两步 fallback）
-        if let Some(c) = self.index.resolve_class_name(name) {
+
+        let as_internal = name.replace('.', "/");
+        if let Some(c) = self.index.get_class(&as_internal) {
             return Some(c.internal_name.clone());
         }
-        // 2. java.lang 隐式导入（永远可用）
-        let java_lang = format!("java/lang/{}", name);
-        if let Some(c) = self.index.get_class(&java_lang) {
-            return Some(c.internal_name.clone());
-        }
-        // 3. 当前文件显式 import 和通配符 import
+
+        // 1. 优先验证精确 Import (import java.io.PrintStream;)
         for import in &ctx.existing_imports {
             let s = import.as_ref();
             // 精确 import: ends with .ClassName
@@ -202,6 +208,11 @@ impl<'a> SymbolResolver<'a> {
                 }
             }
         }
+        let java_lang = format!("java/lang/{}", name);
+        if let Some(c) = self.index.get_class(&java_lang) {
+            return Some(c.internal_name.clone());
+        }
+
         // 4. 同包（enclosing class 所在包）
         if let Some(enc) = &ctx.enclosing_internal_name
             && let Some(slash) = enc.rfind('/')

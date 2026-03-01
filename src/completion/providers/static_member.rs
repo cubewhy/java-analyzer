@@ -272,7 +272,6 @@ mod tests {
             is_synthetic,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
-            javadoc: None,
         }
     }
 
@@ -283,7 +282,6 @@ mod tests {
             access_flags: flags,
             is_synthetic,
             generic_signature: None,
-            javadoc: None,
         }
     }
 
@@ -303,14 +301,12 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
-                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         idx
     }
@@ -381,7 +377,6 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
-                javadoc: None,
             }],
             fields: vec![
                 FieldSummary {
@@ -390,7 +385,6 @@ mod tests {
                     access_flags: ACC_PRIVATE | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 },
                 FieldSummary {
                     name: Arc::from("publicField"),
@@ -398,14 +392,12 @@ mod tests {
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 },
             ],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         idx
     }
@@ -465,7 +457,6 @@ mod tests {
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 },
                 FieldSummary {
                     name: Arc::from("instanceF"),
@@ -473,14 +464,12 @@ mod tests {
                     access_flags: ACC_PUBLIC, // NOT static
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 },
             ],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let ctx = self_static_ctx("");
         let results = StaticMemberProvider.provide(&ctx, &mut idx);
@@ -590,13 +579,11 @@ mod tests {
                 access_flags: ACC_PRIVATE | ACC_STATIC,
                 is_synthetic: false,
                 generic_signature: None,
-                javadoc: None,
             }],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         // We are inside Main, accessing Other.secret
@@ -746,13 +733,11 @@ mod tests {
                 access_flags: ACC_PUBLIC | ACC_STATIC,
                 is_synthetic: false,
                 generic_signature: None,
-                javadoc: None,
             }],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         // Parser 产生 MemberAccess，enrich 后 receiver_type 仍为 None（不是局部变量）

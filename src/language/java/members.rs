@@ -195,7 +195,6 @@ pub fn parse_partial_methods_from_error(
             is_synthetic: false,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(&descriptor),
-            javadoc: None,
         })));
     }
 
@@ -278,7 +277,6 @@ pub fn parse_partial_methods_from_error(
             is_synthetic: false,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(&descriptor),
-            javadoc: None,
         })));
     }
 
@@ -329,7 +327,6 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
         is_synthetic: false,
         generic_signature,
         return_type: parse_return_type_from_descriptor(&descriptor),
-        javadoc: extract_javadoc(node, ctx.bytes()),
     })))
 }
 
@@ -379,7 +376,6 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
                 access_flags: flags,
                 is_synthetic: false,
                 generic_signature: None,
-                javadoc: extract_javadoc(node, ctx.bytes()),
             }))
         })
         .collect()
@@ -444,7 +440,6 @@ fn parse_misread_method(
         is_synthetic: false,
         generic_signature: None,
         return_type: parse_return_type_from_descriptor(&descriptor),
-        javadoc: None,
     })))
 }
 

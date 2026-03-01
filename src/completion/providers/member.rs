@@ -722,7 +722,6 @@ mod tests {
             is_synthetic,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
-            javadoc: None,
         }
     }
 
@@ -733,7 +732,6 @@ mod tests {
             access_flags: flags,
             is_synthetic,
             generic_signature: None,
-            javadoc: None,
         }
     }
 
@@ -769,7 +767,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         idx
     }
@@ -860,7 +857,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         let ctx = ctx_this("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "pr");
@@ -904,7 +900,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         let ctx = CompletionContext::new(
@@ -968,7 +963,6 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: None,
@@ -982,7 +976,6 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
 

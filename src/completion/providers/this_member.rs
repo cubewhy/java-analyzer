@@ -257,7 +257,6 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
-                javadoc: None,
             }))
         } else {
             CurrentClassMember::Field(Arc::new(FieldSummary {
@@ -266,7 +265,6 @@ mod tests {
                 access_flags: flags,
                 is_synthetic: false,
                 generic_signature: None,
-                javadoc: None,
             }))
         }
     }
@@ -433,7 +431,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let mut idx = GlobalIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
@@ -457,7 +454,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let mut idx = GlobalIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
@@ -480,7 +476,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let mut idx = GlobalIndex::new();
         let mut ctx = ctx_with_members_static("", members, enclosing);
@@ -516,7 +511,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
@@ -569,7 +563,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
@@ -607,7 +600,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let ctx = CompletionContext::new(
             CursorLocation::MethodArgument {
@@ -645,7 +637,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let mut idx = GlobalIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing_method);
@@ -679,14 +670,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: Some(Arc::from("org/cubewhy")),
@@ -702,14 +691,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
 
@@ -722,7 +709,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
@@ -767,14 +753,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: None,
@@ -788,7 +772,6 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
 
@@ -800,7 +783,6 @@ mod tests {
             is_synthetic: false,
             generic_signature: None,
             return_type: None,
-            javadoc: None,
         }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {

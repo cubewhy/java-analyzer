@@ -64,7 +64,14 @@ pub async fn handle_goto_definition(
 
     let (target_internal, member_name, decl_kind): (Arc<str>, Option<Arc<str>>, DeclKind) =
         match &symbol {
-            ResolvedSymbol::Class(name) => (Arc::clone(name), None, DeclKind::Type),
+            ResolvedSymbol::Class(name) => {
+                let simple_name = name.rsplit('/').next().unwrap_or(name.as_ref());
+                (
+                    Arc::clone(name),
+                    Some(Arc::from(simple_name)),
+                    DeclKind::Type,
+                )
+            }
             ResolvedSymbol::Method { owner, summary } => (
                 Arc::clone(owner),
                 Some(Arc::clone(&summary.name)),
@@ -175,22 +182,20 @@ pub async fn handle_goto_definition(
             zip_path,
             entry_name,
         } => {
-            // We reuse the decompiler cache directory to store extracted ZIP sources
-            let cache_path = backend.decompiler_cache.resolve(&target_internal, &[]);
+            let base_cache = std::env::temp_dir().join("java_analyzer_sources");
+            let cache_path = base_cache.join(entry_name.as_ref());
 
             if !cache_path.exists() {
                 tracing::info!(entry = %entry_name, "goto: extracting zip source to cache");
                 if let Some(parent) = cache_path.parent() {
                     std::fs::create_dir_all(parent).ok();
                 }
-                if let Ok(file) = std::fs::File::open(zip_path.as_ref()) {
-                    if let Ok(mut archive) = zip::ZipArchive::new(file) {
-                        if let Ok(mut entry) = archive.by_name(entry_name.as_ref()) {
-                            if let Ok(mut out) = std::fs::File::create(&cache_path) {
-                                std::io::copy(&mut entry, &mut out).ok();
-                            }
-                        }
-                    }
+                if let Ok(file) = std::fs::File::open(zip_path.as_ref())
+                    && let Ok(mut archive) = zip::ZipArchive::new(file)
+                    && let Ok(mut entry) = archive.by_name(entry_name.as_ref())
+                    && let Ok(mut out) = std::fs::File::create(&cache_path)
+                {
+                    std::io::copy(&mut entry, &mut out).ok();
                 }
             }
 

@@ -180,7 +180,6 @@ fn parse_java_class(
         inner_class_of: outer_class,
         generic_signature: extract_generic_signature(node, ctx.bytes(), "Ljava/lang/Object;"),
         origin: origin.clone(),
-        javadoc: extract_javadoc(node, ctx.bytes()),
     })
 }
 
@@ -265,6 +264,100 @@ pub fn parse_kotlin_source(source: &str, origin: ClassOrigin) -> Vec<ClassMetada
     let mut results = Vec::new();
     collect_kotlin_classes(root, bytes, &package, None, &origin, &mut results);
     results
+}
+
+/// 实时按需提取 Javadoc（用于 Hover 等 LSP 功能，避免常驻内存）
+pub fn get_javadoc_on_the_fly(
+    origin: &ClassOrigin,
+    target_internal: &str,
+    member_name: Option<&str>,
+) -> Option<String> {
+    // 1. 根据 Origin 从磁盘或 Zip 读取源码
+    let content = match origin {
+        ClassOrigin::SourceFile(uri) => {
+            let path = uri.strip_prefix("file://").unwrap_or(uri);
+            std::fs::read_to_string(path).ok()?
+        }
+        ClassOrigin::ZipSource {
+            zip_path,
+            entry_name,
+        } => {
+            let file = std::fs::File::open(zip_path.as_ref()).ok()?;
+            let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
+            let mut entry = archive.by_name(entry_name.as_ref()).ok()?;
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut entry, &mut buf).ok()?;
+            buf
+        }
+        _ => return None, // Unknown or Jar (without zip source)
+    };
+
+    // 暂时只用 Java Parser 提取（JDK source 和多数情况都是 Java）
+    let ctx = JavaContextExtractor::for_indexing(&content);
+    let mut parser = make_java_parser();
+    let tree = parser.parse(&content, None)?;
+
+    // 2. 找到目标 Class 的 Node
+    let target_simple = target_internal
+        .rsplit('/')
+        .next()
+        .unwrap_or(target_internal);
+    let class_node = find_class_node(tree.root_node(), target_simple, ctx.bytes())?;
+
+    // 3. 提取 Class 或 Member 的 Javadoc
+    if let Some(m_name) = member_name {
+        let body = class_node.child_by_field_name("body")?;
+        let member_node = find_member_node(body, m_name, ctx.bytes())?;
+        extract_javadoc(member_node, ctx.bytes()).map(|s| s.to_string())
+    } else {
+        extract_javadoc(class_node, ctx.bytes()).map(|s| s.to_string())
+    }
+}
+
+fn find_class_node<'a>(node: Node<'a>, target_name: &str, bytes: &[u8]) -> Option<Node<'a>> {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if matches!(
+            n.kind(),
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+                | "annotation_type_declaration"
+        ) && let Some(name_node) = n.child_by_field_name("name")
+            && name_node.utf8_text(bytes).unwrap_or("") == target_name
+        {
+            return Some(n);
+        }
+
+        let mut cursor = n.walk();
+        for child in n.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+fn find_member_node<'a>(body: Node<'a>, name: &str, bytes: &[u8]) -> Option<Node<'a>> {
+    let mut cursor = body.walk();
+    for child in body.children(&mut cursor) {
+        if child.kind() == "method_declaration" {
+            if let Some(name_node) = child.child_by_field_name("name")
+                && name_node.utf8_text(bytes).unwrap_or("") == name
+            {
+                // TODO: 如果遇到同名重载方法，这里会返回第一个找到的。
+                // 对于 Hover 来说，第一段 Javadoc 通常也是足够的，后续如果需要可以引入 desc 做精准匹配
+                return Some(child);
+            }
+        } else if child.kind() == "field_declaration" {
+            let text = child.utf8_text(bytes).unwrap_or("");
+            if text.contains(name) {
+                // 简单处理，因为 field 可能有多个 declarator (int x, y;)
+                return Some(child);
+            }
+        }
+    }
+    None
 }
 
 fn collect_kotlin_classes(
@@ -374,7 +467,6 @@ fn parse_kotlin_class(
         generic_signature: extract_generic_signature(node, bytes, "Ljava/lang/Object;"),
         inner_class_of: outer_class,
         origin: origin.clone(),
-        javadoc: extract_javadoc(node, bytes),
     })
 }
 
@@ -439,7 +531,6 @@ fn extract_kotlin_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
             is_synthetic: false,
             generic_signature,
             return_type,
-            javadoc: extract_javadoc(name_node.parent().unwrap(), bytes),
         });
     }
     result
@@ -476,15 +567,6 @@ fn extract_kotlin_fields(body: Node, bytes: &[u8]) -> Vec<FieldSummary> {
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
-                javadoc: extract_javadoc(
-                    caps.iter()
-                        .find(|(i, _)| *i == name_idx)
-                        .unwrap()
-                        .1
-                        .parent()
-                        .unwrap(),
-                    bytes,
-                ),
             })
         })
         .collect()

@@ -272,7 +272,6 @@ mod tests {
             is_synthetic,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
-            javadoc: None,
         }
     }
 

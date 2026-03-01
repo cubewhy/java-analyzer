@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -149,7 +150,10 @@ impl JdkIndexer {
     }
 
     fn parse_jdk_source_zip(path: &Path) -> Vec<ClassMetadata> {
-        use rayon::prelude::*;
+        if let Some(cached) = crate::index::cache::load_cached(path) {
+            tracing::info!(count = cached.len(), "JDK source index loaded from cache");
+            return cached;
+        }
 
         let file = match std::fs::File::open(path) {
             Ok(f) => f,
@@ -181,7 +185,7 @@ impl JdkIndexer {
             "found java files in JDK src.zip"
         );
 
-        source_files
+        let results: Vec<_> = source_files
             .into_par_iter()
             .flat_map(|(name, content)| {
                 let origin = ClassOrigin::ZipSource {
@@ -190,10 +194,18 @@ impl JdkIndexer {
                 };
                 crate::index::source::parse_source_str(&content, "java", origin)
             })
-            .collect()
+            .collect();
+
+        let results_clone = results.clone();
+        let path_buf = path.to_path_buf();
+        std::thread::spawn(move || {
+            crate::index::cache::save_cache(&path_buf, &results_clone);
+        });
+
+        results
     }
 
-    fn merge_source_into_bytecode(bytecode: &mut Vec<ClassMetadata>, source: Vec<ClassMetadata>) {
+    fn merge_source_into_bytecode(bytecode: &mut [ClassMetadata], source: Vec<ClassMetadata>) {
         let mut source_map: rustc_hash::FxHashMap<Arc<str>, ClassMetadata> = source
             .into_iter()
             .map(|c| (c.internal_name.clone(), c))
@@ -202,7 +214,6 @@ impl JdkIndexer {
         for b_class in bytecode.iter_mut() {
             if let Some(s_class) = source_map.remove(&b_class.internal_name) {
                 b_class.origin = s_class.origin; // Upgrade origin to point to the Zip file
-                b_class.javadoc = s_class.javadoc;
 
                 for b_method in b_class.methods.iter_mut() {
                     let b_param_count =
@@ -213,13 +224,6 @@ impl JdkIndexer {
                         .find(|m| m.name == b_method.name && m.param_names.len() == b_param_count)
                     {
                         b_method.param_names = s_method.param_names.clone();
-                        b_method.javadoc = s_method.javadoc.clone();
-                    }
-                }
-
-                for b_field in b_class.fields.iter_mut() {
-                    if let Some(s_field) = s_class.fields.iter().find(|f| f.name == b_field.name) {
-                        b_field.javadoc = s_field.javadoc.clone();
                     }
                 }
             }

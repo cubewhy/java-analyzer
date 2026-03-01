@@ -58,7 +58,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }
     }
 

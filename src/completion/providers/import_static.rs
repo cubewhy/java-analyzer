@@ -140,7 +140,6 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("int")),
-                    javadoc: None,
                 },
                 MethodSummary {
                     name: Arc::from("pow"),
@@ -150,7 +149,6 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("double")),
-                    javadoc: None,
                 },
                 MethodSummary {
                     name: Arc::from("instanceMethod"),
@@ -160,7 +158,6 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
-                    javadoc: None,
                 },
             ],
             fields: vec![
@@ -170,7 +167,6 @@ mod tests {
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 },
                 FieldSummary {
                     name: Arc::from("instanceField"),
@@ -178,15 +174,14 @@ mod tests {
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 },
             ],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
+
         idx
     }
 

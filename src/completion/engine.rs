@@ -591,14 +591,12 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
-                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             inner_class_of: None,
             generic_signature: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         idx
     }
@@ -709,13 +707,11 @@ mod tests {
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 }],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: Some(Arc::from("java/io")),
@@ -729,7 +725,6 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
 
@@ -787,14 +782,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             }]);
         }
         let engine = CompletionEngine::new();
@@ -840,14 +833,12 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: Some(Arc::from("NestedClass")),
-                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
@@ -904,7 +895,6 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("RandomClass")),
-                    javadoc: None,
                 },
                 MethodSummary {
                     name: Arc::from("randomFunction"),
@@ -914,7 +904,6 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("Main2")),
-                    javadoc: None,
                 },
             ],
             fields: vec![],
@@ -922,7 +911,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
@@ -977,14 +965,12 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: Some(Arc::from("java/lang/String")),
-                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
@@ -1033,14 +1019,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("java/lang/String")),
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: None,
@@ -1054,7 +1038,6 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
         let resolver = TypeResolver::new(&idx);
@@ -1080,14 +1063,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: Some(Arc::from("Main2")),
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: None,
@@ -1103,14 +1084,12 @@ mod tests {
                     is_synthetic: false,
                     generic_signature: None,
                     return_type: None,
-                    javadoc: None,
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
         let engine = CompletionEngine::new();
@@ -1146,7 +1125,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
@@ -1236,14 +1214,12 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
-                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
@@ -1287,7 +1263,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
         let engine = CompletionEngine::new();
         let mut ctx = CompletionContext::new(
@@ -1352,7 +1327,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         let engine = CompletionEngine::new();
@@ -1445,14 +1419,12 @@ mod tests {
                 is_synthetic: false,
                 generic_signature: None,
                 return_type: None,
-                javadoc: None,
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         let engine = CompletionEngine::new();
@@ -1500,7 +1472,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         let engine = CompletionEngine::new();
@@ -1550,7 +1521,6 @@ mod tests {
             generic_signature: None,
             inner_class_of: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }]);
 
         let engine = CompletionEngine::new();
@@ -1606,13 +1576,11 @@ mod tests {
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    javadoc: None,
                 }],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
             ClassMetadata {
                 package: Some(Arc::from("java/lang")),
@@ -1626,7 +1594,6 @@ mod tests {
                 generic_signature: None,
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
-                javadoc: None,
             },
         ]);
 

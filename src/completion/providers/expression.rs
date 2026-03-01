@@ -203,7 +203,6 @@ mod tests {
             inner_class_of: None,
             generic_signature: None,
             origin: ClassOrigin::Unknown,
-            javadoc: None,
         }
     }
 
