@@ -300,7 +300,6 @@ pub fn source_member_detail(
     member: &CurrentClassMember,
     provider: &impl SymbolProvider,
 ) -> String {
-    // TODO: display argument name
     let base_class_name = receiver_internal
         .split('<')
         .next()
@@ -337,8 +336,9 @@ pub fn source_member_detail(
         format!("{}{}", source_type, "[]".repeat(array_dims))
     };
 
-    if member.is_method {
-        let sig = member.descriptor.as_ref();
+    if let CurrentClassMember::Method(md) = member {
+        let md = md.clone();
+        let sig = member.descriptor();
 
         // 1. 解析返回类型
         let ret_jvm = if let Some(ret_idx) = sig.find(')') {
@@ -351,11 +351,10 @@ pub fn source_member_detail(
             .map(|(t, _)| Arc::from(t.to_signature_string()))
             .unwrap_or_else(|| Arc::from(ret_jvm));
 
-        // 核心：优先信任 provider！只有失败才 fallback 到清理函数
         let source_style_return = descriptor_to_source_type(&display_return, provider)
             .unwrap_or_else(|| clean_fallback(ret_jvm));
 
-        // 2. 解析参数列表
+        // 解析参数列表
         let mut param_types = Vec::new();
         if let Some(start) = sig.find('(')
             && let Some(end) = sig.find(')')
@@ -367,7 +366,6 @@ pub fn source_member_detail(
 
                     let subbed: Arc<str> = Arc::from(t.to_signature_string());
 
-                    // 核心：优先信任 provider！
                     param_types.push(
                         descriptor_to_source_type(&subbed, provider)
                             .unwrap_or_else(|| clean_fallback(param_jvm_str)),
@@ -383,30 +381,39 @@ pub fn source_member_detail(
         let full_params: Vec<String> = param_types
             .into_iter()
             .enumerate()
-            .map(|(i, type_name)| format!("{} arg{}", type_name, i))
+            .map(|(i, type_name)| {
+                let param_name = md // method not found
+                    .param_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| Arc::from(format!("arg{}", i).as_str()));
+                format!("{} {}", type_name, param_name)
+            })
             .collect();
 
         format!(
             "{} — {} {}({})",
             short_class_name,
             source_style_return,
-            member.name,
+            member.name(),
             full_params.join(", ")
         )
     } else {
         // == 处理字段 ==
-        let sig_to_use = member.descriptor.as_ref();
-        let display_type: Arc<str> = JvmType::parse(sig_to_use)
+        let sig_to_use = member.descriptor();
+        let display_type: Arc<str> = JvmType::parse(&sig_to_use)
             .map(|(t, _)| Arc::from(t.to_signature_string()))
-            .unwrap_or_else(|| Arc::from(sig_to_use));
+            .unwrap_or_else(|| sig_to_use.clone());
 
         // 核心：优先信任 provider！
         let source_style_type = descriptor_to_source_type(&display_type, provider)
-            .unwrap_or_else(|| clean_fallback(sig_to_use));
+            .unwrap_or_else(|| clean_fallback(&sig_to_use));
 
         format!(
             "{} — {} : {}",
-            short_class_name, member.name, source_style_type
+            short_class_name,
+            member.name(),
+            source_style_type
         )
     }
 }

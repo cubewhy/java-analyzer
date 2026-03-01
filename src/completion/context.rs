@@ -1,14 +1,55 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::completion::type_resolver::type_name::TypeName;
+use rust_asm::constants::{ACC_PRIVATE, ACC_STATIC};
 
-#[derive(Debug, Clone)]
-pub struct CurrentClassMember {
-    pub name: Arc<str>,
-    pub is_method: bool,
-    pub is_static: bool,
-    pub is_private: bool,
-    pub descriptor: Arc<str>,
+use crate::{
+    completion::type_resolver::type_name::TypeName,
+    index::{FieldSummary, MethodSummary},
+};
+
+#[derive(Clone, Debug)]
+pub enum CurrentClassMember {
+    Method(Arc<MethodSummary>),
+    Field(Arc<FieldSummary>),
+}
+
+impl CurrentClassMember {
+    pub fn name(&self) -> Arc<str> {
+        match self {
+            Self::Method(m) => m.name.clone(),
+            Self::Field(f) => f.name.clone(),
+        }
+    }
+
+    pub fn descriptor(&self) -> Arc<str> {
+        match self {
+            Self::Method(m) => m.descriptor.clone(),
+            Self::Field(f) => f.descriptor.clone(),
+        }
+    }
+
+    pub fn access_flags(&self) -> u16 {
+        match self {
+            Self::Method(m) => m.access_flags,
+            Self::Field(f) => f.access_flags,
+        }
+    }
+
+    pub fn is_static(&self) -> bool {
+        (self.access_flags() & ACC_STATIC) != 0
+    }
+
+    pub fn is_private(&self) -> bool {
+        (self.access_flags() & ACC_PRIVATE) != 0
+    }
+
+    pub fn is_method(&self) -> bool {
+        matches!(self, Self::Method(_))
+    }
+
+    pub fn is_field(&self) -> bool {
+        matches!(self, Self::Field(_))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,7 +176,7 @@ impl CompletionContext {
     ) -> Self {
         self.current_class_members = members
             .into_iter()
-            .map(|m| (Arc::clone(&m.name), m))
+            .map(|m| (Arc::from(m.name()), m))
             .collect();
         self
     }
@@ -149,7 +190,7 @@ impl CompletionContext {
     pub fn is_in_static_context(&self) -> bool {
         self.enclosing_class_member
             .as_ref()
-            .is_some_and(|m| m.is_static)
+            .is_some_and(|m| m.is_static())
     }
 
     pub fn with_char_after_cursor(mut self, c: Option<char>) -> Self {

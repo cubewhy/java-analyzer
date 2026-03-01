@@ -26,7 +26,7 @@ impl CompletionProvider for LocalVarProvider {
         };
 
         let scored =
-            fuzzy::fuzzy_filter_sort(prefix, ctx.local_variables.iter(), |lv| lv.name.as_ref());
+            fuzzy::fuzzy_filter_sort(prefix, ctx.local_variables.iter(), |lv| lv.name.clone());
 
         scored
             .into_iter()

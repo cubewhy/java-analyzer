@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{CaseMatching, Normalization, Pattern},
@@ -27,12 +29,12 @@ pub fn fuzzy_filter_sort<T, F>(
     name_fn: F,
 ) -> Vec<(T, u32)>
 where
-    F: Fn(&T) -> &str,
+    F: Fn(&T) -> Arc<str>,
 {
     let mut scored: Vec<(T, u32)> = items
         .into_iter()
         .filter_map(|item| {
-            let score = fuzzy_match(pattern, name_fn(&item))?;
+            let score = fuzzy_match(pattern, &name_fn(&item))?;
             Some((item, score))
         })
         .collect();
@@ -81,7 +83,7 @@ mod tests {
     fn test_filter_sort_order() {
         // Exact matches should be listed first
         let items = ["aVar", "var", "variable", "unrelated"];
-        let results = fuzzy_filter_sort("var", items.iter(), |s| s);
+        let results = fuzzy_filter_sort("var", items.iter(), |s| Arc::from(**s));
         let names: Vec<&str> = results.iter().map(|(s, _)| **s).collect();
         // "var" has the highest score for exact matching and should be ranked first.
         assert_eq!(names[0], "var", "exact match should rank first");

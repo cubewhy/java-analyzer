@@ -602,7 +602,7 @@ mod tests {
             "pri should be in current_class_members"
         );
         let pri = ctx.current_class_members.get("pri").unwrap();
-        assert!(pri.is_static, "pri() should be marked static");
+        assert!(pri.is_static(), "pri() should be marked static");
     }
 
     #[test]
@@ -703,7 +703,7 @@ mod tests {
 
         let pri = ctx.current_class_members.get("pri");
         assert!(pri.is_some(), "pri should be in current_class_members");
-        assert!(pri.unwrap().is_static, "pri() should be marked as static");
+        assert!(pri.unwrap().is_static(), "pri() should be marked as static");
     }
 
     #[test]
@@ -1281,7 +1281,10 @@ mod tests {
                 let m = &ctx.current_class_members[k];
                 format!(
                     "{} static={} private={} method={}",
-                    k, m.is_static, m.is_private, m.is_method
+                    k,
+                    m.is_static(),
+                    m.is_private(),
+                    m.is_method()
                 )
             })
             .collect();
@@ -1342,7 +1345,14 @@ mod tests {
         let partial = members::parse_partial_methods_from_error(&extractor, error_node, &snapshot);
         let mut result: Vec<String> = partial
             .iter()
-            .map(|m| format!("{} static={} private={}", m.name, m.is_static, m.is_private))
+            .map(|m| {
+                format!(
+                    "{} static={} private={}",
+                    m.name(),
+                    m.is_static(),
+                    m.is_private()
+                )
+            })
             .collect();
         result.sort();
         insta::assert_snapshot!("partial_methods", result.join("\n"));
@@ -1380,7 +1390,10 @@ mod tests {
                 let m = &ctx.current_class_members[k];
                 format!(
                     "{} static={} private={} method={}",
-                    k, m.is_static, m.is_private, m.is_method
+                    k,
+                    m.is_static(),
+                    m.is_private(),
+                    m.is_method()
                 )
             })
             .collect();
@@ -1686,7 +1699,7 @@ mod tests {
             ctx.current_class_members.keys().collect::<Vec<_>>()
         );
         assert!(
-            ctx.current_class_members.get("test").unwrap().is_static,
+            ctx.current_class_members.get("test").unwrap().is_static(),
             "test() should be marked static"
         );
     }

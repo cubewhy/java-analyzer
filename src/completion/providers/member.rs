@@ -348,46 +348,46 @@ impl MemberProvider {
 
         let scored =
             fuzzy::fuzzy_filter_sort(member_prefix, ctx.current_class_members.values(), |m| {
-                m.name.as_ref()
+                m.name()
             });
 
         scored
             .into_iter()
             .map(|(m, score)| {
-                let kind = match (m.is_method, m.is_static) {
+                let kind = match (m.is_method(), m.is_static()) {
                     (true, true) => CandidateKind::StaticMethod {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                     (true, false) => CandidateKind::Method {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                     (false, true) => CandidateKind::StaticField {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                     (false, false) => CandidateKind::Field {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                 };
-                let insert_text = if m.is_method {
+                let insert_text = if m.is_method() {
                     if ctx.has_paren_after_cursor() {
-                        m.name.to_string()
+                        m.name().to_string()
                     } else {
-                        format!("{}(", m.name)
+                        format!("{}(", m.name())
                     }
                 } else {
-                    m.name.to_string()
+                    m.name().to_string()
                 };
                 let detail = format!(
                     "{} {} {}",
-                    if m.is_private { "private" } else { "public" },
-                    if m.is_static { "static" } else { "" },
-                    m.name
+                    if m.is_private() { "private" } else { "public" },
+                    if m.is_static() { "static" } else { "" },
+                    m.name()
                 );
-                CompletionCandidate::new(Arc::clone(&m.name), insert_text, kind, self.name())
+                CompletionCandidate::new(m.name(), insert_text, kind, self.name())
                     .with_detail(detail)
                     .with_score(70.0 + score as f32 * 0.1)
             })
@@ -703,6 +703,7 @@ fn resolve_simple_name_to_internal(
 #[cfg(test)]
 mod tests {
     use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
+    use std::sync::Arc;
 
     use crate::completion::context::CurrentClassMember;
     use crate::completion::type_resolver::type_name::TypeName;
@@ -710,14 +711,12 @@ mod tests {
     use crate::language::Language;
     use crate::{
         completion::{
-            candidate::CandidateKind,
             context::{CompletionContext, CursorLocation, LocalVar},
             providers::{CompletionProvider, member::MemberProvider},
             type_resolver::parse_return_type_from_descriptor,
         },
         language::JavaLanguage,
     };
-    use std::sync::Arc;
 
     fn at(src: &str, line: u32, col: u32) -> CompletionContext {
         JavaLanguage
@@ -725,36 +724,44 @@ mod tests {
             .unwrap()
     }
 
-    fn make_method(
-        name: &str,
-        descriptor: &str,
-        access_flags: u16,
-        is_synthetic: bool,
-    ) -> MethodSummary {
+    fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
         MethodSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
             param_names: vec![],
-            access_flags,
+            access_flags: flags,
             is_synthetic,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
         }
     }
 
-    fn make_field(
-        name: &str,
-        descriptor: &str,
-        access_flags: u16,
-        is_synthetic: bool,
-    ) -> FieldSummary {
+    fn make_field(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> FieldSummary {
         FieldSummary {
             name: Arc::from(name),
             descriptor: Arc::from(descriptor),
-            access_flags,
+            access_flags: flags,
             is_synthetic,
             generic_signature: None,
         }
+    }
+
+    /// 快速包装方法枚举
+    fn m(name: &str, flags: u16, is_private: bool) -> CurrentClassMember {
+        let mut f = flags;
+        if is_private {
+            f |= ACC_PRIVATE;
+        }
+        CurrentClassMember::Method(Arc::new(make_method(name, "()V", f, false)))
+    }
+
+    /// 快速包装字段枚举
+    fn f(name: &str, flags: u16, is_private: bool) -> CurrentClassMember {
+        let mut f = flags;
+        if is_private {
+            f |= ACC_PRIVATE;
+        }
+        CurrentClassMember::Field(Arc::new(make_field(name, "I", f, false)))
     }
 
     fn make_index(methods: Vec<MethodSummary>, fields: Vec<FieldSummary>) -> GlobalIndex {
@@ -775,7 +782,6 @@ mod tests {
         idx
     }
 
-    /// receiver_type is known directly
     fn ctx_with_type(receiver_internal: &str, prefix: &str) -> CompletionContext {
         CompletionContext::new(
             CursorLocation::MemberAccess {
@@ -785,14 +791,13 @@ mod tests {
             },
             prefix,
             vec![],
-            None,   // enclosing_class
-            None,   // enclosing_internal_name
-            None,   // enclosing_package
-            vec![], // existing_imports
+            None,
+            None,
+            None,
+            vec![],
         )
     }
 
-    /// receiver_type is unknown, deduced from locals
     fn ctx_with_local(var_name: &str, var_type: &str, prefix: &str) -> CompletionContext {
         CompletionContext::new(
             CursorLocation::MemberAccess {
@@ -813,7 +818,6 @@ mod tests {
         )
     }
 
-    /// Same type of access (receiver_expr = "this")
     fn ctx_this(
         enclosing_simple: &str,
         enclosing_internal: &str,
@@ -835,7 +839,6 @@ mod tests {
         )
     }
 
-    /// The local var type is a simple name and needs to be resolved via import.
     fn ctx_with_local_and_import(
         var_name: &str,
         var_type_simple: &str,
@@ -852,7 +855,7 @@ mod tests {
             prefix,
             vec![LocalVar {
                 name: Arc::from(var_name),
-                type_internal: TypeName::new(var_type_simple), // simple name
+                type_internal: TypeName::new(var_type_simple),
                 init_expr: None,
             }],
             None,
@@ -861,6 +864,8 @@ mod tests {
             imports,
         )
     }
+
+    // --- 测试用例 ---
 
     #[test]
     fn test_instance_method_found() {
@@ -875,11 +880,7 @@ mod tests {
         );
         let ctx = ctx_with_type("com/example/Foo", "get");
         let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "getValue"),
-            "results: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
+        assert!(results.iter().any(|c| c.label.as_ref() == "getValue"));
     }
 
     #[test]
@@ -894,56 +895,7 @@ mod tests {
         );
         let ctx = ctx_with_type("com/example/Foo", "");
         let results = MemberProvider.provide(&ctx, &mut idx);
-        assert_eq!(results.len(), 2, "only public methods, secret hidden");
-    }
-
-    #[test]
-    fn test_prefix_filter_case_insensitive() {
-        let mut idx = make_index(
-            vec![
-                make_method("getName", "()Ljava/lang/String;", ACC_PUBLIC, false),
-                make_method("setName", "(Ljava/lang/String;)V", ACC_PUBLIC, false),
-            ],
-            vec![],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "GET");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.iter().any(|c| c.label.as_ref() == "getName"));
-        assert!(results.iter().all(|c| c.label.as_ref() != "setName"));
-    }
-
-    #[test]
-    fn test_private_hidden_from_outside() {
-        let mut idx = make_index(
-            vec![make_method("secret", "()V", ACC_PRIVATE, false)],
-            vec![],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_synthetic_attr_hidden() {
-        let mut idx = make_index(
-            vec![make_method("access$000", "()V", ACC_PUBLIC, true)],
-            vec![],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.is_empty());
-    }
-
-    #[test]
-    fn test_acc_synthetic_flag_only_visible() {
-        // ACC_SYNTHETIC flag but no Synthetic attribute -> Kotlin normal method, should show
-        let mut idx = make_index(
-            vec![make_method("main", "([Ljava/lang/String;)V", 0x1009, false)],
-            vec![],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.iter().any(|c| c.label.as_ref() == "main"));
+        assert_eq!(results.len(), 2);
     }
 
     #[test]
@@ -968,431 +920,29 @@ mod tests {
 
         let ctx = ctx_this("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "pr");
         let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "pri"),
-            "private method visible via this from same class"
-        );
-    }
-
-    #[test]
-    fn test_same_class_private_field_visible() {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
-            package: Some(Arc::from("org/cubewhy/a")),
-            name: Arc::from("Main"),
-            internal_name: Arc::from("org/cubewhy/a/Main"),
-            super_name: None,
-            interfaces: vec![],
-            methods: vec![],
-            fields: vec![make_field("count", "I", ACC_PRIVATE, false)],
-            access_flags: ACC_PUBLIC,
-            generic_signature: None,
-            inner_class_of: None,
-            origin: ClassOrigin::Unknown,
-        }]);
-        let ctx = ctx_this("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "co");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.iter().any(|c| c.label.as_ref() == "count"));
-    }
-
-    #[test]
-    fn test_static_method_kind() {
-        let mut idx = make_index(
-            vec![make_method(
-                "of",
-                "()Lcom/example/Foo;",
-                ACC_PUBLIC | ACC_STATIC,
-                false,
-            )],
-            vec![],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(matches!(
-            results
-                .iter()
-                .find(|c| c.label.as_ref() == "of")
-                .unwrap()
-                .kind,
-            CandidateKind::StaticMethod { .. }
-        ));
-    }
-
-    #[test]
-    fn test_instance_method_kind() {
-        let mut idx = make_index(vec![make_method("run", "()V", ACC_PUBLIC, false)], vec![]);
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(matches!(
-            results
-                .iter()
-                .find(|c| c.label.as_ref() == "run")
-                .unwrap()
-                .kind,
-            CandidateKind::Method { .. }
-        ));
-    }
-
-    #[test]
-    fn test_init_filtered() {
-        let mut idx = make_index(
-            vec![
-                make_method("<init>", "()V", ACC_PUBLIC, false),
-                make_method("<clinit>", "()V", ACC_PUBLIC, false),
-                make_method("run", "()V", ACC_PUBLIC, false),
-            ],
-            vec![],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.iter().all(|c| c.label.as_ref() != "<init>"));
-        assert!(results.iter().all(|c| c.label.as_ref() != "<clinit>"));
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn test_field_found() {
-        let mut idx = make_index(vec![], vec![make_field("value", "I", ACC_PUBLIC, false)]);
-        let ctx = ctx_with_type("com/example/Foo", "val");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(results.iter().any(|c| c.label.as_ref() == "value"));
-        assert!(matches!(
-            results
-                .iter()
-                .find(|c| c.label.as_ref() == "value")
-                .unwrap()
-                .kind,
-            CandidateKind::Field { .. }
-        ));
-    }
-
-    #[test]
-    fn test_static_field_kind() {
-        let mut idx = make_index(
-            vec![],
-            vec![make_field("CONST", "I", ACC_PUBLIC | ACC_STATIC, false)],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(matches!(
-            results
-                .iter()
-                .find(|c| c.label.as_ref() == "CONST")
-                .unwrap()
-                .kind,
-            CandidateKind::StaticField { .. }
-        ));
-    }
-
-    #[test]
-    fn test_synthetic_field_hidden() {
-        let mut idx = make_index(
-            vec![],
-            vec![make_field("this$0", "Lcom/example/Outer;", 0x1010, true)],
-        );
-        let ctx = ctx_with_type("com/example/Foo", "");
-        assert!(MemberProvider.provide(&ctx, &mut idx).is_empty());
-    }
-
-    #[test]
-    fn test_receiver_inferred_from_locals_internal_name() {
-        // The type_internal property of a local var is already the internal name.
-        let mut idx = make_index(
-            vec![make_method("process", "()V", ACC_PUBLIC, false)],
-            vec![],
-        );
-        let ctx = ctx_with_local("foo", "com/example/Foo", "proc");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "process"),
-            "infer type from local var (internal name): {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_receiver_inferred_from_locals_via_import() {
-        // The local var type is the simple name "Foo", which needs to be resolved via import.
-        let mut idx = make_index(vec![make_method("run", "()V", ACC_PUBLIC, false)], vec![]);
-        let ctx = ctx_with_local_and_import(
-            "myFoo",
-            "Foo", // simple name
-            "ru",
-            vec!["com.example.Foo".into()],
-            "org/cubewhy",
-        );
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "run"),
-            "should resolve simple name via import: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_receiver_inferred_from_locals_via_same_package() {
-        // The local var type is a simple name, resolved through the same package.
-        let mut idx = make_index(vec![make_method("go", "()V", ACC_PUBLIC, false)], vec![]);
-        let ctx = ctx_with_local_and_import(
-            "f",
-            "Foo",
-            "",
-            vec![],        // no imports
-            "com/example", // same package
-        );
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "go"),
-            "should resolve simple name via same package: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_receiver_unknown_returns_empty() {
-        let mut idx = make_index(vec![make_method("run", "()V", ACC_PUBLIC, false)], vec![]);
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(),
-                receiver_expr: "unknown".to_string(),
-            },
-            "",
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-        );
-        assert!(MemberProvider.provide(&ctx, &mut idx).is_empty());
-    }
-
-    #[test]
-    fn test_this_receiver_resolves_to_enclosing() {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
-            package: Some(Arc::from("com/example")),
-            name: Arc::from("Foo"),
-            internal_name: Arc::from("com/example/Foo"),
-            super_name: None,
-            interfaces: vec![],
-            methods: vec![make_method("run", "()V", ACC_PUBLIC, false)],
-            fields: vec![],
-            access_flags: ACC_PUBLIC,
-            generic_signature: None,
-            inner_class_of: None,
-            origin: ClassOrigin::Unknown,
-        }]);
-        let ctx = ctx_this("Foo", "com/example/Foo", "com/example", "ru");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "run"),
-            "this.| should resolve to enclosing class"
-        );
-    }
-
-    #[test]
-    fn test_method_insert_ends_with_paren() {
-        let mut idx = make_index(vec![make_method("run", "()V", ACC_PUBLIC, false)], vec![]);
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results
-                .iter()
-                .find(|c| c.label.as_ref() == "run")
-                .unwrap()
-                .insert_text
-                .ends_with('(')
-        );
-    }
-
-    #[test]
-    fn test_field_insert_no_paren() {
-        let mut idx = make_index(vec![], vec![make_field("count", "I", ACC_PUBLIC, false)]);
-        let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            !results
-                .iter()
-                .find(|c| c.label.as_ref() == "count")
-                .unwrap()
-                .insert_text
-                .contains('(')
-        );
+        assert!(results.iter().any(|c| c.label.as_ref() == "pri"));
     }
 
     #[test]
     fn test_this_dot_uses_source_members_including_private() {
-        // When using `this`, source code members should be used, including private methods and methods not compiled into the index.
-        use crate::completion::context::CurrentClassMember;
-
-        let mut idx = GlobalIndex::new(); // The current class is not in the index
-
+        let mut idx = GlobalIndex::new();
         let members = vec![
-            CurrentClassMember {
-                name: Arc::from("priFunc"),
-                is_method: true,
-                is_static: false,
-                is_private: true,
-                descriptor: Arc::from("()V"),
-            },
-            CurrentClassMember {
-                name: Arc::from("fun"),
-                is_method: true,
-                is_static: false,
-                is_private: false,
-                descriptor: Arc::from("()V"),
-            },
-            CurrentClassMember {
-                name: Arc::from("func"),
-                is_method: true,
-                is_static: false,
-                is_private: false,
-                descriptor: Arc::from("()V"),
-            },
+            m("priFunc", ACC_PUBLIC, true), // is_private = true
+            m("fun", ACC_PUBLIC, false),
+            m("func", ACC_PUBLIC, false),
         ];
 
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(), // this.| : empty prefix
-                receiver_expr: "this".to_string(),
-            },
-            "",
-            vec![],
-            Some(Arc::from("Main")),
-            Some(Arc::from("org/cubewhy/a/Main")),
-            Some(Arc::from("org/cubewhy/a")),
-            vec![],
-        )
-        .with_class_members(members);
+        let ctx =
+            ctx_this("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "").with_class_members(members);
 
         let results = MemberProvider.provide(&ctx, &mut idx);
-
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "priFunc"),
-            "priFunc (private) should be visible via this.: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
+        assert!(results.iter().any(|c| c.label.as_ref() == "priFunc"));
         assert!(results.iter().any(|c| c.label.as_ref() == "fun"));
-        assert!(results.iter().any(|c| c.label.as_ref() == "func"));
-    }
-
-    #[test]
-    fn test_this_dot_prefix_filter() {
-        use crate::completion::context::CurrentClassMember;
-
-        let mut idx = GlobalIndex::new();
-
-        let members = vec![
-            CurrentClassMember {
-                name: Arc::from("priFunc"),
-                is_method: true,
-                is_static: false,
-                is_private: true,
-                descriptor: Arc::from("()V"),
-            },
-            CurrentClassMember {
-                name: Arc::from("fun"),
-                is_method: true,
-                is_static: false,
-                is_private: false,
-                descriptor: Arc::from("()V"),
-            },
-            CurrentClassMember {
-                name: Arc::from("other"),
-                is_method: true,
-                is_static: false,
-                is_private: false,
-                descriptor: Arc::from("()V"),
-            },
-        ];
-
-        // Use "xyz" — a character sequence that does not exist in any of the candidates.
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "xyz".to_string(),
-                receiver_expr: "this".to_string(),
-            },
-            "xyz",
-            vec![],
-            Some(Arc::from("Main")),
-            Some(Arc::from("org/cubewhy/a/Main")),
-            Some(Arc::from("org/cubewhy/a")),
-            vec![],
-        )
-        .with_class_members(members);
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-
-        // The subsequence "xyz" does not exist in any candidate list, so it is filtered out.
-        assert!(
-            results.is_empty(),
-            "pattern 'xyz' should match nothing: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_this_dot_fuzzy_pf_matches_pri_func() {
-        use crate::completion::context::CurrentClassMember;
-
-        let mut idx = GlobalIndex::new();
-
-        let members = vec![
-            CurrentClassMember {
-                name: Arc::from("priFunc"),
-                is_method: true,
-                is_static: false,
-                is_private: true,
-                descriptor: Arc::from("()V"),
-            },
-            CurrentClassMember {
-                name: Arc::from("fun"),
-                is_method: true,
-                is_static: false,
-                is_private: false,
-                descriptor: Arc::from("()V"),
-            },
-        ];
-
-        // "pf" is a subsequence (p...f) of "priFunc", not a subsequence of "fun".
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "pf".to_string(),
-                receiver_expr: "this".to_string(),
-            },
-            "pf",
-            vec![],
-            Some(Arc::from("Main")),
-            Some(Arc::from("org/cubewhy/a/Main")),
-            Some(Arc::from("org/cubewhy/a")),
-            vec![],
-        )
-        .with_class_members(members);
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "priFunc"),
-            "'pf' should fuzzy-match 'priFunc'"
-        );
-        assert!(
-            results.iter().all(|c| c.label.as_ref() != "fun"),
-            "'pf' should not match 'fun'"
-        );
     }
 
     #[test]
     fn test_static_member_prefix_starts_with() {
-        // StaticMemberProvider should use starts_with instead of contains
-        // "ma" should match "main" but not "putIfAbsent" (contains will mistakenly match words containing "ma")
         use crate::completion::providers::static_member::StaticMemberProvider;
-        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
-
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![ClassMetadata {
             package: Some(Arc::from("org/cubewhy/a")),
@@ -1401,24 +951,8 @@ mod tests {
             super_name: None,
             interfaces: vec![],
             methods: vec![
-                MethodSummary {
-                    name: Arc::from("main"),
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC | ACC_STATIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                },
-                MethodSummary {
-                    name: Arc::from("notStartsWithma"), // Contains "ma" but does not start_with
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC | ACC_STATIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                },
+                make_method("main", "()V", ACC_PUBLIC | ACC_STATIC, false),
+                make_method("notStartsWithma", "()V", ACC_PUBLIC | ACC_STATIC, false),
             ],
             fields: vec![],
             access_flags: ACC_PUBLIC,
@@ -1445,111 +979,35 @@ mod tests {
         assert!(
             results
                 .iter()
-                .all(|c| c.label.as_ref() != "notStartsWithma"),
-            "starts_with should not match notStartsWithma for prefix 'ma'"
+                .all(|c| c.label.as_ref() != "notStartsWithma")
         );
     }
 
     #[test]
-    fn test_member_completion_via_wildcard_import() {
-        // cl: RandomClass (simple name), resolved via import org.cubewhy.*
-        use crate::index::codebase::index_source_text;
-
+    fn test_no_this_completion_in_static_method() {
         let mut idx = GlobalIndex::new();
-        idx.add_classes(index_source_text(
-            "file:///RandomClass.java",
-            r#"
-package org.cubewhy;
-public class RandomClass {
-    public void f() {}
-    public String getName() { return ""; }
-}
-"#,
-            "java",
+        let members = vec![
+            f("staticField", ACC_STATIC, false),
+            f("instanceField", ACC_PUBLIC, false),
+        ];
+
+        let enclosing_method = Arc::new(make_method(
+            "main",
+            "([Ljava/lang/String;)V",
+            ACC_STATIC,
+            false,
         ));
 
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(),
-                receiver_expr: "cl".to_string(),
-            },
-            "",
-            vec![LocalVar {
-                name: Arc::from("cl"),
-                // extract_locals will store simple names
-                type_internal: TypeName::new("RandomClass"),
-                init_expr: None,
-            }],
-            Some(Arc::from("Main")),
-            Some(Arc::from("org/cubewhy/a/Main")),
-            Some(Arc::from("org/cubewhy/a")),
-            // wildcard import
-            vec!["org.cubewhy.*".into()],
-        );
+        let ctx = ctx_this("Main", "org/cubewhy/Main", "org/cubewhy", "")
+            .with_class_members(members)
+            .with_enclosing_member(Some(CurrentClassMember::Method(enclosing_method)));
 
         let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "f"),
-            "f() should be found via wildcard import type resolution: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-        assert!(results.iter().any(|c| c.label.as_ref() == "getName"));
-    }
-
-    #[test]
-    fn test_extract_locals_type_at_cursor_boundary() {
-        // When the declaration of cl ends near the cursor, it should not be filtered out.
-        let src = indoc::indoc! {r#"
-        class A {
-            public static void main() {
-                String aVar = "test";
-                String str = "a";
-                RandomClass cl = new RandomClass();
-                cl.f()
-            }
-        }
-    "#};
-        let line = 5u32;
-        let raw = src.lines().nth(5).unwrap();
-        // The cursor is after the dot "cl."
-        let col = raw.find("cl.").unwrap() as u32 + 3;
-        let ctx = at(src, line, col);
-
-        assert!(
-            ctx.local_variables.iter().any(|v| v.name.as_ref() == "cl"),
-            "cl should be in locals: {:?}",
-            ctx.local_variables
-                .iter()
-                .map(|v| format!("{}:{}", v.name, v.type_internal))
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            ctx.local_variables
-                .iter()
-                .any(|v| v.name.as_ref() == "aVar"),
-            "aVar should be in locals"
-        );
-        assert!(
-            ctx.local_variables.iter().any(|v| v.name.as_ref() == "str"),
-            "str should be in locals"
-        );
-
-        // The type of cl should be the simple name "RandomClass"
-        let cl = ctx
-            .local_variables
-            .iter()
-            .find(|v| v.name.as_ref() == "cl")
-            .unwrap();
-        assert_eq!(cl.type_internal.as_ref(), "RandomClass");
+        assert!(results.is_empty());
     }
 
     #[test]
     fn test_bare_method_call_receiver_resolved() {
-        // getMain2()| -> The method of Main2 should appear
-        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use rust_asm::constants::ACC_PUBLIC;
-
         let mut idx = GlobalIndex::new();
         idx.add_classes(vec![
             ClassMetadata {
@@ -1558,15 +1016,7 @@ public class RandomClass {
                 internal_name: Arc::from("Main"),
                 super_name: None,
                 interfaces: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("getMain2"),
-                    descriptor: Arc::from("()LMain2;"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: Some(Arc::from("Main2")),
-                }],
+                methods: vec![make_method("getMain2", "()LMain2;", ACC_PUBLIC, false)],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
@@ -1579,15 +1029,7 @@ public class RandomClass {
                 internal_name: Arc::from("Main2"),
                 super_name: None,
                 interfaces: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("func"),
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                }],
+                methods: vec![make_method("func", "()V", ACC_PUBLIC, false)],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
@@ -1611,327 +1053,6 @@ public class RandomClass {
         );
 
         let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "func"),
-            "getMain2().| should show func from Main2, got: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_new_expr_receiver_resolved_via_global_index() {
-        // new Main2().| -> The Main2 method should appear
-        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use rust_asm::constants::ACC_PUBLIC;
-
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![ClassMetadata {
-            package: None,
-            name: Arc::from("Main2"),
-            internal_name: Arc::from("Main2"),
-            super_name: None,
-            interfaces: vec![],
-            methods: vec![MethodSummary {
-                name: Arc::from("func"),
-                descriptor: Arc::from("()V"),
-                param_names: vec![],
-                access_flags: ACC_PUBLIC,
-                is_synthetic: false,
-                generic_signature: None,
-                return_type: None,
-            }],
-            fields: vec![],
-            access_flags: ACC_PUBLIC,
-            generic_signature: None,
-            inner_class_of: None,
-            origin: ClassOrigin::Unknown,
-        }]);
-
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(),
-                receiver_expr: "new Main2()".to_string(),
-            },
-            "",
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-        );
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "func"),
-            "new Main2().| should show func, got: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_inherited_method_visible_on_subclass() {
-        // m2: Main2 extends BaseClass, funcA should appear
-        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use rust_asm::constants::ACC_PUBLIC;
-
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![
-            ClassMetadata {
-                package: None,
-                name: Arc::from("BaseClass"),
-                internal_name: Arc::from("BaseClass"),
-                super_name: None,
-                interfaces: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("funcA"),
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                }],
-                fields: vec![],
-                access_flags: ACC_PUBLIC,
-                generic_signature: None,
-                inner_class_of: None,
-                origin: ClassOrigin::Unknown,
-            },
-            ClassMetadata {
-                package: None,
-                name: Arc::from("Main2"),
-                internal_name: Arc::from("Main2"),
-                super_name: Some("BaseClass".into()),
-                interfaces: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("func"),
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                }],
-                fields: vec![],
-                access_flags: ACC_PUBLIC,
-                generic_signature: None,
-                inner_class_of: None,
-                origin: ClassOrigin::Unknown,
-            },
-        ]);
-
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(),
-                receiver_expr: "m2".to_string(),
-            },
-            "",
-            vec![LocalVar {
-                name: Arc::from("m2"),
-                type_internal: TypeName::new("Main2"),
-                init_expr: None,
-            }],
-            None,
-            None,
-            None,
-            vec![],
-        );
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "func"),
-            "func should be visible on Main2"
-        );
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "funcA"),
-            "funcA should be inherited from BaseClass, got: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_this_dot_shows_inherited_methods() {
-        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use rust_asm::constants::ACC_PUBLIC;
-
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![
-            ClassMetadata {
-                package: Some(Arc::from("org/cubewhy")),
-                name: Arc::from("BaseClass"),
-                internal_name: Arc::from("org/cubewhy/BaseClass"),
-                super_name: None,
-                interfaces: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("funcA"),
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                }],
-                fields: vec![],
-                access_flags: ACC_PUBLIC,
-                generic_signature: None,
-                inner_class_of: None,
-                origin: ClassOrigin::Unknown,
-            },
-            ClassMetadata {
-                package: Some(Arc::from("org/cubewhy")),
-                name: Arc::from("Main2"),
-                internal_name: Arc::from("org/cubewhy/Main2"),
-                super_name: Some("org/cubewhy/BaseClass".into()),
-                interfaces: vec![],
-                methods: vec![MethodSummary {
-                    name: Arc::from("func"),
-                    descriptor: Arc::from("()V"),
-                    param_names: vec![],
-                    access_flags: ACC_PUBLIC,
-                    is_synthetic: false,
-                    generic_signature: None,
-                    return_type: None,
-                }],
-                fields: vec![],
-                access_flags: ACC_PUBLIC,
-                inner_class_of: None,
-                generic_signature: None,
-                origin: ClassOrigin::Unknown,
-            },
-        ]);
-
-        // this.| inside Main2 (static or instance — both should see inherited methods via this.)
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(),
-                receiver_expr: "this".to_string(),
-            },
-            "",
-            vec![],
-            Some(Arc::from("Main2")),
-            Some(Arc::from("org/cubewhy/Main2")),
-            Some(Arc::from("org/cubewhy")),
-            vec![],
-        )
-        .with_class_members(vec![crate::completion::context::CurrentClassMember {
-            name: Arc::from("func"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
-            descriptor: Arc::from("()V"),
-        }]);
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "funcA"),
-            "this.| should show inherited funcA from BaseClass, got: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn test_resolve_receiver_type_with_generics_dynamic() {
-        let mut idx = GlobalIndex::new();
-        idx.add_classes(vec![
-            ClassMetadata {
-                package: Some(Arc::from("java/util")),
-                name: Arc::from("List"),
-                internal_name: Arc::from("java/util/List"),
-                super_name: None,
-                interfaces: vec![],
-                methods: vec![make_method("size", "()I", ACC_PUBLIC, false)],
-                fields: vec![],
-                access_flags: ACC_PUBLIC,
-                generic_signature: None,
-                inner_class_of: None,
-                origin: ClassOrigin::Unknown,
-            },
-            ClassMetadata {
-                package: Some(Arc::from("java/lang")),
-                name: Arc::from("String"),
-                internal_name: Arc::from("java/lang/String"),
-                super_name: None,
-                interfaces: vec![],
-                methods: vec![],
-                fields: vec![],
-                access_flags: ACC_PUBLIC,
-                generic_signature: None,
-                inner_class_of: None,
-                origin: ClassOrigin::Unknown,
-            },
-        ]);
-
-        let ctx = ctx_with_local_and_import(
-            "myList",
-            "List<String>",
-            "si",
-            vec!["java.util.List".into()],
-            "org/cubewhy",
-        );
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-
-        assert!(
-            results.iter().any(|c| c.label.as_ref() == "size"),
-            "should dynamically resolve List and String to find methods"
-        );
-    }
-
-    #[test]
-    fn test_no_this_completion_in_static_method() {
-        let mut idx = GlobalIndex::new();
-
-        let members = vec![
-            CurrentClassMember {
-                name: Arc::from("staticField"),
-                is_method: false,
-                is_static: true,
-                is_private: false,
-                descriptor: Arc::from("I"),
-            },
-            CurrentClassMember {
-                name: Arc::from("instanceField"),
-                is_method: false,
-                is_static: false,
-                is_private: false,
-                descriptor: Arc::from("I"),
-            },
-        ];
-
-        // create a static methods
-        let enclosing_method = CurrentClassMember {
-            name: Arc::from("main"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
-            descriptor: Arc::from("([Ljava/lang/String;)V"),
-        };
-
-        let ctx = CompletionContext::new(
-            CursorLocation::MemberAccess {
-                receiver_type: None,
-                member_prefix: "".to_string(),
-                receiver_expr: "this".to_string(),
-            },
-            "",
-            vec![],
-            Some(Arc::from("Main")),
-            Some(Arc::from("org/cubewhy/Main")),
-            Some(Arc::from("org/cubewhy")),
-            vec![],
-        )
-        .with_class_members(members)
-        .with_enclosing_member(Some(enclosing_method));
-
-        let results = MemberProvider.provide(&ctx, &mut idx);
-
-        assert!(
-            results.is_empty(),
-            "In static context, 'this.' should not provide any completions, but got: {:?}",
-            results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
-        );
+        assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 }

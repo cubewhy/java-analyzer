@@ -176,42 +176,42 @@ impl StaticMemberProvider {
         // Only static members for Cls.xxx access
         let scored = fuzzy::fuzzy_filter_sort(
             member_prefix,
-            ctx.current_class_members.values().filter(|m| m.is_static),
-            |m| m.name.as_ref(),
+            ctx.current_class_members.values().filter(|m| m.is_static()),
+            |m| m.name(),
         );
 
         scored
             .into_iter()
             .map(|(m, score)| {
-                let kind = if m.is_method {
+                let kind = if m.is_method() {
                     CandidateKind::StaticMethod {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     }
                 } else {
                     CandidateKind::StaticField {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     }
                 };
 
-                let insert_text = if m.is_method {
+                let insert_text = if m.is_method() {
                     if ctx.has_paren_after_cursor() {
-                        m.name.to_string()
+                        m.name().to_string()
                     } else {
-                        format!("{}(", m.name)
+                        format!("{}(", m.name())
                     }
                 } else {
-                    m.name.to_string()
+                    m.name().to_string()
                 };
 
                 let detail = format!(
                     "{} static {}",
-                    if m.is_private { "private" } else { "public" },
-                    m.name
+                    if m.is_private() { "private" } else { "public" },
+                    m.name()
                 );
 
-                CompletionCandidate::new(Arc::clone(&m.name), insert_text, kind, self.name())
+                CompletionCandidate::new(m.name(), insert_text, kind, self.name())
                     .with_detail(detail)
                     .with_score(70.0 + score as f32 * 0.1)
             })
@@ -252,6 +252,7 @@ mod tests {
     use super::*;
     use crate::completion::context::{CompletionContext, CurrentClassMember, CursorLocation};
     use crate::completion::providers::CompletionProvider;
+    use crate::completion::type_resolver::parse_return_type_from_descriptor;
     use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, GlobalIndex, MethodSummary};
     use crate::language::{JavaLanguage, Language};
     use std::sync::Arc;
@@ -260,6 +261,28 @@ mod tests {
         JavaLanguage
             .parse_completion_context(src, line, col, None)
             .unwrap()
+    }
+
+    fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
+        MethodSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            param_names: vec![],
+            access_flags: flags,
+            is_synthetic,
+            generic_signature: None,
+            return_type: parse_return_type_from_descriptor(descriptor),
+        }
+    }
+
+    fn make_field(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> FieldSummary {
+        FieldSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags: flags,
+            is_synthetic,
+            generic_signature: None,
+        }
     }
 
     fn make_index_with_main() -> GlobalIndex {
@@ -484,27 +507,27 @@ mod tests {
         let mut idx = GlobalIndex::new(); // empty — class not indexed
 
         let members = vec![
-            CurrentClassMember {
-                name: Arc::from("randomField"),
-                is_method: false,
-                is_static: true,
-                is_private: true,
-                descriptor: Arc::from("Lorg/cubewhy/Inst;"),
-            },
-            CurrentClassMember {
-                name: Arc::from("instanceField"),
-                is_method: false,
-                is_static: false, // instance — must NOT appear
-                is_private: false,
-                descriptor: Arc::from("I"),
-            },
-            CurrentClassMember {
-                name: Arc::from("staticHelper"),
-                is_method: true,
-                is_static: true,
-                is_private: false,
-                descriptor: Arc::from("()V"),
-            },
+            // randomField: static + private
+            CurrentClassMember::Field(Arc::new(make_field(
+                "randomField",
+                "Lorg/cubewhy/Inst;",
+                ACC_STATIC | ACC_PRIVATE,
+                false,
+            ))),
+            // instanceField: instance + public
+            CurrentClassMember::Field(Arc::new(make_field(
+                "instanceField",
+                "I",
+                ACC_PUBLIC,
+                false,
+            ))),
+            // staticHelper: static + public
+            CurrentClassMember::Method(Arc::new(make_method(
+                "staticHelper",
+                "()V",
+                ACC_STATIC | ACC_PUBLIC,
+                false,
+            ))),
         ];
 
         let ctx = CompletionContext::new(

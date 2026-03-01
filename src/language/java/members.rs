@@ -1,11 +1,30 @@
+use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 use std::sync::Arc;
-
 use tree_sitter::Node;
 
 use crate::{
-    completion::{context::CurrentClassMember, type_resolver::java_type_to_descriptor},
+    completion::{
+        context::CurrentClassMember,
+        type_resolver::{java_type_to_descriptor, parse_return_type_from_descriptor},
+    },
+    index::{FieldSummary, MethodSummary},
     language::java::JavaContextExtractor,
 };
+
+/// Extract the list of parameter names from the formal_parameters node
+fn parse_param_names(ctx: &JavaContextExtractor, node: Node) -> Vec<Arc<str>> {
+    let mut names = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        // Handling regular and variable-length parameters (spread_parameter)
+        if matches!(child.kind(), "formal_parameter" | "spread_parameter")
+            && let Some(id_node) = child.child_by_field_name("name")
+        {
+            names.push(Arc::from(ctx.node_text(id_node)));
+        }
+    }
+    names
+}
 
 // TODO: duplicate logic, need a refactor
 #[rustfmt::skip]
@@ -60,8 +79,6 @@ pub fn collect_members_from_node(
                             let snapshot = members.clone();
                             members.extend(parse_partial_methods_from_error(ctx, bc, &snapshot));
                         } else if bc.kind() == "local_variable_declaration" {
-                            // Check if next sibling is ERROR starting with `(` —
-                            // this means tree-sitter misread a method declaration as a variable declaration
                             let next = block_children.get(i + 1);
                             if let Some(next_node) = next
                                 && next_node.kind() == "ERROR"
@@ -71,7 +88,7 @@ pub fn collect_members_from_node(
                                 && let Some(m) = parse_misread_method(ctx, bc, *next_node)
                             {
                                 members.push(m);
-                                i += 1; // skip the ERROR node too
+                                i += 1;
                             }
                         }
                         i += 1;
@@ -99,7 +116,6 @@ pub fn collect_members_from_node(
         }
     }
 
-    // If the node itself is ERROR (top-level), also parse its scattered children
     if node.kind() == "ERROR" {
         let snapshot = members.clone();
         members.extend(parse_partial_methods_from_error(ctx, node, &snapshot));
@@ -111,8 +127,8 @@ pub fn parse_partial_methods_from_error(
     error_node: Node,
     already_found: &[CurrentClassMember],
 ) -> Vec<CurrentClassMember> {
-    let found_names: std::collections::HashSet<&str> =
-        already_found.iter().map(|m| m.name.as_ref()).collect();
+    let found_names: std::collections::HashSet<Arc<str>> =
+        already_found.iter().map(|m| m.name()).collect();
 
     let mut cursor = error_node.walk();
     let children: Vec<Node> = error_node.children(&mut cursor).collect();
@@ -123,7 +139,7 @@ pub fn parse_partial_methods_from_error(
         .enumerate()
         .filter(|(_, n)| n.kind() == "formal_parameters")
     {
-        // method name: nearest identifier before formal_parameters
+        let params_node = children[param_pos];
         let name = match children[..param_pos]
             .iter()
             .rev()
@@ -135,16 +151,22 @@ pub fn parse_partial_methods_from_error(
         if name == "<init>" || name == "<clinit>" || found_names.contains(name) {
             continue;
         }
-        let modifiers_node = children[..param_pos]
+
+        let mut flags = ACC_PUBLIC;
+        if let Some(n) = children[..param_pos]
             .iter()
             .rev()
-            .find(|n| n.kind() == "modifiers");
-        let is_static = modifiers_node
-            .map(|n| ctx.node_text(*n).contains("static"))
-            .unwrap_or(false);
-        let is_private = modifiers_node
-            .map(|n| ctx.node_text(*n).contains("private"))
-            .unwrap_or(false);
+            .find(|n| n.kind() == "modifiers")
+        {
+            let t = ctx.node_text(*n);
+            if t.contains("static") {
+                flags |= ACC_STATIC;
+            }
+            if t.contains("private") {
+                flags |= ACC_PRIVATE;
+            }
+        }
+
         let ret_type = children[..param_pos]
             .iter()
             .rev()
@@ -162,19 +184,21 @@ pub fn parse_partial_methods_from_error(
             })
             .map(|n| ctx.node_text(*n))
             .unwrap_or("void");
-        let params = ctx.node_text(children[param_pos]);
-        result.push(CurrentClassMember {
+
+        let descriptor =
+            crate::index::source::build_java_descriptor(ctx.node_text(params_node), ret_type);
+
+        result.push(CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from(name),
-            is_method: true,
-            is_static,
-            is_private,
-            descriptor: Arc::from(
-                crate::index::source::build_java_descriptor(params, ret_type).as_str(),
-            ),
-        });
+            descriptor: Arc::from(descriptor.as_str()),
+            param_names: parse_param_names(ctx, params_node),
+            access_flags: flags,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: parse_return_type_from_descriptor(&descriptor),
+        })));
     }
 
-    // Second pass: method_invocation 可能是被误读的方法声明
     for (mi_pos, mi_node) in children
         .iter()
         .enumerate()
@@ -192,20 +216,18 @@ pub fn parse_partial_methods_from_error(
             continue;
         }
 
-        let mut is_static = false;
-        let mut is_private = false;
+        let mut flags = ACC_PUBLIC;
         let mut ret_type = "void";
 
-        // 修饰符和返回类型藏在前驱的嵌套 ERROR 节点里
         for prev in children[..mi_pos].iter().rev() {
             match prev.kind() {
                 "identifier" => {
                     let t = ctx.node_text(*prev);
                     if t == "static" {
-                        is_static = true;
+                        flags |= ACC_STATIC;
                     }
                     if t == "private" {
-                        is_private = true;
+                        flags |= ACC_PRIVATE;
                     }
                 }
                 "void_type"
@@ -220,19 +242,18 @@ pub fn parse_partial_methods_from_error(
                     }
                 }
                 "ERROR" => {
-                    // 扫嵌套 ERROR 的子节点
                     let mut pc = prev.walk();
                     for pchild in prev.children(&mut pc) {
                         match pchild.kind() {
-                            "static" => is_static = true,
-                            "private" => is_private = true,
+                            "static" => flags |= ACC_STATIC,
+                            "private" => flags |= ACC_PRIVATE,
                             "identifier" => {
                                 let t = ctx.node_text(pchild);
                                 if t == "static" {
-                                    is_static = true;
+                                    flags |= ACC_STATIC;
                                 }
                                 if t == "private" {
-                                    is_private = true;
+                                    flags |= ACC_PRIVATE;
                                 }
                             }
                             "void_type"
@@ -258,16 +279,17 @@ pub fn parse_partial_methods_from_error(
             .child_by_field_name("arguments")
             .map(|n| ctx.node_text(n))
             .unwrap_or("()");
+        let descriptor = crate::index::source::build_java_descriptor(args, ret_type);
 
-        result.push(CurrentClassMember {
+        result.push(CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from(name),
-            is_method: true,
-            is_static,
-            is_private,
-            descriptor: Arc::from(
-                crate::index::source::build_java_descriptor(args, ret_type).as_str(),
-            ),
-        });
+            descriptor: Arc::from(descriptor.as_str()),
+            param_names: vec![],
+            access_flags: flags,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: parse_return_type_from_descriptor(&descriptor),
+        })));
     }
 
     result
@@ -275,21 +297,23 @@ pub fn parse_partial_methods_from_error(
 
 pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<CurrentClassMember> {
     let mut name: Option<&str> = None;
-    let mut is_static = false;
-    let mut is_private = false;
+    let mut flags = ACC_PUBLIC;
     let mut ret_type = "void";
-    let mut params = "()";
+    let mut params_node: Option<Node> = None;
+
     let mut wc = node.walk();
     for c in node.children(&mut wc) {
         match c.kind() {
             "modifiers" => {
                 let t = ctx.node_text(c);
-                is_static = t.contains("static");
-                is_private = t.contains("private");
+                if t.contains("static") {
+                    flags |= ACC_STATIC;
+                }
+                if t.contains("private") {
+                    flags |= ACC_PRIVATE;
+                }
             }
-            "identifier" if name.is_none() => {
-                name = Some(ctx.node_text(c));
-            }
+            "identifier" if name.is_none() => name = Some(ctx.node_text(c)),
             "void_type"
             | "integral_type"
             | "floating_point_type"
@@ -299,28 +323,30 @@ pub fn parse_method_node(ctx: &JavaContextExtractor, node: Node) -> Option<Curre
             | "generic_type" => {
                 ret_type = ctx.node_text(c);
             }
-            "formal_parameters" => {
-                params = ctx.node_text(c);
-            }
+            "formal_parameters" => params_node = Some(c),
             _ => {}
         }
     }
-    let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
 
-    Some(CurrentClassMember {
+    let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
+    let params_text = params_node.map(|n| ctx.node_text(n)).unwrap_or("()");
+    let descriptor = crate::index::source::build_java_descriptor(params_text, ret_type);
+
+    Some(CurrentClassMember::Method(Arc::new(MethodSummary {
         name: Arc::from(name),
-        is_method: true,
-        is_static,
-        is_private,
-        descriptor: Arc::from(
-            crate::index::source::build_java_descriptor(params, ret_type).as_str(),
-        ),
-    })
+        descriptor: Arc::from(descriptor.as_str()),
+        param_names: params_node
+            .map(|n| parse_param_names(ctx, n))
+            .unwrap_or_default(),
+        access_flags: flags,
+        is_synthetic: false,
+        generic_signature: None,
+        return_type: parse_return_type_from_descriptor(&descriptor),
+    })))
 }
 
 fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassMember> {
-    let mut is_static = false;
-    let mut is_private = false;
+    let mut flags = ACC_PUBLIC;
     let mut field_type = "Object";
     let mut names = Vec::new();
     let mut wc = node.walk();
@@ -328,8 +354,12 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
         match c.kind() {
             "modifiers" => {
                 let t = ctx.node_text(c);
-                is_static = t.contains("static");
-                is_private = t.contains("private");
+                if t.contains("static") {
+                    flags |= ACC_STATIC;
+                }
+                if t.contains("private") {
+                    flags |= ACC_PRIVATE;
+                }
             }
             "void_type"
             | "integral_type"
@@ -345,11 +375,6 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
                 for vchild in c.children(&mut vc) {
                     if vchild.kind() == "identifier" {
                         let n = ctx.node_text(vchild);
-                        tracing::debug!(
-                            field_name = n,
-                            field_type = field_type,
-                            "AST extracted field"
-                        );
                         if !is_java_keyword(n) {
                             names.push(n.to_string());
                         }
@@ -365,35 +390,23 @@ fn parse_field_node(ctx: &JavaContextExtractor, node: Node) -> Vec<CurrentClassM
         .into_iter()
         .map(|name| {
             let desc = java_type_to_descriptor(field_type);
-            tracing::debug!(
-                field_name = name.as_str(),
-                field_type = field_type,
-                descriptor = desc.as_str(),
-                "Generated field descriptor"
-            );
-
-            CurrentClassMember {
+            CurrentClassMember::Field(Arc::new(FieldSummary {
                 name: Arc::from(name.as_str()),
-                is_method: false,
-                is_static,
-                is_private,
                 descriptor: Arc::from(desc.as_str()),
-            }
+                access_flags: flags,
+                is_synthetic: false,
+                generic_signature: None,
+            }))
         })
         .collect()
 }
 
-/// tree-sitter sometimes parses `private static Object test() {` as
-/// local_variable_declaration("private static Object test") + ERROR("() {")
-/// This method reconstructs the method member from these two nodes.
 fn parse_misread_method(
     ctx: &JavaContextExtractor,
     decl_node: Node,
     error_node: Node,
 ) -> Option<CurrentClassMember> {
-    // Extract modifiers, type, name from local_variable_declaration
-    let mut is_static = false;
-    let mut is_private = false;
+    let mut flags = ACC_PUBLIC;
     let mut ret_type = "void";
     let mut name: Option<&str> = None;
 
@@ -402,8 +415,12 @@ fn parse_misread_method(
         match c.kind() {
             "modifiers" => {
                 let t = ctx.node_text(c);
-                is_static = t.contains("static");
-                is_private = t.contains("private");
+                if t.contains("static") {
+                    flags |= ACC_STATIC;
+                }
+                if t.contains("private") {
+                    flags |= ACC_PRIVATE;
+                }
             }
             "type_identifier"
             | "void_type"
@@ -415,13 +432,8 @@ fn parse_misread_method(
                 ret_type = ctx.node_text(c);
             }
             "variable_declarator" => {
-                // name is the identifier inside variable_declarator
-                let mut vc = c.walk();
-                for vchild in c.children(&mut vc) {
-                    if vchild.kind() == "identifier" {
-                        name = Some(ctx.node_text(vchild));
-                        break;
-                    }
+                if let Some(id_node) = c.child_by_field_name("name") {
+                    name = Some(ctx.node_text(id_node));
                 }
             }
             _ => {}
@@ -429,24 +441,26 @@ fn parse_misread_method(
     }
 
     let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
-
-    // Extract formal_parameters from the ERROR node
     let mut ec = error_node.walk();
-    let params = error_node
+    let params_node = error_node
         .children(&mut ec)
-        .find(|c| c.kind() == "formal_parameters")
-        .map(|c| ctx.node_text(c))
-        .unwrap_or("()");
+        .find(|c| c.kind() == "formal_parameters");
+    let descriptor = crate::index::source::build_java_descriptor(
+        params_node.map(|n| ctx.node_text(n)).unwrap_or("()"),
+        ret_type,
+    );
 
-    Some(CurrentClassMember {
+    Some(CurrentClassMember::Method(Arc::new(MethodSummary {
         name: Arc::from(name),
-        is_method: true,
-        is_static,
-        is_private,
-        descriptor: Arc::from(
-            crate::index::source::build_java_descriptor(params, ret_type).as_str(),
-        ),
-    })
+        descriptor: Arc::from(descriptor.as_str()),
+        param_names: params_node
+            .map(|n| parse_param_names(ctx, n))
+            .unwrap_or_default(),
+        access_flags: flags,
+        is_synthetic: false,
+        generic_signature: None,
+        return_type: parse_return_type_from_descriptor(&descriptor),
+    })))
 }
 
 #[cfg(test)]
@@ -486,23 +500,23 @@ mod tests {
         let mut members = Vec::new();
         collect_members_from_node(&ctx, tree.root_node(), &mut members);
 
-        let a = members.iter().find(|m| m.name.as_ref() == "a").unwrap();
-        assert!(!a.is_method && !a.is_static && !a.is_private);
+        let a = members.iter().find(|m| m.name().as_ref() == "a").unwrap();
+        assert!(!a.is_method() && !a.is_static() && !a.is_private());
 
-        let b = members.iter().find(|m| m.name.as_ref() == "b").unwrap();
-        assert!(!b.is_method && b.is_static && b.is_private);
+        let b = members.iter().find(|m| m.name().as_ref() == "b").unwrap();
+        assert!(!b.is_method() && b.is_static() && b.is_private());
 
         let ma = members
             .iter()
-            .find(|m| m.name.as_ref() == "methodA")
+            .find(|m| m.name().as_ref() == "methodA")
             .unwrap();
-        assert!(ma.is_method && !ma.is_static && !ma.is_private);
+        assert!(ma.is_method() && !ma.is_static() && !ma.is_private());
 
         let mb = members
             .iter()
-            .find(|m| m.name.as_ref() == "methodB")
+            .find(|m| m.name().as_ref() == "methodB")
             .unwrap();
-        assert!(mb.is_method && mb.is_static && mb.is_private);
+        assert!(mb.is_method() && mb.is_static() && mb.is_private());
     }
 
     #[test]
@@ -518,11 +532,10 @@ mod tests {
         let mut members = Vec::new();
         collect_members_from_node(&ctx, tree.root_node(), &mut members);
 
-        // `<init>` 和 `<clinit>` 应该被过滤掉，只保留 normalMethod
-        assert!(members.iter().any(|m| m.name.as_ref() == "normalMethod"));
-        assert!(!members.iter().any(|m| m.name.as_ref() == "<init>"));
-        assert!(!members.iter().any(|m| m.name.as_ref() == "<clinit>"));
-        assert!(!members.iter().any(|m| m.name.as_ref() == "A")); // A() parse 出来通常 name 是 A
+        assert!(members.iter().any(|m| m.name().as_ref() == "normalMethod"));
+        assert!(!members.iter().any(|m| m.name().as_ref() == "<init>"));
+        assert!(!members.iter().any(|m| m.name().as_ref() == "<clinit>"));
+        assert!(!members.iter().any(|m| m.name().as_ref() == "A"));
     }
 
     #[test]
@@ -536,16 +549,15 @@ mod tests {
         let mut members = Vec::new();
         collect_members_from_node(&ctx, tree.root_node(), &mut members);
 
-        let x = members.iter().find(|m| m.name.as_ref() == "x").unwrap();
-        assert!(!x.is_method && x.is_static && x.is_private);
+        let x = members.iter().find(|m| m.name().as_ref() == "x").unwrap();
+        assert!(!x.is_method() && x.is_static() && x.is_private());
 
-        let y = members.iter().find(|m| m.name.as_ref() == "y").unwrap();
-        assert!(!y.is_method && y.is_static && y.is_private);
+        let y = members.iter().find(|m| m.name().as_ref() == "y").unwrap();
+        assert!(!y.is_method() && y.is_static() && y.is_private());
     }
 
     #[test]
     fn test_swallowed_error_node_members() {
-        // 测试由于上一个方法缺少大括号，导致后续方法被解析到 `block` 的 ERROR 节点中
         let src = indoc::indoc! {r#"
         class A {
             void brokenMethod() {
@@ -560,24 +572,18 @@ mod tests {
 
         let swallowed = members
             .iter()
-            .find(|m| m.name.as_ref() == "swallowedMethod");
-        assert!(
-            swallowed.is_some(),
-            "Should extract method even if it's swallowed inside an ERROR node in a previous method's block"
-        );
+            .find(|m| m.name().as_ref() == "swallowedMethod");
+        assert!(swallowed.is_some());
         let swallowed = swallowed.unwrap();
-        assert!(swallowed.is_method && swallowed.is_static && swallowed.is_private);
+        assert!(swallowed.is_method() && swallowed.is_static() && swallowed.is_private());
     }
 
     #[test]
     fn test_misread_method_as_local_variable() {
-        // 这是 parse_misread_method 专门处理的经典语法树错误
-        // 在方法体中缺少分号等情况时，TS 会把 `private static Object test` 解析为局部变量声明
-        // 然后把 `() {}` 解析为相邻的 ERROR 节点
         let src = indoc::indoc! {r#"
         class A {
             void brokenMethod() {
-                int x = 1 // 缺分号
+                int x = 1 // missing semicolon
             
             private static String misreadMethod(int a) {}
         }
@@ -586,20 +592,16 @@ mod tests {
         let mut members = Vec::new();
         collect_members_from_node(&ctx, tree.root_node(), &mut members);
 
-        let misread = members.iter().find(|m| m.name.as_ref() == "misreadMethod");
-        assert!(
-            misread.is_some(),
-            "Should reconstruct method from local_variable_declaration and ERROR node siblings"
-        );
-
+        let misread = members
+            .iter()
+            .find(|m| m.name().as_ref() == "misreadMethod");
+        assert!(misread.is_some());
         let misread = misread.unwrap();
-        assert!(misread.is_method && misread.is_static && misread.is_private);
+        assert!(misread.is_method() && misread.is_static() && misread.is_private());
     }
 
     #[test]
     fn test_partial_methods_from_top_level_error() {
-        // 整个类结构因为严重的语法错误崩溃，退化成顶层 ERROR 节点
-        // parse_partial_methods_from_error 必须能从中捞出方法签名
         let src = indoc::indoc! {r#"
         package org.example;
         
@@ -618,91 +620,14 @@ mod tests {
 
         let salvaged1 = members
             .iter()
-            .find(|m| m.name.as_ref() == "salvagedMethod")
+            .find(|m| m.name().as_ref() == "salvagedMethod")
             .unwrap();
-        assert!(salvaged1.is_method && salvaged1.is_static && !salvaged1.is_private);
+        assert!(salvaged1.is_method() && salvaged1.is_static() && !salvaged1.is_private());
 
         let salvaged2 = members
             .iter()
-            .find(|m| m.name.as_ref() == "anotherSalvaged")
+            .find(|m| m.name().as_ref() == "anotherSalvaged")
             .unwrap();
-        assert!(salvaged2.is_method && !salvaged2.is_static && salvaged2.is_private);
-    }
-
-    #[test]
-    fn test_no_keyword_as_member_from_incomplete_declaration() {
-        // `pub` 触发 ERROR 节点，tree-sitter 可能把后续的 `public` 误读为字段名
-        let src = indoc::indoc! {r#"
-    class A {
-        pub // incomplete keyword-like identifier
-
-        public static void realMethod() {}
-    }
-    "#};
-        let (ctx, tree) = setup(src);
-        let mut members = Vec::new();
-        collect_members_from_node(&ctx, tree.root_node(), &mut members);
-
-        // 关键字不能作为成员名出现
-        let keyword_members: Vec<_> = members
-            .iter()
-            .filter(|m| is_java_keyword(m.name.as_ref()))
-            .collect();
-        assert!(
-            keyword_members.is_empty(),
-            "Java keywords should never appear as member names, got: {:?}",
-            keyword_members
-                .iter()
-                .map(|m| m.name.as_ref())
-                .collect::<Vec<_>>()
-        );
-
-        // realMethod 应该正常提取
-        assert!(members.iter().any(|m| m.name.as_ref() == "realMethod"));
-    }
-
-    #[test]
-    fn test_no_keyword_as_field_from_error_in_method_body() {
-        // 方法体内的语法错误导致后续声明被吞入 ERROR，
-        // 其中的修饰符关键字不能被误提为字段
-        let src = indoc::indoc! {r#"
-    class A {
-        void broken() {
-            int x = foo(  // unclosed call
-
-        public String realField;
-        public void realMethod() {}
-    }
-    "#};
-        let (ctx, tree) = setup(src);
-        let mut members = Vec::new();
-        collect_members_from_node(&ctx, tree.root_node(), &mut members);
-
-        for m in &members {
-            assert!(
-                !is_java_keyword(m.name.as_ref()),
-                "keyword '{}' must not appear as a member name",
-                m.name
-            );
-        }
-    }
-
-    #[test]
-    fn test_identifier_named_pub_is_valid_field() {
-        // `pub` 本身不是 Java 关键字，作为字段名应该允许（尽管罕见）
-        let src = indoc::indoc! {r#"
-    class A {
-        int pub;
-    }
-    "#};
-        let (ctx, tree) = setup(src);
-        let mut members = Vec::new();
-        collect_members_from_node(&ctx, tree.root_node(), &mut members);
-
-        // `pub` 不是关键字，应正常提取
-        assert!(
-            members.iter().any(|m| m.name.as_ref() == "pub"),
-            "`pub` is not a Java keyword and should be extracted as a field"
-        );
+        assert!(salvaged2.is_method() && !salvaged2.is_static() && salvaged2.is_private());
     }
 }

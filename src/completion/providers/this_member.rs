@@ -50,8 +50,8 @@ impl CompletionProvider for ThisMemberProvider {
             prefix,
             ctx.current_class_members
                 .values()
-                .filter(|m| !in_static || m.is_static),
-            |m| m.name.as_ref(),
+                .filter(|m| !in_static || m.is_static()),
+            |m| m.name(),
         );
 
         let resolver = ContextualResolver::new(index, ctx);
@@ -59,36 +59,36 @@ impl CompletionProvider for ThisMemberProvider {
         let mut results: Vec<CompletionCandidate> = scored
             .into_iter()
             .map(|(m, score)| {
-                let kind = match (m.is_method, m.is_static) {
+                let kind = match (m.is_method(), m.is_static()) {
                     (true, true) => CandidateKind::StaticMethod {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                     (true, false) => CandidateKind::Method {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                     (false, true) => CandidateKind::StaticField {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                     (false, false) => CandidateKind::Field {
-                        descriptor: Arc::clone(&m.descriptor),
+                        descriptor: m.descriptor(),
                         defining_class: Arc::from(enclosing),
                     },
                 };
-                let insert_text = if m.is_method {
+                let insert_text = if m.is_method() {
                     if ctx.has_paren_after_cursor() {
-                        m.name.to_string()
+                        m.name().to_string()
                     } else {
-                        format!("{}(", m.name)
+                        format!("{}(", m.name())
                     }
                 } else {
-                    m.name.to_string()
+                    m.name().to_string()
                 };
                 let detail = scorer::source_member_detail(enclosing, m, &resolver);
 
-                CompletionCandidate::new(Arc::clone(&m.name), insert_text, kind, self.name())
+                CompletionCandidate::new(Arc::clone(&m.name()), insert_text, kind, self.name())
                     .with_detail(detail)
                     .with_score(60.0 + score as f32 * 0.1)
             })
@@ -230,9 +230,11 @@ impl CompletionProvider for ThisMemberProvider {
 
 #[cfg(test)]
 mod tests {
+    use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC};
+
     use super::*;
     use crate::completion::context::{CompletionContext, CurrentClassMember, CursorLocation};
-    use crate::index::GlobalIndex;
+    use crate::index::{FieldSummary, GlobalIndex, MethodSummary};
     use std::sync::Arc;
 
     fn make_member(
@@ -241,12 +243,29 @@ mod tests {
         is_static: bool,
         is_private: bool,
     ) -> CurrentClassMember {
-        CurrentClassMember {
-            name: Arc::from(name),
-            is_method,
-            is_static,
-            is_private,
-            descriptor: Arc::from(if is_method { "()V" } else { "I" }),
+        let mut flags = if is_private { ACC_PRIVATE } else { ACC_PUBLIC };
+        if is_static {
+            flags |= ACC_STATIC;
+        }
+
+        if is_method {
+            CurrentClassMember::Method(Arc::new(MethodSummary {
+                name: Arc::from(name),
+                descriptor: Arc::from("()V"),
+                param_names: vec![],
+                access_flags: flags,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: None,
+            }))
+        } else {
+            CurrentClassMember::Field(Arc::new(FieldSummary {
+                name: Arc::from(name),
+                descriptor: Arc::from("I"),
+                access_flags: flags,
+                is_synthetic: false,
+                generic_signature: None,
+            }))
         }
     }
 
@@ -404,13 +423,15 @@ mod tests {
             make_member("helper", true, false, false),
             make_member("CONST", false, true, false),
         ];
-        let enclosing = CurrentClassMember {
+        let enclosing = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("staticEntry"),
-            is_method: true,
-            is_static: true, // static method
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_STATIC | ACC_PUBLIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let mut idx = GlobalIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
         let results = ThisMemberProvider.provide(&ctx, &mut idx);
@@ -425,13 +446,15 @@ mod tests {
     fn test_instance_method_has_this() {
         // In the instance method, ThisMemberProvider should return normally.
         let members = vec![make_member("helper", true, false, false)];
-        let enclosing = CurrentClassMember {
+        let enclosing = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("instanceEntry"),
-            is_method: true,
-            is_static: false, // instance method
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let mut idx = GlobalIndex::new();
         let ctx = ctx_with_members_static("he", members, enclosing);
         let results = ThisMemberProvider.provide(&ctx, &mut idx);
@@ -445,13 +468,15 @@ mod tests {
     fn test_this_dot_in_static_method() {
         // Even if `this.xxx` is explicitly written, it should not be completed in the static method.
         let members = vec![make_member("field", false, false, false)];
-        let enclosing = CurrentClassMember {
+        let enclosing = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("staticFn"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_STATIC | ACC_PUBLIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let mut idx = GlobalIndex::new();
         let mut ctx = ctx_with_members_static("", members, enclosing);
         ctx.location = CursorLocation::MemberAccess {
@@ -478,13 +503,15 @@ mod tests {
         let mut idx = GlobalIndex::new();
 
         // Construct a static context
-        let enclosing_method = CurrentClassMember {
+        let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC | ACC_STATIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
                 prefix: "".to_string(),
@@ -528,13 +555,15 @@ mod tests {
         ];
         let mut idx = GlobalIndex::new();
 
-        let enclosing_method = CurrentClassMember {
+        let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC | ACC_STATIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
                 prefix: "pr".to_string(),
@@ -563,13 +592,15 @@ mod tests {
         let members = vec![make_member("pri", true, true, false)];
         let mut idx = GlobalIndex::new();
 
-        let enclosing_method = CurrentClassMember {
+        let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC | ACC_STATIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let ctx = CompletionContext::new(
             CursorLocation::MethodArgument {
                 prefix: "".to_string(),
@@ -598,15 +629,17 @@ mod tests {
             make_member("helper", true, false, false), // instance
             make_member("CONST", false, true, false),  // static
         ];
-        let enclosing = CurrentClassMember {
+        let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("staticEntry"),
-            is_method: true,
-            is_static: true,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC | ACC_STATIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let mut idx = GlobalIndex::new();
-        let ctx = ctx_with_members_static("he", members, enclosing);
+        let ctx = ctx_with_members_static("he", members, enclosing_method);
         let results = ThisMemberProvider.provide(&ctx, &mut idx);
         assert!(
             results.iter().all(|c| c.label.as_ref() != "helper"),
@@ -668,13 +701,15 @@ mod tests {
         ]);
 
         // 模拟在 Main2 的实例方法里补全
-        let enclosing_method = CurrentClassMember {
+        let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("func"),
-            is_method: true,
-            is_static: false, // 实例方法
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
                 prefix: "".to_string(),
@@ -740,13 +775,15 @@ mod tests {
             },
         ]);
 
-        let enclosing_method = CurrentClassMember {
+        let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("doWork"),
-            is_method: true,
-            is_static: false,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let ctx = CompletionContext::new(
             CursorLocation::Expression {
                 prefix: "".to_string(),

@@ -36,7 +36,7 @@ fn inside_class(ctx: &CompletionContext) -> bool {
 fn inside_method(ctx: &CompletionContext) -> bool {
     ctx.enclosing_class_member
         .as_ref()
-        .map(|it| it.is_method)
+        .map(|it| it.is_method())
         .unwrap_or(false)
 }
 
@@ -219,9 +219,12 @@ impl CompletionProvider for SnippetProvider {
 
 #[cfg(test)]
 mod tests {
+    use rust_asm::constants::ACC_PUBLIC;
+
     use super::*;
     use crate::completion::context::{CompletionContext, CurrentClassMember, CursorLocation};
-    use crate::index::GlobalIndex;
+    use crate::completion::type_resolver::parse_return_type_from_descriptor;
+    use crate::index::{GlobalIndex, MethodSummary};
     use std::sync::Arc;
 
     fn ctx_full(
@@ -258,6 +261,18 @@ mod tests {
         inferred_pkg: Option<&str>,
     ) -> CompletionContext {
         ctx_full(prefix, file_uri, ast_pkg, inferred_pkg, None)
+    }
+
+    fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
+        MethodSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            param_names: vec![],
+            access_flags: flags,
+            is_synthetic,
+            generic_signature: None,
+            return_type: parse_return_type_from_descriptor(descriptor),
+        }
     }
 
     #[test]
@@ -377,13 +392,14 @@ mod tests {
     #[test]
     fn test_sout_alias_println() {
         let mut idx = GlobalIndex::new();
-        let c = ctx("println", None, None, None).with_enclosing_member(Some(CurrentClassMember {
-            is_method: true,
-            name: Arc::from("randomMethod"),
-            descriptor: Arc::from("()V"),
-            is_static: false,
-            is_private: false,
-        }));
+        let c = ctx("println", None, None, None).with_enclosing_member(Some(
+            CurrentClassMember::Method(Arc::new(make_method(
+                "randomMethod",
+                "()V",
+                ACC_PUBLIC,
+                false,
+            ))),
+        ));
         let results = SnippetProvider.provide(&c, &mut idx);
         let m = results.iter().find(|r| r.label.as_ref() == "println");
         assert!(m.is_some(), "alias 'println' should match sout");

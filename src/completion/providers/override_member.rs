@@ -75,14 +75,14 @@ impl CompletionProvider for OverrideProvider {
                 let candidate_param_count =
                     crate::completion::type_resolver::count_params(&method.descriptor);
                 let blocked_by_source = ctx.current_class_members.values().any(|m| {
-                    if !m.is_method || m.name != method.name {
+                    if !m.is_method() || m.name() != method.name {
                         return false;
                     }
                     // bad descriptor ast
-                    if m.descriptor.is_empty() {
+                    if m.descriptor().is_empty() {
                         return true;
                     }
-                    crate::completion::type_resolver::count_params(&m.descriptor)
+                    crate::completion::type_resolver::count_params(&m.descriptor())
                         == candidate_param_count
                 });
 
@@ -468,13 +468,15 @@ mod tests {
         // Manually let the index know the superclass of Child (otherwise the MRO cannot find the Parent).
         idx.add_classes(vec![child_meta.clone()]);
 
-        let source_member = CurrentClassMember {
+        let source_member = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("doWork"),
-            is_method: true,
-            is_static: false,
-            is_private: false,
             descriptor: Arc::from("()V"),
-        };
+            param_names: vec![],
+            access_flags: ACC_PUBLIC,
+            is_synthetic: false,
+            generic_signature: None,
+            return_type: None,
+        }));
         let ctx = ctx_with_prefix("pub", "com/example/Child")
             .with_class_members(std::iter::once(source_member));
 
@@ -1016,13 +1018,7 @@ mod tests {
         cls.interfaces = vec![Arc::from("com/example/Runnable")];
         idx.add_classes(vec![cls]);
 
-        let source_member = CurrentClassMember {
-            name: Arc::from("run"),
-            is_method: true,
-            is_static: false,
-            is_private: false,
-            descriptor: Arc::from("()V"),
-        };
+        let source_member = CurrentClassMember::Method(Arc::new(method("run", "()V", ACC_PUBLIC)));
         let ctx = ctx_with_prefix("pub", "com/example/MyTask")
             .with_class_members(std::iter::once(source_member));
 
