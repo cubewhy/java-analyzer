@@ -61,6 +61,11 @@ impl<'idx> TypeResolver<'idx> {
             return Some(TypeName::new("java/lang/String"));
         }
 
+        // boolean
+        if expr == "true" || expr == "false" {
+            return Some(TypeName::new("boolean"));
+        }
+
         // Local variables take precedence over literals in the evaluation
         if let Some(lv) = locals.iter().find(|lv| lv.name.as_ref() == expr) {
             return Some(lv.type_internal.clone());
