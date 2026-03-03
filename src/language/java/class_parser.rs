@@ -1,4 +1,4 @@
-use rust_asm::constants::{ACC_ANNOTATION, ACC_ENUM, ACC_INTERFACE, ACC_PUBLIC};
+use rust_asm::constants::{ACC_ANNOTATION, ACC_ENUM, ACC_INTERFACE, ACC_PUBLIC, ACC_SUPER};
 use std::sync::Arc;
 use tree_sitter::{Node, Query};
 
@@ -238,14 +238,17 @@ fn extract_java_access_flags(ctx: &JavaContextExtractor, node: Node) -> u16 {
     }
 
     match node.kind() {
+        "class_declaration" | "record_declaration" => {
+            flags |= ACC_SUPER;
+        }
+        "enum_declaration" => {
+            flags |= ACC_ENUM | ACC_SUPER;
+        }
         "interface_declaration" => {
             flags |= ACC_INTERFACE;
         }
         "annotation_type_declaration" => {
             flags |= ACC_INTERFACE | ACC_ANNOTATION;
-        }
-        "enum_declaration" => {
-            flags |= ACC_ENUM;
         }
         _ => {}
     }
@@ -668,5 +671,32 @@ public class Foo {
         let a = classes.iter().find(|c| c.name.as_ref() == "Ann").unwrap();
         assert!(a.access_flags & rust_asm::constants::ACC_ANNOTATION != 0);
         assert!(a.access_flags & rust_asm::constants::ACC_INTERFACE != 0);
+    }
+
+    #[test]
+    fn test_access_flags_super_on_class_like_decls() {
+        let src = r#"
+public class C {}
+public enum E { A }
+public record R(int x) {}
+public interface I {}
+public @interface Ann {}
+"#;
+        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+
+        let c = classes.iter().find(|x| x.name.as_ref() == "C").unwrap();
+        assert!(c.access_flags & rust_asm::constants::ACC_SUPER != 0);
+
+        let e = classes.iter().find(|x| x.name.as_ref() == "E").unwrap();
+        assert!(e.access_flags & rust_asm::constants::ACC_SUPER != 0);
+
+        let r = classes.iter().find(|x| x.name.as_ref() == "R").unwrap();
+        assert!(r.access_flags & rust_asm::constants::ACC_SUPER != 0);
+
+        let i = classes.iter().find(|x| x.name.as_ref() == "I").unwrap();
+        assert!(i.access_flags & rust_asm::constants::ACC_SUPER == 0);
+
+        let ann = classes.iter().find(|x| x.name.as_ref() == "Ann").unwrap();
+        assert!(ann.access_flags & rust_asm::constants::ACC_SUPER == 0);
     }
 }
