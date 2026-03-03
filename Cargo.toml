@@ -13,7 +13,7 @@ smallvec = "2.0.0-alpha.12"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 rayon = "1.11.0"
-rust-asm = "0.1.4"
+rust-asm = "0.1.5"
 zip = "8.1.0"
 tower-lsp = "0.20.0"
 serde = { version = "1", features = ["derive", "rc"] }

@@ -4,6 +4,7 @@ use nucleo::pattern::{CaseMatching, Normalization};
 use rayon::prelude::*;
 use rust_asm::class_reader::AttributeInfo;
 use rust_asm::class_reader::ClassReader;
+use rust_asm::constant_pool::CpInfo;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::io::Read;
 use std::path::Path;
@@ -161,7 +162,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
             cn.constant_pool
                 .get(*signature_index as usize)
                 .and_then(|cp| {
-                    if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                    if let CpInfo::Utf8(s) = cp {
                         Some(Arc::from(s.as_str()))
                     } else {
                         None
@@ -185,7 +186,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                     cn.constant_pool
                         .get(*signature_index as usize)
                         .and_then(|cp| {
-                            if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                            if let CpInfo::Utf8(s) = cp {
                                 Some(Arc::from(s.as_str()))
                             } else {
                                 None
@@ -209,7 +210,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                                 cn.constant_pool
                                     .get(p.name_index as usize)
                                     .and_then(|cp| {
-                                        if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                                        if let CpInfo::Utf8(s) = cp {
                                             Some(Arc::from(s.as_str()))
                                         } else {
                                             None
@@ -250,7 +251,7 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                     cn.constant_pool
                         .get(*signature_index as usize)
                         .and_then(|cp| {
-                            if let rust_asm::class_reader::CpInfo::Utf8(s) = cp {
+                            if let CpInfo::Utf8(s) = cp {
                                 Some(Arc::from(s.as_str()))
                             } else {
                                 None

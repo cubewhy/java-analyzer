@@ -1326,9 +1326,9 @@ dependencies = [
 
 [[package]]
 name = "rust-asm"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "462775d29819d20f8ae89bcf9a5c1b14aa54668d69ce55e853a6dc8c612f28d8"
+checksum = "edc70aef77d90feaccb669994ce8e06f07b4eaca7f76357532c6c9ef0c4f0ad7"
 dependencies = [
  "thiserror",
 ]
