@@ -90,14 +90,14 @@ impl CompletionProvider for ConstructorProvider {
                 constructors
                     .iter()
                     .map(|ctor| {
-                        let readable_params = descriptor_params_to_readable(&ctor.descriptor);
+                        let readable_params = descriptor_params_to_readable(&ctor.desc());
                         let insert_text = format!("{}(", meta.name);
                         let detail = format!("new {}({})", fqn, readable_params);
                         let candidate = CompletionCandidate::new(
                             Arc::clone(&meta.name),
                             insert_text,
                             CandidateKind::Constructor {
-                                descriptor: Arc::clone(&ctor.descriptor),
+                                descriptor: Arc::clone(&ctor.desc()),
                                 defining_class: Arc::clone(&meta.name),
                             },
                             self.name(),
@@ -219,7 +219,6 @@ mod tests {
         let methods = if has_init {
             vec![MethodSummary {
                 name: Arc::from("<init>"),
-                descriptor: Arc::from("()V"),
                 params: MethodParams::empty(),
                 annotations: vec![],
                 access_flags: ACC_PUBLIC,
@@ -372,7 +371,6 @@ mod tests {
                 annotations: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("<init>"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,

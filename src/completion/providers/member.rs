@@ -101,12 +101,12 @@ impl CompletionProvider for MemberProvider {
                         let is_static = method.access_flags & ACC_STATIC != 0;
                         let kind = if is_static {
                             CandidateKind::StaticMethod {
-                                descriptor: Arc::clone(&method.descriptor),
+                                descriptor: method.desc(),
                                 defining_class: Arc::clone(&class_meta.internal_name),
                             }
                         } else {
                             CandidateKind::Method {
-                                descriptor: Arc::clone(&method.descriptor),
+                                descriptor: method.desc(),
                                 defining_class: Arc::clone(&class_meta.internal_name),
                             }
                         };
@@ -252,7 +252,7 @@ impl CompletionProvider for MemberProvider {
                     continue;
                 }
                 // shadowing: subclass method hides superclass method with same name+descriptor
-                let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
+                let key = (Arc::clone(&method.name), Arc::clone(&method.desc()));
                 if !seen_methods.insert(key) {
                     continue;
                 }
@@ -268,12 +268,12 @@ impl CompletionProvider for MemberProvider {
                 let is_static = method.access_flags & ACC_STATIC != 0;
                 let kind = if is_static {
                     CandidateKind::StaticMethod {
-                        descriptor: Arc::clone(&method.descriptor),
+                        descriptor: method.desc(),
                         defining_class: Arc::from(class_internal),
                     }
                 } else {
                     CandidateKind::Method {
-                        descriptor: Arc::clone(&method.descriptor),
+                        descriptor: method.desc(),
                         defining_class: Arc::from(class_internal),
                     }
                 };
@@ -719,8 +719,7 @@ mod tests {
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
         MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor),
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor(descriptor),
             annotations: vec![],
             access_flags: flags,
             is_synthetic,

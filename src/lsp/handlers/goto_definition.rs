@@ -103,7 +103,7 @@ async fn goto_resolved_symbol(
         ResolvedSymbol::Method { owner, summary } => (
             Arc::clone(owner),
             Some(Arc::clone(&summary.name)),
-            Some(Arc::clone(&summary.descriptor)),
+            Some(summary.desc()),
             DeclKind::Method,
         ),
         ResolvedSymbol::Field { owner, summary } => (

@@ -109,7 +109,7 @@ fn all_static_members(
                     format!("{}(", method.name)
                 },
                 CandidateKind::StaticMethod {
-                    descriptor: Arc::clone(&method.descriptor),
+                    descriptor: method.desc(),
                     defining_class: Arc::from(class_path),
                 },
                 source,
@@ -169,7 +169,7 @@ fn specific_static_member(
                     format!("{}(", method.name)
                 },
                 CandidateKind::StaticMethod {
-                    descriptor: Arc::clone(&method.descriptor),
+                    descriptor: method.desc(),
                     defining_class: Arc::from(class_path),
                 },
                 source,
@@ -225,23 +225,21 @@ mod tests {
             methods: vec![
                 MethodSummary {
                     name: Arc::from("abs"),
-                    descriptor: Arc::from("(I)I"),
-                    params: MethodParams::empty(),
+                    params: MethodParams::from([("I", "i")]),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("int")),
+                    return_type: Some(Arc::from("I")),
                 },
                 MethodSummary {
                     name: Arc::from("pow"),
-                    descriptor: Arc::from("(DD)D"),
-                    params: MethodParams::empty(),
+                    params: MethodParams::from([("D", "d0"), ("D", "d1")]),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("double")),
+                    return_type: Some(Arc::from("D")),
                 },
             ],
             fields: vec![FieldSummary {

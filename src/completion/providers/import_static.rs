@@ -74,7 +74,7 @@ fn static_members_for_import(
                 Arc::clone(&method.name),
                 method.name.to_string(),
                 CandidateKind::StaticMethod {
-                    descriptor: Arc::clone(&method.descriptor),
+                    descriptor: Arc::clone(&method.desc()),
                     defining_class: Arc::from(class_internal),
                 },
                 source,
@@ -137,27 +137,24 @@ mod tests {
             methods: vec![
                 MethodSummary {
                     name: Arc::from("abs"),
-                    descriptor: Arc::from("(I)I"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("int")),
+                    return_type: Some(Arc::from("I")),
                 },
                 MethodSummary {
                     name: Arc::from("pow"),
-                    descriptor: Arc::from("(DD)D"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC | ACC_STATIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("double")),
+                    return_type: Some(Arc::from("D")),
                 },
                 MethodSummary {
                     name: Arc::from("instanceMethod"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,

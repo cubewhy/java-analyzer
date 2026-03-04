@@ -192,8 +192,8 @@ impl<'idx> TypeResolver<'idx> {
             let method = self.select_overload(&candidates, arg_count, arg_types)?;
             let sig = method
                 .generic_signature
-                .as_deref()
-                .unwrap_or(&method.descriptor);
+                .clone()
+                .unwrap_or_else(|| method.desc());
 
             let ret_idx = sig.find(')')?;
             let ret_jvm_str = &sig[ret_idx + 1..];
@@ -237,7 +237,7 @@ impl<'idx> TypeResolver<'idx> {
         let by_count: Vec<&MethodSummary> = candidates
             .iter()
             .copied()
-            .filter(|m| count_params(&m.descriptor) == arg_count as usize)
+            .filter(|m| m.params.len() == arg_count as usize)
             .collect();
 
         if by_count.is_empty() {
@@ -256,11 +256,11 @@ impl<'idx> TypeResolver<'idx> {
         let mut best_match: Option<&MethodSummary> = None;
 
         for m in &by_count {
-            let score = self.score_params(&m.descriptor, arg_types);
+            let score = self.score_params(&m.desc(), arg_types);
 
             tracing::debug!(
                 method = %m.name,
-                desc = %m.descriptor,
+                desc = %m.desc(),
                 score = score,
                 "evaluating candidate"
             );
@@ -273,7 +273,7 @@ impl<'idx> TypeResolver<'idx> {
 
         match best_match {
             Some(m) if best_score >= 0 => {
-                tracing::debug!(selected = %m.descriptor, score = best_score, "selected best match");
+                tracing::debug!(selected = %m.desc(), score = best_score, "selected best match");
                 Some(m)
             }
             _ => {
@@ -629,7 +629,7 @@ impl ChainSegment {
 /// - `"()V"` → `None` (void)
 /// - `"()I"` → `None` (primitive type, no further dot chaining)
 /// - `"()[Ljava/lang/String;"` → `Some("[Ljava/lang/String;")` (array type)
-pub fn extract_return_internal_name(descriptor: &str) -> Option<TypeName> {
+pub fn extract_return_internal_name(descriptor: &str) -> Option<JvmType> {
     let ret_idx = descriptor.find(')')?;
     let ret_str = &descriptor[ret_idx + 1..];
 
@@ -639,7 +639,7 @@ pub fn extract_return_internal_name(descriptor: &str) -> Option<TypeName> {
         return None;
     }
 
-    Some(jvm_type.to_type_name())
+    Some(jvm_type)
 }
 
 /// Convert a single type descriptor to an internal name (remove generic parameters, retain the primitive type)
@@ -665,73 +665,7 @@ pub fn count_params(descriptor: &str) -> usize {
 
 /// Extract return type from descriptor
 pub fn parse_return_type_from_descriptor(descriptor: &str) -> Option<Arc<str>> {
-    extract_return_internal_name(descriptor).map(|t| t.to_arc())
-}
-
-pub fn java_primitive_char_to_name(c: char) -> &'static str {
-    match c {
-        'I' => "int",
-        'Z' => "boolean",
-        'J' => "long",
-        'F' => "float",
-        'D' => "double",
-        'B' => "byte",
-        'C' => "char",
-        'S' => "short",
-        'V' => "void",
-        _ => "unknown",
-    }
-}
-
-/// Java source code type name → JVM descriptor
-pub fn java_source_type_to_descriptor(ty: &str) -> String {
-    // Remove generics
-    let base = ty.split('<').next().unwrap_or(ty).trim();
-    match base {
-        "void" => "V".into(),
-        "boolean" => "Z".into(),
-        "byte" => "B".into(),
-        "char" => "C".into(),
-        "short" => "S".into(),
-        "int" => "I".into(),
-        "long" => "J".into(),
-        "float" => "F".into(),
-        "double" => "D".into(),
-        other => {
-            let internal = other.replace('.', "/");
-            format!("L{};", internal)
-        }
-    }
-}
-
-/// Java source code type name → JVM descriptor (used for fields)
-pub fn java_type_to_descriptor(ty: &str) -> String {
-    let ty = ty.trim();
-    let dims = ty.matches("[]").count();
-    let base = ty.split('[').next().unwrap_or(ty).trim();
-
-    let mut desc = String::new();
-    for _ in 0..dims {
-        desc.push('[');
-    }
-
-    match base {
-        "byte" => desc.push('B'),
-        "char" => desc.push('C'),
-        "double" => desc.push('D'),
-        "float" => desc.push('F'),
-        "int" => desc.push('I'),
-        "long" => desc.push('J'),
-        "short" => desc.push('S'),
-        "boolean" => desc.push('Z'),
-        "void" => desc.push('V'),
-        _ => {
-            desc.push('L');
-            desc.push_str(&base.replace('.', "/"));
-            desc.push(';');
-        }
-    }
-    desc
+    extract_return_internal_name(descriptor).map(|t| t.to_signature_string().into())
 }
 
 /// 将 Java 源码类型转换为携带泛型的 JVM internal name
@@ -1043,23 +977,23 @@ mod tests {
             methods: vec![
                 MethodSummary {
                     name: Arc::from("randomFunction"),
-                    descriptor: Arc::from("(Ljava/lang/String;I)LRandomClass;"),
-                    params: MethodParams::empty(),
+                    params: MethodParams::from_method_descriptor(
+                        "(Ljava/lang/String;I)LRandomClass;",
+                    ),
                     access_flags: ACC_PUBLIC,
                     annotations: vec![],
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("RandomClass")),
+                    return_type: Some(Arc::from("LRandomClass;")),
                 },
                 MethodSummary {
                     name: Arc::from("randomFunction"),
-                    descriptor: Arc::from("(Ljava/lang/String;J)LMain2;"),
-                    params: MethodParams::empty(),
+                    params: MethodParams::from_method_descriptor("(Ljava/lang/String;J)LMain2;"),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("Main2")),
+                    return_type: Some(Arc::from("LMain2;")),
                 },
             ],
             fields: vec![],
@@ -1116,13 +1050,12 @@ mod tests {
                 annotations: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("getMain2"),
-                    descriptor: Arc::from("()LMain2;"),
                     params: MethodParams::empty(),
                     access_flags: ACC_PUBLIC,
                     annotations: vec![],
                     is_synthetic: false,
                     generic_signature: None,
-                    return_type: Some(Arc::from("Main2")),
+                    return_type: Some(Arc::from("LMain2;")),
                 }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
@@ -1139,7 +1072,6 @@ mod tests {
                 annotations: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
@@ -1183,14 +1115,13 @@ mod tests {
             interfaces: vec![],
             methods: vec![MethodSummary {
                 name: Arc::from("get"),
-                descriptor: Arc::from("(I)Ljava/lang/Object;"),
-                params: MethodParams::empty(),
+                params: MethodParams::from([("I", "arg0")]),
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 annotations: vec![],
                 // 这里代表泛型方法返回类型是 E
                 generic_signature: Some(Arc::from("(I)TE;")),
-                return_type: None,
+                return_type: Some(Arc::from("Ljava/lang/Object;")),
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
@@ -1248,13 +1179,12 @@ mod tests {
             annotations: vec![],
             methods: vec![MethodSummary {
                 name: Arc::from("getCharArr"),
-                descriptor: Arc::from("()[[C"), // 代表方法返回 char[][]
                 params: MethodParams::empty(),
                 annotations: vec![],
                 access_flags: ACC_PUBLIC,
                 is_synthetic: false,
                 generic_signature: None,
-                return_type: None, // 基本数据类型数组这里通常为 None
+                return_type: Some(Arc::from("[[C")),
             }],
             fields: vec![],
             access_flags: ACC_PUBLIC,
@@ -1289,8 +1219,7 @@ mod tests {
 
         let method_object = MethodSummary {
             name: Arc::from("println"),
-            descriptor: Arc::from("(Ljava/lang/Object;)V"),
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor("(Ljava/lang/Object;)V"),
             annotations: vec![],
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
@@ -1300,8 +1229,7 @@ mod tests {
 
         let method_string = MethodSummary {
             name: Arc::from("println"),
-            descriptor: Arc::from("(Ljava/lang/String;)V"),
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor("(Ljava/lang/String;)V"),
             access_flags: ACC_PUBLIC,
             annotations: vec![],
             is_synthetic: false,
@@ -1318,7 +1246,7 @@ mod tests {
         let args = vec![TypeName::new("java/lang/String")];
         let best = resolver.select_overload(&candidates, 1, &args);
 
-        assert_eq!(best.unwrap().descriptor.as_ref(), "(Ljava/lang/String;)V");
+        assert_eq!(best.unwrap().desc().as_ref(), "(Ljava/lang/String;)V");
     }
 
     #[test]
@@ -1365,8 +1293,7 @@ mod tests {
 
         let method_wrapper = MethodSummary {
             name: Arc::from("process"),
-            descriptor: Arc::from("(Ljava/lang/Integer;)V"),
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor("(Ljava/lang/Integer;)V"),
             annotations: vec![],
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
@@ -1376,8 +1303,7 @@ mod tests {
 
         let method_primitive = MethodSummary {
             name: Arc::from("process"),
-            descriptor: Arc::from("(I)V"),
-            params: MethodParams::empty(),
+            params: MethodParams::from([("I", "i")]),
             annotations: vec![],
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
@@ -1392,13 +1318,13 @@ mod tests {
         // 传入 int，应该优先匹配 process(int) 而不是 process(Integer)
         let args_prim = vec![TypeName::new("int")];
         let best_prim = resolver.select_overload(&candidates, 1, &args_prim);
-        assert_eq!(best_prim.unwrap().descriptor.as_ref(), "(I)V");
+        assert_eq!(best_prim.unwrap().desc().as_ref(), "(I)V");
 
         // 传入 java/lang/Integer，应该优先匹配 process(Integer)
         let args_wrapper = vec![TypeName::new("java/lang/Integer")];
         let best_wrapper = resolver.select_overload(&candidates, 1, &args_wrapper);
         assert_eq!(
-            best_wrapper.unwrap().descriptor.as_ref(),
+            best_wrapper.unwrap().desc().as_ref(),
             "(Ljava/lang/Integer;)V"
         );
     }

@@ -23,7 +23,7 @@ impl CurrentClassMember {
 
     pub fn descriptor(&self) -> Arc<str> {
         match self {
-            Self::Method(m) => m.descriptor.clone(),
+            Self::Method(m) => m.desc(),
             Self::Field(f) => f.descriptor.clone(),
         }
     }

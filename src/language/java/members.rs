@@ -219,7 +219,6 @@ pub fn parse_partial_methods_from_error(
 
         result.push(CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor.as_str()),
             params: parse_params(ctx, &descriptor, params_node, type_ctx),
             annotations: method_annos,
             access_flags: flags,
@@ -310,7 +309,6 @@ pub fn parse_partial_methods_from_error(
 
         result.push(CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor.as_str()),
             params: MethodParams::empty(),
             annotations: method_annos,
             access_flags: flags,
@@ -371,7 +369,6 @@ pub fn parse_method_node(
 
     Some(CurrentClassMember::Method(Arc::new(MethodSummary {
         name: Arc::from(name),
-        descriptor: Arc::from(descriptor.as_str()),
         params,
         annotations: method_annos,
         access_flags: flags,
@@ -507,7 +504,6 @@ fn parse_misread_method(
 
     Some(CurrentClassMember::Method(Arc::new(MethodSummary {
         name: Arc::from(name),
-        descriptor: Arc::from(descriptor.as_str()),
         params,
         annotations: method_annos,
         access_flags: flags,
@@ -549,41 +545,6 @@ pub fn parse_annotations_in_node(
     out
 }
 
-fn collect_members_deep(
-    ctx: &JavaContextExtractor,
-    node: Node,
-    type_ctx: &SourceTypeCtx,
-    members: &mut Vec<CurrentClassMember>,
-) {
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        match child.kind() {
-            "method_declaration" => {
-                if let Some(m) = parse_method_node(ctx, type_ctx, child) {
-                    if !members.iter().any(|e| e.name() == m.name()) {
-                        members.push(m);
-                    }
-                }
-            }
-            "field_declaration" => {
-                for f in parse_field_node(ctx, type_ctx, child) {
-                    if !members.iter().any(|e| e.name() == f.name()) {
-                        members.push(f);
-                    }
-                }
-            }
-            // 不进入嵌套类
-            "class_declaration"
-            | "interface_declaration"
-            | "enum_declaration"
-            | "class_body"
-            | "interface_body"
-            | "enum_body" => {}
-            _ => collect_members_deep(ctx, child, type_ctx, members),
-        }
-    }
-}
-
 fn parse_single_annotation(
     ctx: &JavaContextExtractor,
     node: Node,
@@ -617,26 +578,6 @@ fn parse_single_annotation(
         runtime_visible: true,
         elements,
     })
-}
-
-fn collect_annotations_in(
-    ctx: &JavaContextExtractor,
-    node: Node,
-    type_ctx: &SourceTypeCtx,
-    out: &mut Vec<AnnotationSummary>,
-) {
-    let mut wc = node.walk();
-    for child in node.children(&mut wc) {
-        match child.kind() {
-            "marker_annotation" | "annotation" => {
-                if let Some(s) = parse_single_annotation(ctx, child, type_ctx) {
-                    out.push(s);
-                }
-                // 不再向注解内部递归，parse_single_annotation 自己处理嵌套
-            }
-            _ => collect_annotations_in(ctx, child, type_ctx, out),
-        }
-    }
 }
 
 fn parse_annotation_arguments(

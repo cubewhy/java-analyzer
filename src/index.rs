@@ -153,6 +153,15 @@ impl MethodParams {
         Self { items: vec![] }
     }
 
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// 仅由 method descriptor 构建参数列表（name 默认空）
     pub fn from_method_descriptor(method_desc: &str) -> Self {
         let inner = match method_desc.find('(').zip(method_desc.find(')')) {
@@ -231,15 +240,35 @@ pub struct MethodParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MethodSummary {
     pub name: Arc<str>,
-    #[deprecated]
-    pub descriptor: Arc<str>,
     pub params: MethodParams,
     /// Method-level annotations
     pub annotations: Vec<AnnotationSummary>,
     pub access_flags: u16,
     pub is_synthetic: bool,
     pub generic_signature: Option<Arc<str>>,
+    /// Method return type (Jvm internal name), None if the return type is void (V)
     pub return_type: Option<Arc<str>>,
+}
+
+impl MethodSummary {
+    pub fn desc(&self) -> Arc<str> {
+        let mut out = String::from("(");
+
+        for p in &self.params.items {
+            out.push_str(&p.descriptor);
+        }
+
+        out.push(')');
+
+        if let Some(ret) = &self.return_type {
+            out.push_str(ret);
+        } else {
+            // JVM void
+            out.push('V');
+        }
+
+        Arc::from(out)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -594,7 +623,6 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
                 build_method_params_from_attrs(&md.descriptor, &md.attributes, &cn.constant_pool);
             MethodSummary {
                 name: Arc::from(md.name.as_str()),
-                descriptor: Arc::from(md.descriptor.as_str()),
                 access_flags: md.access_flags,
                 params,
                 annotations: collect_decl_annotations(&md.attributes, &cn.constant_pool),
@@ -682,31 +710,23 @@ pub fn merge_source_into_bytecode(bytecode: &mut [ClassMetadata], source: Vec<Cl
             b_class.origin = s_class.origin; // 提升来源标识为源码(方便跳转)
 
             for b_method in b_class.methods.iter_mut() {
-                let b_param_count = MethodParams::from_method_descriptor(&b_method.descriptor)
-                    .items
-                    .len();
+                let b_param_count = b_method.params.len();
 
                 // 找同名、同参数数量的候选
                 let candidates: Vec<&MethodSummary> = s_class
                     .methods
                     .iter()
-                    .filter(|m| {
-                        m.name == b_method.name
-                            && MethodParams::from_method_descriptor(&m.descriptor)
-                                .items
-                                .len()
-                                == b_param_count
-                    })
+                    .filter(|m| m.name == b_method.name && m.params.len() == b_param_count)
                     .collect();
 
                 if candidates.len() == 1 {
                     b_method.params.expand(&candidates[0].params);
                 } else if candidates.len() > 1 {
                     // 发生重载冲突时，使用参数的简单名称进行模糊匹配对齐 (例如 String 匹配 java/lang/String)
-                    let b_simple = extract_simple_types(&b_method.descriptor);
+                    let b_simple = extract_simple_types(&b_method.desc());
                     if let Some(best) = candidates
                         .iter()
-                        .find(|m| extract_simple_types(&m.descriptor) == b_simple)
+                        .find(|m| extract_simple_types(&m.desc()) == b_simple)
                     {
                         b_method.params.expand(&best.params);
                     } else {
@@ -844,7 +864,6 @@ impl GlobalIndex {
             }
             for m in &mut class.methods {
                 m.name = intern_str(&m.name);
-                m.descriptor = intern_str(&m.descriptor);
                 if let Some(rt) = &m.return_type {
                     m.return_type = Some(intern_str(rt));
                 }
@@ -1073,7 +1092,7 @@ impl GlobalIndex {
 
             // Add methods not yet shadowed by a subclass
             for method in &meta.methods {
-                let key = (Arc::clone(&method.name), Arc::clone(&method.descriptor));
+                let key = (Arc::clone(&method.name), Arc::clone(&method.desc()));
                 if seen_methods.insert(key) {
                     methods.push(Arc::new(method.clone()));
                 }
@@ -1261,10 +1280,9 @@ mod tests {
     fn make_method(name: &str, descriptor: &str) -> MethodSummary {
         MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor),
             access_flags: ACC_PUBLIC,
             is_synthetic: false,
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor(descriptor),
             annotations: vec![],
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
@@ -1539,13 +1557,11 @@ mod tests {
         assert!(idx.get_class("com/example/B").is_none());
     }
 
-    // ── 描述符工具 ────────────────────────────────────────────────────────────
-
     #[test]
     fn test_parse_return_type_object() {
         assert_eq!(
             parse_return_type_from_descriptor("()Ljava/util/List;").as_deref(),
-            Some("java/util/List")
+            Some("Ljava/util/List;")
         );
     }
 
@@ -1558,11 +1574,11 @@ mod tests {
     fn test_parse_return_type_primitive() {
         assert_eq!(
             parse_return_type_from_descriptor("()I").as_deref(),
-            Some("int")
+            Some("I")
         );
         assert_eq!(
             parse_return_type_from_descriptor("()Z").as_deref(),
-            Some("boolean")
+            Some("Z")
         );
     }
 

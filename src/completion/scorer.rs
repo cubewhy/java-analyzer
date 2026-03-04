@@ -162,8 +162,7 @@ pub fn method_detail(
     method: &MethodSummary,
     provider: &impl SymbolProvider,
 ) -> String {
-    // 1. 处理返回类型
-    let base_return = method.return_type.as_deref().unwrap_or("void");
+    let base_return = method.return_type.as_deref().unwrap_or("V");
     let display_return: Arc<str> = if let Some(sig) = method.generic_signature.as_deref() {
         if let Some(ret_idx) = sig.find(')') {
             let ret_jvm = &sig[ret_idx + 1..];
@@ -191,8 +190,8 @@ pub fn method_detail(
     // 2. 处理参数列表
     let sig_to_use = method
         .generic_signature
-        .as_deref()
-        .unwrap_or(&method.descriptor);
+        .clone()
+        .unwrap_or_else(|| method.desc());
 
     let mut param_types = Vec::new();
 

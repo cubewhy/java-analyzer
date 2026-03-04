@@ -266,8 +266,7 @@ mod tests {
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
         MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor),
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor(descriptor),
             annotations: vec![],
             access_flags: flags,
             is_synthetic,

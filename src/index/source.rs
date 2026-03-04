@@ -292,8 +292,7 @@ fn extract_kotlin_methods(body: Node, bytes: &[u8]) -> Vec<MethodSummary> {
 
         result.push(MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor.as_str()),
-            params, // ✅ replace param_names
+            params,
             annotations: vec![],
             access_flags: ACC_PUBLIC,
             is_synthetic: false,

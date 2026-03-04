@@ -127,7 +127,7 @@ impl<'a> SymbolResolver<'a> {
 
                 if let Some(found_arc) = named_candidates
                     .iter()
-                    .find(|m| m.descriptor == best_summary.descriptor)
+                    .find(|m| m.desc() == best_summary.desc())
                 {
                     return Some(ResolvedSymbol::Method {
                         owner: Arc::from(owner),
@@ -358,7 +358,6 @@ mod tests {
             methods: vec![
                 MethodSummary {
                     name: Arc::from("println"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
@@ -368,8 +367,7 @@ mod tests {
                 },
                 MethodSummary {
                     name: Arc::from("println"),
-                    descriptor: Arc::from("(I)V"), // int overload
-                    params: MethodParams::from([("I", "x")]),
+                    params: MethodParams::from([("I", "x")]), // int overload
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
@@ -378,8 +376,7 @@ mod tests {
                 },
                 MethodSummary {
                     name: Arc::from("println"),
-                    descriptor: Arc::from("(Ljava/lang/String;)V"), // String overload
-                    params: MethodParams::from([("Ljava/lang/String;", "x")]),
+                    params: MethodParams::from([("Ljava/lang/String;", "x")]), // string overload
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
                     is_synthetic: false,
@@ -414,7 +411,7 @@ mod tests {
         let sym_int = resolver.resolve(&ctx_int).unwrap();
         if let ResolvedSymbol::Method { summary, .. } = sym_int {
             assert_eq!(
-                summary.descriptor.as_ref(),
+                summary.desc().as_ref(),
                 "(I)V",
                 "Should resolve to int overload"
             );
@@ -441,7 +438,7 @@ mod tests {
         let sym_str = resolver.resolve(&ctx_str).unwrap();
         if let ResolvedSymbol::Method { summary, .. } = sym_str {
             assert_eq!(
-                summary.descriptor.as_ref(),
+                summary.desc().as_ref(),
                 "(Ljava/lang/String;)V",
                 "Should resolve to String overload"
             );

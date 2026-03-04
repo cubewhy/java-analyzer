@@ -143,12 +143,12 @@ impl CompletionProvider for ThisMemberProvider {
                     }
                     let kind = if is_static {
                         CandidateKind::StaticMethod {
-                            descriptor: Arc::clone(&method.descriptor),
+                            descriptor: method.desc(),
                             defining_class: Arc::clone(&class_meta.internal_name),
                         }
                     } else {
                         CandidateKind::Method {
-                            descriptor: Arc::clone(&method.descriptor),
+                            descriptor: method.desc(),
                             defining_class: Arc::clone(&class_meta.internal_name),
                         }
                     };
@@ -251,7 +251,6 @@ mod tests {
         if is_method {
             CurrentClassMember::Method(Arc::new(MethodSummary {
                 name: Arc::from(name),
-                descriptor: Arc::from("()V"),
                 params: MethodParams::empty(),
                 annotations: vec![],
                 access_flags: flags,
@@ -427,7 +426,6 @@ mod tests {
         ];
         let enclosing = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("staticEntry"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_STATIC | ACC_PUBLIC,
@@ -451,7 +449,6 @@ mod tests {
         let members = vec![make_member("helper", true, false, false)];
         let enclosing = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("instanceEntry"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC,
@@ -474,7 +471,6 @@ mod tests {
         let members = vec![make_member("field", false, false, false)];
         let enclosing = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("staticFn"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_STATIC | ACC_PUBLIC,
@@ -511,7 +507,6 @@ mod tests {
         // Construct a static context
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC | ACC_STATIC,
@@ -564,7 +559,6 @@ mod tests {
 
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC | ACC_STATIC,
@@ -602,7 +596,6 @@ mod tests {
 
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("main"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC | ACC_STATIC,
@@ -640,7 +633,6 @@ mod tests {
         ];
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("staticEntry"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC | ACC_STATIC,
@@ -675,7 +667,6 @@ mod tests {
                 annotations: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("funcA"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
@@ -698,7 +689,6 @@ mod tests {
                 annotations: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("func"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PUBLIC,
@@ -717,7 +707,6 @@ mod tests {
         // 模拟在 Main2 的实例方法里补全
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("func"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC,
@@ -763,7 +752,6 @@ mod tests {
                 annotations: vec![],
                 methods: vec![MethodSummary {
                     name: Arc::from("superPrivate"),
-                    descriptor: Arc::from("()V"),
                     params: MethodParams::empty(),
                     annotations: vec![],
                     access_flags: ACC_PRIVATE,
@@ -795,7 +783,6 @@ mod tests {
 
         let enclosing_method = CurrentClassMember::Method(Arc::new(MethodSummary {
             name: Arc::from("doWork"),
-            descriptor: Arc::from("()V"),
             params: MethodParams::empty(),
             annotations: vec![],
             access_flags: ACC_PUBLIC,

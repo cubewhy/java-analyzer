@@ -113,7 +113,7 @@ impl CompletionProvider for StaticMemberProvider {
                         format!("{}(", method.name)
                     },
                     CandidateKind::StaticMethod {
-                        descriptor: Arc::clone(&method.descriptor),
+                        descriptor: method.desc(),
                         defining_class: Arc::from(class_name),
                     },
                     self.name(),
@@ -269,8 +269,7 @@ mod tests {
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {
         MethodSummary {
             name: Arc::from(name),
-            descriptor: Arc::from(descriptor),
-            params: MethodParams::empty(),
+            params: MethodParams::from_method_descriptor(descriptor),
             annotations: vec![],
             access_flags: flags,
             is_synthetic,
@@ -301,7 +300,6 @@ mod tests {
             annotations: vec![],
             methods: vec![MethodSummary {
                 name: Arc::from("func"),
-                descriptor: Arc::from("()V"),
                 annotations: vec![],
                 params: MethodParams::empty(),
                 access_flags: ACC_PUBLIC | ACC_STATIC,
@@ -379,7 +377,6 @@ mod tests {
             annotations: vec![],
             methods: vec![MethodSummary {
                 name: Arc::from("main"),
-                descriptor: Arc::from("()V"),
                 params: MethodParams::empty(),
                 annotations: vec![],
                 access_flags: ACC_PUBLIC | ACC_STATIC,
