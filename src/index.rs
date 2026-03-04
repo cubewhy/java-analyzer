@@ -252,20 +252,23 @@ pub struct MethodSummary {
 
 impl MethodSummary {
     pub fn desc(&self) -> Arc<str> {
-        let mut out = String::from("(");
+        let cap: usize = 2
+            + self
+                .params
+                .items
+                .iter()
+                .map(|p| p.descriptor.len())
+                .sum::<usize>()
+            + self.return_type.as_ref().map(|r| r.len()).unwrap_or(1);
 
+        let mut out = String::with_capacity(cap);
+
+        out.push('(');
         for p in &self.params.items {
             out.push_str(&p.descriptor);
         }
-
         out.push(')');
-
-        if let Some(ret) = &self.return_type {
-            out.push_str(ret);
-        } else {
-            // JVM void
-            out.push('V');
-        }
+        out.push_str(self.return_type.as_deref().unwrap_or("V"));
 
         Arc::from(out)
     }
