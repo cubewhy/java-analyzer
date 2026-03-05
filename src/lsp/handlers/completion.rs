@@ -72,9 +72,9 @@ pub async fn handle_completion(
 
     // 4) completion engine（这里会 await，所以不能在 DashMap guard 里做）
     let scope = workspace.scope_for_uri(uri);
-    let mut index = workspace.index.write().await;
-    let candidates = engine.complete(scope, ctx.clone(), lang, &mut index);
-    drop(index);
+    let index = workspace.index.read().await;
+    let view = index.view(scope);
+    let candidates = engine.complete(scope, ctx.clone(), lang, &view);
 
     if candidates.is_empty() {
         debug!("no candidates");

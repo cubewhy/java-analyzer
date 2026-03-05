@@ -1,142 +1,156 @@
+use std::collections::VecDeque;
+use std::path::Path;
 use std::sync::Arc;
 
-use crate::index::{ClassMetadata, ClassOrigin, GlobalIndex, NameTable};
-use crate::index::scope::IndexScope;
-use crate::index::{FieldSummary, MethodSummary};
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use rustc_hash::FxHashSet;
+use smallvec::SmallVec;
+
+use crate::index::{
+    index_jar, BucketIndex, ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleGraph,
+    ModuleId, ModuleIndex, NameTable,
+};
+use crate::index::view::IndexView;
 
 pub struct WorkspaceIndex {
-    inner: GlobalIndex,
-    // TODO: per-module source index
-    // TODO: per-module jar/classpath index
-    // TODO: shared JDK index
-    // TODO: dependency graph and lookup order
+    modules: DashMap<ModuleId, Arc<ModuleIndex>>,
+    jdk: Arc<BucketIndex>,
+    jar_cache: DashMap<Arc<str>, Arc<BucketIndex>>,
+    graph: RwLock<ModuleGraph>,
 }
 
 impl WorkspaceIndex {
     pub fn new() -> Self {
+        let modules = DashMap::new();
+        let root = Arc::new(ModuleIndex::new(ModuleId::ROOT, Arc::from("root")));
+        modules.insert(ModuleId::ROOT, root);
         Self {
-            inner: GlobalIndex::new(),
+            modules,
+            jdk: Arc::new(BucketIndex::new()),
+            jar_cache: DashMap::new(),
+            graph: RwLock::new(ModuleGraph::new()),
         }
     }
 
-    pub fn add_jdk_classes(&mut self, classes: Vec<ClassMetadata>) {
-        self.inner.add_classes(classes);
-    }
-
-    pub fn add_jar_classes(&mut self, _scope: IndexScope, classes: Vec<ClassMetadata>) {
-        self.inner.add_classes(classes);
+    pub fn ensure_module(&self, id: ModuleId, name: Arc<str>) -> Arc<ModuleIndex> {
+        match self.modules.entry(id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => Arc::clone(entry.get()),
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                let module = Arc::new(ModuleIndex::new(id, name));
+                entry.insert(Arc::clone(&module));
+                module
+            }
+        }
     }
 
     pub fn update_source(
-        &mut self,
-        _scope: IndexScope,
+        &self,
+        scope: IndexScope,
         origin: ClassOrigin,
         classes: Vec<ClassMetadata>,
     ) {
-        self.inner.update_source(origin, classes);
+        let module = self.ensure_module(scope.module, default_module_name(scope.module));
+        module.update_source(origin, classes);
     }
 
-    pub fn get_class(
+    pub fn add_jdk_classes(&self, classes: Vec<ClassMetadata>) {
+        self.jdk.add_classes(classes);
+    }
+
+    pub fn add_jar_classes(&self, scope: IndexScope, classes: Vec<ClassMetadata>) {
+        let module = self.ensure_module(scope.module, default_module_name(scope.module));
+        let bucket = Arc::new(BucketIndex::new());
+        bucket.add_classes(classes);
+        module.add_classpath_bucket(ClasspathId::Main, bucket);
+    }
+
+    pub fn get_or_index_jar(&self, path: Arc<str>) -> Arc<BucketIndex> {
+        if let Some(existing) = self.jar_cache.get(&path) {
+            return Arc::clone(existing.value());
+        }
+
+        let bucket = Arc::new(BucketIndex::new());
+        match index_jar(Path::new(path.as_ref())) {
+            Ok(classes) => bucket.add_classes(classes),
+            Err(err) => {
+                tracing::warn!(path = path.as_ref(), error = %err, "failed to index jar");
+            }
+        }
+
+        self.jar_cache.insert(Arc::clone(&path), Arc::clone(&bucket));
+        bucket
+    }
+
+    pub fn set_module_classpath(
         &self,
-        _scope: IndexScope,
-        internal_name: &str,
-    ) -> Option<Arc<ClassMetadata>> {
-        self.inner.get_class(internal_name)
+        module: ModuleId,
+        classpath_id: ClasspathId,
+        jar_paths: Vec<Arc<str>>,
+    ) {
+        let buckets = jar_paths
+            .iter()
+            .map(|p| self.get_or_index_jar(Arc::clone(p)))
+            .collect();
+        let module = self.ensure_module(module, default_module_name(module));
+        module.set_classpath(classpath_id, jar_paths, buckets);
     }
 
-    pub fn get_source_type_name(
-        &self,
-        _scope: IndexScope,
-        internal: &str,
-    ) -> Option<String> {
-        self.inner.get_source_type_name(internal)
+    pub fn view(&self, scope: IndexScope) -> IndexView {
+        let module = self.ensure_module(scope.module, default_module_name(scope.module));
+
+        let mut layers: SmallVec<Arc<BucketIndex>, 8> = SmallVec::new();
+        layers.push(Arc::clone(&module.source));
+        for bucket in module.active_classpath_layers() {
+            layers.push(bucket);
+        }
+
+        let graph = self.graph.read();
+        let mut queue: VecDeque<ModuleId> = VecDeque::new();
+        let mut seen: FxHashSet<ModuleId> = Default::default();
+        seen.insert(scope.module);
+        queue.extend(graph.deps_of(scope.module).iter().copied());
+
+        while let Some(dep) = queue.pop_front() {
+            if !seen.insert(dep) {
+                continue;
+            }
+            let dep_module = self.ensure_module(dep, default_module_name(dep));
+            layers.push(Arc::clone(&dep_module.source));
+            for bucket in dep_module.active_classpath_layers() {
+                layers.push(bucket);
+            }
+            queue.extend(graph.deps_of(dep).iter().copied());
+        }
+
+        layers.push(Arc::clone(&self.jdk));
+        IndexView::new(layers)
     }
 
-    pub fn get_classes_by_simple_name(
-        &self,
-        _scope: IndexScope,
-        simple_name: &str,
-    ) -> &[Arc<ClassMetadata>] {
-        self.inner.get_classes_by_simple_name(simple_name)
+    pub fn build_name_table(&self, scope: IndexScope) -> Arc<NameTable> {
+        self.view(scope).build_name_table()
     }
 
-    pub fn classes_in_package(
-        &self,
-        _scope: IndexScope,
-        pkg: &str,
-    ) -> &[Arc<ClassMetadata>] {
-        self.inner.classes_in_package(pkg)
+    pub fn add_classes(&self, classes: Vec<ClassMetadata>) {
+        self.add_jar_classes(IndexScope { module: ModuleId::ROOT }, classes);
     }
 
-    pub fn has_package(&self, _scope: IndexScope, pkg: &str) -> bool {
-        self.inner.has_package(pkg)
-    }
-
-    pub fn has_classes_in_package(&self, _scope: IndexScope, pkg: &str) -> bool {
-        self.inner.has_classes_in_package(pkg)
-    }
-
-    pub fn resolve_imports(
-        &self,
-        _scope: IndexScope,
-        imports: &[Arc<str>],
-    ) -> Vec<Arc<ClassMetadata>> {
-        self.inner.resolve_imports(imports)
-    }
-
-    pub fn collect_inherited_members(
-        &self,
-        _scope: IndexScope,
-        class_internal: &str,
-    ) -> (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>) {
-        self.inner.collect_inherited_members(class_internal)
-    }
-
-    pub fn mro(&self, _scope: IndexScope, class_internal: &str) -> Vec<Arc<ClassMetadata>> {
-        self.inner.mro(class_internal)
-    }
-
-    pub fn fuzzy_autocomplete(
-        &mut self,
-        _scope: IndexScope,
-        query: &str,
-        limit: usize,
-    ) -> Vec<Arc<str>> {
-        self.inner.fuzzy_autocomplete(query, limit)
-    }
-
-    pub fn fuzzy_search_classes(
-        &mut self,
-        _scope: IndexScope,
-        query: &str,
-        limit: usize,
-    ) -> Vec<Arc<ClassMetadata>> {
-        self.inner.fuzzy_search_classes(query, limit)
-    }
-
-    pub fn exact_match_keys(&self, _scope: IndexScope) -> impl Iterator<Item = &Arc<str>> {
-        self.inner.exact_match_keys()
-    }
-
-    pub fn class_count(&self, _scope: IndexScope) -> usize {
-        self.inner.class_count()
-    }
-
-    pub fn iter_all_classes(&self, _scope: IndexScope) -> impl Iterator<Item = &Arc<ClassMetadata>> {
-        self.inner.iter_all_classes()
-    }
-
-    pub fn build_name_table(&self, _scope: IndexScope) -> Arc<NameTable> {
-        self.inner.build_name_table()
-    }
-
-    pub fn add_classes(&mut self, classes: Vec<ClassMetadata>) {
-        self.inner.add_classes(classes);
+    #[allow(dead_code)]
+    pub fn graph_version(&self) -> u64 {
+        self.graph.read().version()
     }
 }
 
 impl Default for WorkspaceIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn default_module_name(id: ModuleId) -> Arc<str> {
+    if id == ModuleId::ROOT {
+        Arc::from("root")
+    } else {
+        Arc::from(format!("module-{}", id.0))
     }
 }

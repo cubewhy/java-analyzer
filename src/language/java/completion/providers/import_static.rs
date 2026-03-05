@@ -4,7 +4,7 @@ use rust_asm::constants::ACC_STATIC;
 
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::{ClassMetadata, IndexScope, WorkspaceIndex},
+    index::{ClassMetadata, IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 
@@ -19,7 +19,7 @@ impl CompletionProvider for ImportStaticProvider {
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::ImportStatic { prefix } => prefix.as_str(),
@@ -31,7 +31,7 @@ impl CompletionProvider for ImportStaticProvider {
             let member_prefix = &prefix[dot_pos + 1..];
             let class_internal = class_part.replace('.', "/");
 
-            if let Some(meta) = index.get_class(scope, &class_internal) {
+            if let Some(meta) = index.get_class(&class_internal) {
                 return static_members_for_import(
                     &meta,
                     &class_internal,
@@ -114,10 +114,11 @@ fn static_members_for_import(
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
-        WorkspaceIndex,
+        IndexView,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
@@ -220,7 +221,7 @@ mod tests {
             None,
             vec![],
         );
-        assert!(ImportStaticProvider.provide(root_scope(), &ctx, &mut idx).is_empty());
+        assert!(ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope())).is_empty());
     }
 
     #[test]
@@ -228,7 +229,7 @@ mod tests {
         let mut idx = math_index();
         // "java.lang.Ma" - Not yet at the Math layer, should go through candidates_for_import
         let ctx = import_static_ctx("java.lang.Ma");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref().contains("Math")),
             "should suggest Math at class path stage: {:?}",
@@ -241,7 +242,7 @@ mod tests {
         let mut idx = math_index();
         // "java.lang.Math." - Empty member prefix, returns all static members
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should appear: {:?}", labels);
         assert!(labels.contains(&"pow"), "pow should appear: {:?}", labels);
@@ -252,7 +253,7 @@ mod tests {
     fn test_member_stage_filters_by_prefix() {
         let mut idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.a");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"abs"), "abs should match prefix 'a'");
         assert!(!labels.contains(&"pow"), "pow should not match 'a'");
@@ -266,7 +267,7 @@ mod tests {
     fn test_member_stage_prefix_case_insensitive() {
         let mut idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.p");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"pow"), "pow should match prefix 'p'");
         assert!(
@@ -279,7 +280,7 @@ mod tests {
     fn test_member_stage_excludes_non_static() {
         let mut idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             !labels.contains(&"instanceMethod"),
@@ -297,7 +298,7 @@ mod tests {
     fn test_member_stage_no_init_methods() {
         let mut idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results
                 .iter()
@@ -311,7 +312,7 @@ mod tests {
         // Parentheses should not be added when completing import static.
         let mut idx = math_index();
         let ctx = import_static_ctx("java.lang.Math.");
-        let results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let method = results.iter().find(|c| c.label.as_ref() == "abs").unwrap();
         assert_eq!(
             method.insert_text, "abs",
@@ -326,6 +327,6 @@ mod tests {
         // you should call candidates_for_import (which returns an empty string or the package path).
         let ctx = import_static_ctx("com.example.Unknown.");
         // No panic, no crash.
-        let _results = ImportStaticProvider.provide(root_scope(), &ctx, &mut idx);
+        let _results = ImportStaticProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     completion::{CompletionCandidate, provider::CompletionProvider},
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 
@@ -15,7 +15,7 @@ impl CompletionProvider for ImportProvider {
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Import { prefix } => prefix.as_str(),
@@ -27,14 +27,15 @@ impl CompletionProvider for ImportProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, IndexView, ModuleId};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
 
-    fn make_index() -> WorkspaceIndex {
-        let mut idx = WorkspaceIndex::new();
+    fn make_view() -> IndexView {
+        let idx = WorkspaceIndex::new();
         idx.add_jar_classes(IndexScope { module: ModuleId::ROOT }, vec![
             make_cls("org/cubewhy", "Main"),
             make_cls("org/cubewhy", "RealMain"),
@@ -42,7 +43,7 @@ mod tests {
             make_cls("java/util", "ArrayList"),
             make_cls("java/util", "HashMap"),
         ]);
-        idx
+        idx.view(IndexScope { module: ModuleId::ROOT })
     }
 
     fn make_cls(pkg: &str, name: &str) -> ClassMetadata {
@@ -78,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_non_import_location_returns_empty() {
-        let mut idx = make_index();
+        let view = make_view();
         let scope = IndexScope { module: ModuleId::ROOT };
         let ctx = SemanticContext::new(
             CursorLocation::Expression {
@@ -91,14 +92,14 @@ mod tests {
             None,
             vec![],
         );
-        assert!(ImportProvider.provide(scope, &ctx, &mut idx).is_empty());
+        assert!(ImportProvider.provide(scope, &ctx, &view).is_empty());
     }
 
     #[test]
     fn test_delegates_to_import_completion() {
-        let mut idx = make_index();
+        let view = make_view();
         let scope = IndexScope { module: ModuleId::ROOT };
-        let results = ImportProvider.provide(scope, &import_ctx("org.cubewhy.Ma"), &mut idx);
+        let results = ImportProvider.provide(scope, &import_ctx("org.cubewhy.Ma"), &view);
         assert!(
             results
                 .iter()

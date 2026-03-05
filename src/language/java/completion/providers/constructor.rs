@@ -5,7 +5,7 @@ use crate::{
         provider::CompletionProvider,
         scorer::AccessFilter,
     },
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -19,9 +19,9 @@ impl CompletionProvider for ConstructorProvider {
 
     fn provide(
         &self,
-        scope: IndexScope,
+        _scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let (class_prefix, expected_type) = match &ctx.location {
             CursorLocation::ConstructorCall {
@@ -39,7 +39,7 @@ impl CompletionProvider for ConstructorProvider {
         };
 
         index
-            .fuzzy_search_classes(scope, search_prefix, 50)
+            .fuzzy_search_classes(search_prefix, 50)
             .into_iter()
             .flat_map(|meta| {
                 let fqn = fqn_of_meta(&meta);
@@ -206,10 +206,11 @@ pub fn jvm_type_to_readable(ty: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
-        WorkspaceIndex,
+        IndexView,
     };
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::ACC_PUBLIC;
@@ -276,7 +277,7 @@ mod tests {
     fn test_empty_prefix_returns_candidates() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             !results.is_empty(),
             "empty prefix should return constructor candidates"
@@ -287,7 +288,7 @@ mod tests {
     fn test_empty_prefix_includes_known_class() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "RandomClass"),
             "RandomClass should appear with empty prefix: {:?}",
@@ -301,7 +302,7 @@ mod tests {
     fn test_no_import_when_already_exact_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.RandomClass".into()]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "should not add import when already imported: {:?}",
@@ -316,7 +317,7 @@ mod tests {
     fn test_no_import_when_wildcard_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec!["org.cubewhy.*".into()]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "should not add import under wildcard: {:?}",
@@ -332,7 +333,7 @@ mod tests {
         let mut idx = make_index_with("org/cubewhy/a", "Helper", true);
         // enclosing package is org/cubewhy/a — same as Helper
         let ctx = make_ctx("Helper", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| c.required_import.is_none()),
             "same-package class should not need import: {:?}",
@@ -347,7 +348,7 @@ mod tests {
     fn test_import_added_when_not_imported() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results
                 .iter()
@@ -393,7 +394,7 @@ mod tests {
 
         // expected_type = "String" → String should score higher than StringBuilder
         let ctx = make_ctx("S", Some("String"), vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
 
         let string_score = results
             .iter()
@@ -418,7 +419,7 @@ mod tests {
     fn test_no_expected_type_no_score_boost() {
         let mut idx = make_index_with("org/cubewhy", "RandomClass", true);
         let ctx = make_ctx("RandomClass", None, vec![]);
-        let results = ConstructorProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = ConstructorProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         // score should be 0.0 (set by provider; Scorer adds on top in engine)
         assert!(
             results.iter().all(|c| c.score == 0.0),

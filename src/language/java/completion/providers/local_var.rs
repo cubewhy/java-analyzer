@@ -1,6 +1,6 @@
 use crate::{
     completion::{CandidateKind, CompletionCandidate, fuzzy, provider::CompletionProvider},
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -16,7 +16,7 @@ impl CompletionProvider for LocalVarProvider {
         &self,
         _scope: IndexScope,
         ctx: &SemanticContext,
-        _index: &mut WorkspaceIndex,
+        _index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
@@ -53,8 +53,9 @@ impl CompletionProvider for LocalVarProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
-    use crate::index::{IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{IndexScope, ModuleId, IndexView};
     use crate::semantic::context::{CursorLocation, LocalVar, SemanticContext};
     use crate::semantic::types::type_name::TypeName;
     use std::sync::Arc;
@@ -91,7 +92,7 @@ mod tests {
             "str",
             vec![("str", "java/lang/String"), ("aVar", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "str"));
         assert!(results.iter().all(|c| c.label.as_ref() != "aVar"));
     }
@@ -104,7 +105,7 @@ mod tests {
             "aV",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "aVar"));
         assert!(results.iter().all(|c| c.label.as_ref() != "str"));
     }
@@ -117,7 +118,7 @@ mod tests {
             "",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert_eq!(
             results.len(),
             2,
@@ -131,7 +132,7 @@ mod tests {
         let mut idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx("AVAR", vec![("aVar", "java/lang/String")]);
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "aVar"));
     }
 
@@ -154,7 +155,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside method arguments"
@@ -169,7 +170,7 @@ mod tests {
             "var",
             vec![("aVar", "java/lang/String"), ("str", "java/lang/String")],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "fuzzy: 'var' should match 'aVar': {:?}",
@@ -182,7 +183,7 @@ mod tests {
         let mut idx = WorkspaceIndex::new();
         let scope = root_scope();
         let ctx = make_ctx("xyz", vec![("aVar", "java/lang/String")]);
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(results.is_empty(), "no fuzzy match should return empty");
     }
 
@@ -208,7 +209,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(
             results.is_empty(),
             "LocalVarProvider should not return locals for MemberAccess: {:?}",
@@ -235,7 +236,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = LocalVarProvider.provide(scope, &ctx, &mut idx);
+        let results = LocalVarProvider.provide(scope, &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "aVar"),
             "should complete locals inside TypeAnnotation context due to parsing ambiguity"

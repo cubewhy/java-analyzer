@@ -1,7 +1,7 @@
 use crate::semantic::context::{SemanticContext, CursorLocation};
 use crate::semantic::types::TypeResolver;
 use crate::semantic::types::type_name::TypeName;
-use crate::index::{FieldSummary, IndexScope, MethodSummary, WorkspaceIndex};
+use crate::index::{FieldSummary, IndexView, MethodSummary};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -18,13 +18,12 @@ pub enum ResolvedSymbol {
 }
 
 pub struct SymbolResolver<'a> {
-    pub index: &'a WorkspaceIndex,
-    pub scope: IndexScope,
+    pub view: &'a IndexView,
 }
 
 impl<'a> SymbolResolver<'a> {
-    pub fn new(index: &'a WorkspaceIndex, scope: IndexScope) -> Self {
-        Self { index, scope }
+    pub fn new(view: &'a IndexView) -> Self {
+        Self { view }
     }
 
     pub fn resolve(&self, ctx: &SemanticContext) -> Option<ResolvedSymbol> {
@@ -94,7 +93,7 @@ impl<'a> SymbolResolver<'a> {
             return None;
         }
 
-        let (methods, fields) = self.index.collect_inherited_members(self.scope, owner);
+        let (methods, fields) = self.view.collect_inherited_members(owner);
 
         let named_candidates: Vec<&Arc<MethodSummary>> =
             methods.iter().filter(|m| m.name.as_ref() == name).collect();
@@ -108,7 +107,7 @@ impl<'a> SymbolResolver<'a> {
                 arg_texts.len() as i32
             };
 
-            let resolver = TypeResolver::new(self.index, self.scope);
+            let resolver = TypeResolver::new(self.view);
             let arg_types: Vec<TypeName> = arg_texts
                 .iter()
                 .map(|arg| {
@@ -204,7 +203,7 @@ impl<'a> SymbolResolver<'a> {
         }
 
         let as_internal = expr.replace('.', "/");
-        if self.index.get_class(self.scope, &as_internal).is_some() {
+        if self.view.get_class(&as_internal).is_some() {
             return Some(Arc::from(as_internal));
         }
 
@@ -245,7 +244,7 @@ impl<'a> SymbolResolver<'a> {
 
         for part in parts {
             tracing::debug!(owner = %current, field = %part, "resolve: chained field lookup");
-            let (_, fields) = self.index.collect_inherited_members(self.scope, &current);
+            let (_, fields) = self.view.collect_inherited_members(&current);
             let field = fields.iter().find(|f| f.name.as_ref() == part)?;
             current = descriptor_to_internal_arc(&field.descriptor)?;
         }
@@ -261,7 +260,7 @@ impl<'a> SymbolResolver<'a> {
         }
 
         let as_internal = name.replace('.', "/");
-        if let Some(c) = self.index.get_class(self.scope, &as_internal) {
+        if let Some(c) = self.view.get_class(&as_internal) {
             return Some(c.internal_name.clone());
         }
 
@@ -271,7 +270,7 @@ impl<'a> SymbolResolver<'a> {
             // 精确 import: ends with .ClassName
             if s.ends_with(&format!(".{}", name)) {
                 let internal = s.replace('.', "/");
-                if let Some(c) = self.index.get_class(self.scope, &internal) {
+                if let Some(c) = self.view.get_class(&internal) {
                     return Some(c.internal_name.clone());
                 }
             }
@@ -279,13 +278,13 @@ impl<'a> SymbolResolver<'a> {
             if s.ends_with(".*") {
                 let pkg = s.trim_end_matches(".*").replace('.', "/");
                 let candidate = format!("{}/{}", pkg, name);
-                if let Some(c) = self.index.get_class(self.scope, &candidate) {
+                if let Some(c) = self.view.get_class(&candidate) {
                     return Some(c.internal_name.clone());
                 }
             }
         }
         let java_lang = format!("java/lang/{}", name);
-        if let Some(c) = self.index.get_class(self.scope, &java_lang) {
+        if let Some(c) = self.view.get_class(&java_lang) {
             return Some(c.internal_name.clone());
         }
 
@@ -295,7 +294,7 @@ impl<'a> SymbolResolver<'a> {
         {
             let pkg = &enc[..slash];
             let candidate = format!("{}/{}", pkg, name);
-            if let Some(c) = self.index.get_class(self.scope, &candidate) {
+            if let Some(c) = self.view.get_class(&candidate) {
                 return Some(c.internal_name.clone());
             }
         }
@@ -412,7 +411,8 @@ mod tests {
             vec![],
         );
 
-        let resolver = SymbolResolver::new(&idx, scope);
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
         let sym_int = resolver.resolve(&ctx_int).unwrap();
         if let ResolvedSymbol::Method { summary, .. } = sym_int {
             assert_eq!(

@@ -1,6 +1,6 @@
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     language::java::completion::providers::name_suggestion::rules::{
         BASE_RULES, ParsedType, pluralize,
     },
@@ -21,7 +21,7 @@ impl CompletionProvider for NameSuggestionProvider {
         &self,
         _scope: IndexScope,
         ctx: &SemanticContext,
-        _index: &mut WorkspaceIndex,
+        _index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let type_name = match &ctx.location {
             CursorLocation::VariableName { type_name } => type_name.as_str(),
@@ -110,8 +110,9 @@ fn is_valid_identifier(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
-    use crate::index::{IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{IndexScope, ModuleId, IndexView};
     use crate::semantic::context::{CursorLocation, SemanticContext};
 
     fn root_scope() -> IndexScope {
@@ -135,7 +136,7 @@ mod tests {
     #[test]
     fn test_string_builder_suggestions() {
         let mut idx = WorkspaceIndex::new();
-        let results = NameSuggestionProvider.provide(root_scope(), &ctx("StringBuilder"), &mut idx);
+        let results = NameSuggestionProvider.provide(root_scope(), &ctx("StringBuilder"), &idx.view(root_scope()));
         let names: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             names.contains(&"sb"),
@@ -222,7 +223,7 @@ mod tests {
     #[test]
     fn test_empty_type_returns_empty() {
         let mut idx = WorkspaceIndex::new();
-        let results = NameSuggestionProvider.provide(root_scope(), &ctx(""), &mut idx);
+        let results = NameSuggestionProvider.provide(root_scope(), &ctx(""), &idx.view(root_scope()));
         assert!(results.is_empty());
     }
 

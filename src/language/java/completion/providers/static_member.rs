@@ -2,7 +2,7 @@ use crate::{
     completion::{
         CandidateKind, CompletionCandidate, provider::CompletionProvider, scorer::AccessFilter,
     },
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     language::java::render,
     semantic::{
         context::{CursorLocation, SemanticContext},
@@ -21,9 +21,9 @@ impl CompletionProvider for StaticMemberProvider {
 
     fn provide(
         &self,
-        scope: IndexScope,
+        _scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let (class_name_raw, member_prefix) = match &ctx.location {
             CursorLocation::StaticAccess {
@@ -45,11 +45,11 @@ impl CompletionProvider for StaticMemberProvider {
 
         // class_name_raw could be a simple name ("Main") or an internal name ("org/cubewhy/Main")
         // Try searching directly first, then search by simple name if it's not found
-        let class_meta = if let Some(m) = index.get_class(scope, class_name_raw) {
+        let class_meta = if let Some(m) = index.get_class(class_name_raw) {
             m
         } else {
             let mut candidates = index
-                .get_classes_by_simple_name(scope, class_name_raw)
+                .get_classes_by_simple_name(class_name_raw)
                 .to_vec();
             if candidates.is_empty() {
                 // class not in index at all — may be the currently-edited file;
@@ -93,7 +93,7 @@ impl CompletionProvider for StaticMemberProvider {
         let class_name = class_meta.internal_name.as_ref();
         let mut results = Vec::new();
 
-        let resolver = ContextualResolver::new(index, scope, ctx);
+        let resolver = ContextualResolver::new(index, ctx);
 
         for method in &class_meta.methods {
             if method.name.as_ref() == "<init>" || method.name.as_ref() == "<clinit>" {
@@ -131,7 +131,7 @@ impl CompletionProvider for StaticMemberProvider {
             );
         }
 
-        let resolver = ContextualResolver::new(index, scope, ctx);
+        let resolver = ContextualResolver::new(index, ctx);
 
         for field in &class_meta.fields {
             if field.access_flags & ACC_STATIC == 0 {
@@ -252,12 +252,13 @@ fn is_likely_static_receiver(expr: &str, ctx: &SemanticContext) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
 
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
-        WorkspaceIndex,
+        IndexView,
     };
     use crate::language::java::make_java_parser;
     use crate::language::{JavaLanguage, Language};
@@ -355,7 +356,7 @@ mod tests {
     fn test_static_access_by_simple_name() {
         let mut index = make_index_with_main();
         let ctx = static_ctx("Main", "fun", "org/cubewhy");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut index);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "func"),
             "should find func via simple name lookup: {:?}",
@@ -367,7 +368,7 @@ mod tests {
     fn test_static_access_by_internal_name() {
         let mut index = make_index_with_main();
         let ctx = static_ctx("org/cubewhy/Main", "fun", "org/cubewhy");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut index);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 
@@ -375,7 +376,7 @@ mod tests {
     fn test_static_access_empty_prefix_returns_all_static() {
         let mut index = make_index_with_main();
         let ctx = static_ctx("Main", "", "org/cubewhy");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut index);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         assert!(!results.is_empty());
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
@@ -449,7 +450,7 @@ mod tests {
         // Main.| from inside Main — private static field must appear
         let mut idx = make_index_with_self_class();
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
             "private static field should be visible when accessing own class: {:?}",
@@ -461,7 +462,7 @@ mod tests {
     fn test_self_class_static_public_field_visible() {
         let mut idx = make_index_with_self_class();
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "publicField"));
     }
 
@@ -501,7 +502,7 @@ mod tests {
             origin: ClassOrigin::Unknown,
         }]);
         let ctx = self_static_ctx("");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "staticF"),
             "static field must appear"
@@ -517,7 +518,7 @@ mod tests {
     fn test_self_class_prefix_filter() {
         let mut idx = make_index_with_self_class();
         let ctx = self_static_ctx("rand");
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
             "prefix 'rand' should match 'randomField': {:?}",
@@ -573,7 +574,7 @@ mod tests {
         )
         .with_class_members(members);
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
 
         assert!(
             results.iter().any(|c| c.label.as_ref() == "randomField"),
@@ -631,7 +632,7 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| c.label.as_ref() != "secret"),
             "private field of another class must NOT be visible: {:?}",
@@ -745,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_lowercase_class_name_static_access_via_provider() {
-        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, WorkspaceIndex};
+        use crate::index::{ClassMetadata, ClassOrigin, FieldSummary, IndexView};
         use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
 
         let mut idx = WorkspaceIndex::new();
@@ -787,7 +788,7 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "FIELD"),
             "lowercase class name static field should be found via provider, got: {:?}",
@@ -829,7 +830,7 @@ mod tests {
             vec![],
         );
 
-        let results = StaticMemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = StaticMemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "main"));
         assert!(
             results

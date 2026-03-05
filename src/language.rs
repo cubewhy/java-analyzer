@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     completion::CompletionCandidate,
     completion::provider::CompletionProvider,
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     lsp::semantic_tokens::{get_modifier_mask, get_type_idx},
     semantic::SemanticContext,
 };
@@ -88,7 +88,7 @@ pub trait Language: Send + Sync + std::fmt::Debug {
         &self,
         _ctx: &mut SemanticContext,
         _scope: IndexScope,
-        _index: &WorkspaceIndex,
+        _index: &IndexView,
     ) {
     }
 

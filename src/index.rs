@@ -1,11 +1,9 @@
-use dashmap::{DashMap, DashSet};
-use nucleo::Nucleo;
-use nucleo::pattern::{CaseMatching, Normalization};
+use dashmap::DashSet;
 use rayon::prelude::*;
 use rust_asm::class_reader::ClassReader;
 use rust_asm::class_reader::{AttributeInfo, ElementValue};
 use rust_asm::constant_pool::CpInfo;
-use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -17,14 +15,22 @@ use crate::semantic::types::{SymbolProvider, parse_return_type_from_descriptor};
 use crate::jvm::descriptor::consume_one_descriptor_type;
 
 pub mod cache;
+pub mod bucket;
 pub mod codebase;
 pub mod jdk;
+pub mod module_graph;
+pub mod module_index;
 pub mod source;
 pub mod scope;
+pub mod view;
 pub mod workspace_index;
 
-pub use scope::{IndexScope, ModuleId};
+pub use scope::{ClasspathId, IndexScope, ModuleId};
 pub use workspace_index::WorkspaceIndex;
+pub use bucket::BucketIndex;
+pub use module_graph::ModuleGraph;
+pub use module_index::{ClasspathIndex, ModuleIndex, ModuleQueryCache};
+pub use view::IndexView;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ClassMetadata {
@@ -794,6 +800,7 @@ pub(crate) fn intern_str(s: &str) -> Arc<str> {
 
 /// Lightweight index snapshot: a set of all JVM internal names.
 /// `Send + Sync + 'static` — safe to clone into `spawn_blocking` closures.
+#[derive(Clone)]
 pub struct NameTable(FxHashSet<Arc<str>>);
 
 impl NameTable {
@@ -832,110 +839,19 @@ impl NameTable {
     }
 }
 
-type MroCacheMap = dashmap::DashMap<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>;
-
 pub struct GlobalIndex {
-    /// Full internal name -> ClassMetadata
-    exact_match: FxHashMap<Arc<str>, Arc<ClassMetadata>>,
-    /// Simple class name -> Vec<internal name> (may have the same name in different packages)
-    simple_name_index: FxHashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
-    /// Package name -> Vec<internal name> (used for wildcard import expansion)
-    package_index: FxHashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
-    /// Source -> Vec<internal name> (used for deleting by file)
-    origin_index: FxHashMap<ClassOrigin, Vec<Arc<str>>>,
-    mro_cache: MroCacheMap,
-    /// Fuzzy matcher (using simple class name)
-    fuzzy_matcher: Nucleo<Arc<str>>,
+    bucket: BucketIndex,
 }
 
 impl GlobalIndex {
     pub fn new() -> Self {
-        let waker = Arc::new(|| {});
-
         Self {
-            exact_match: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher),
-            simple_name_index: FxHashMap::with_capacity_and_hasher(100_000, FxBuildHasher),
-            mro_cache: DashMap::new(),
-            package_index: FxHashMap::with_capacity_and_hasher(10_000, FxBuildHasher),
-            origin_index: FxHashMap::default(),
-            fuzzy_matcher: Nucleo::new(nucleo::Config::DEFAULT, waker, None, 1),
+            bucket: BucketIndex::new(),
         }
     }
 
     pub fn add_classes(&mut self, classes: Vec<ClassMetadata>) {
-        let injector = self.fuzzy_matcher.injector();
-        for mut class in classes {
-            class.name = intern_str(&class.name);
-            class.internal_name = intern_str(&class.internal_name);
-            if let Some(pkg) = &class.package {
-                class.package = Some(intern_str(pkg));
-            }
-            for m in &mut class.methods {
-                m.name = intern_str(&m.name);
-                if let Some(rt) = &m.return_type {
-                    m.return_type = Some(intern_str(rt));
-                }
-                if let Some(gs) = &m.generic_signature {
-                    m.generic_signature = Some(intern_str(gs));
-                }
-            }
-            for f in &mut class.fields {
-                f.name = intern_str(&f.name);
-                f.descriptor = intern_str(&f.descriptor);
-            }
-
-            match &class.origin {
-                ClassOrigin::Jar(j) => {
-                    class.origin = ClassOrigin::Jar(intern_str(j));
-                }
-                ClassOrigin::SourceFile(s) => {
-                    class.origin = ClassOrigin::SourceFile(intern_str(s));
-                }
-                ClassOrigin::ZipSource {
-                    zip_path,
-                    entry_name,
-                } => {
-                    class.origin = ClassOrigin::ZipSource {
-                        zip_path: intern_str(zip_path),
-                        entry_name: intern_str(entry_name),
-                    };
-                }
-                _ => {
-                    tracing::error!("Unknown class source found for class {}", class.name);
-                }
-            }
-
-            let internal = Arc::clone(&class.internal_name);
-            let simple = Arc::clone(&class.name);
-            let pkg = class.package.clone();
-            let origin = class.origin.clone();
-            let rc = Arc::new(class);
-
-            self.exact_match
-                .insert(Arc::clone(&internal), Arc::clone(&rc));
-            self.simple_name_index
-                .entry(Arc::clone(&simple))
-                .or_default()
-                .push(Arc::clone(&rc));
-
-            if let Some(p) = pkg {
-                self.package_index
-                    .entry(Arc::clone(&p))
-                    .or_default()
-                    .push(Arc::clone(&rc));
-            }
-
-            self.origin_index
-                .entry(origin)
-                .or_default()
-                .push(Arc::clone(&internal));
-
-            injector.push(simple, |item, cols| {
-                cols[0] = item.as_ref().into();
-            });
-        }
-
-        self.mro_cache.clear();
+        self.bucket.add_classes(classes);
     }
 
     /// Parse multiple JARs in parallel and write them to the index in batches
@@ -946,124 +862,41 @@ impl GlobalIndex {
     }
 
     pub fn remove_by_origin(&mut self, origin: &ClassOrigin) {
-        let internals = match self.origin_index.remove(origin) {
-            Some(v) => v,
-            None => return,
-        };
-
-        for internal in &internals {
-            if let Some(meta) = self.exact_match.remove(internal) {
-                // remove from simple_name_index
-                if let Some(v) = self.simple_name_index.get_mut(&meta.name) {
-                    v.retain(|meta| meta.internal_name != *internal);
-                    if v.is_empty() {
-                        self.simple_name_index.remove(&meta.name);
-                    }
-                }
-                // remove from package_index
-                if let Some(pkg) = &meta.package
-                    && let Some(v) = self.package_index.get_mut(pkg)
-                {
-                    v.retain(|meta| meta.internal_name != *internal);
-                    if v.is_empty() {
-                        self.package_index.remove(pkg);
-                    }
-                }
-            }
-        }
-
-        self.mro_cache.clear();
-        // fuzzy_matcher does not support deleting or rebuilding individual records.
-        self.rebuild_fuzzy();
+        self.bucket.remove_by_origin(origin);
     }
 
     pub fn update_source(&mut self, origin: ClassOrigin, classes: Vec<ClassMetadata>) {
-        let mut filtered = Vec::new();
-
-        for c in classes {
-            if let Some(existing) = self.exact_match.get(&c.internal_name)
-                && matches!(existing.origin, ClassOrigin::Jar(_))
-            {
-                // the LSP only trusts .class
-                tracing::warn!(class = %c.internal_name, "BLOCKED: Prevented source AST from corrupting bytecode index!");
-                continue;
-            }
-
-            filtered.push(c);
-        }
-
-        if filtered.is_empty() {
-            return;
-        }
-
-        self.remove_by_origin(&origin);
-        self.add_classes(filtered);
+        self.bucket.update_source(origin, classes);
     }
 
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
-        self.exact_match.get(internal_name).cloned()
+        self.bucket.get_class(internal_name)
     }
 
     /// Attempt to retrieve the source code format name; return None if the index does not exist.
     pub fn get_source_type_name(&self, internal: &str) -> Option<String> {
-        self.get_class(internal).map(|meta| meta.source_name())
+        self.bucket.get_source_type_name(internal)
     }
 
-    pub fn get_classes_by_simple_name(&self, simple_name: &str) -> &[Arc<ClassMetadata>] {
-        self.simple_name_index
-            .get(simple_name)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+    pub fn get_classes_by_simple_name(&self, simple_name: &str) -> Vec<Arc<ClassMetadata>> {
+        self.bucket.get_classes_by_simple_name(simple_name)
     }
 
     // 返回切片，生命周期与 &self 绑定
-    pub fn classes_in_package(&self, pkg: &str) -> &[Arc<ClassMetadata>] {
-        let normalized = pkg.replace('.', "/");
-        self.package_index
-            .get(normalized.as_str())
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
+    pub fn classes_in_package(&self, pkg: &str) -> Vec<Arc<ClassMetadata>> {
+        self.bucket.classes_in_package(pkg)
     }
 
     pub fn has_package(&self, pkg: &str) -> bool {
-        let normalized = pkg.replace('.', "/");
-        self.package_index.contains_key(normalized.as_str())
+        self.bucket.has_package(pkg)
     }
 
     pub fn has_classes_in_package(&self, pkg: &str) -> bool {
-        let normalized = pkg.replace('.', "/");
-        self.package_index
-            .get(normalized.as_str())
-            .is_some_and(|v| !v.is_empty())
+        self.bucket.has_classes_in_package(pkg)
     }
 
     pub fn resolve_imports(&self, imports: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {
-        let mut result = Vec::new();
-        for import in imports {
-            if import.ends_with(".*") {
-                // 通配符：展开整个包
-                let pkg = import.trim_end_matches(".*").replace('.', "/");
-                let classes = self.classes_in_package(&pkg);
-                tracing::debug!(
-                    import = import.as_ref(),
-                    pkg,
-                    count = classes.len(),
-                    "wildcard import expanded"
-                );
-                result.extend(self.classes_in_package(&pkg).iter().cloned());
-            } else {
-                // 精确 import：按内部名查
-                let internal = import.replace('.', "/");
-                tracing::debug!(import = import.as_ref(), internal, "exact import lookup");
-                if let Some(cls) = self.get_class(&internal) {
-                    tracing::debug!(internal, "exact import found");
-                    result.push(cls);
-                } else {
-                    tracing::debug!(internal, "exact import NOT FOUND");
-                }
-            }
-        }
-        result
+        self.bucket.resolve_imports(imports)
     }
 
     /// Collect all methods and fields visible on `class_internal`,
@@ -1074,155 +907,40 @@ impl GlobalIndex {
         &self,
         class_internal: &str,
     ) -> (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>) {
-        if let Some(cached) = self.mro_cache.get(class_internal) {
-            return cached.clone();
-        }
-
-        let mut methods: Vec<Arc<MethodSummary>> = Vec::new();
-        let mut fields: Vec<Arc<FieldSummary>> = Vec::new();
-        // Track seen method signatures to implement shadowing
-        let mut seen_methods: FxHashSet<(Arc<str>, Arc<str>)> = Default::default();
-        let mut seen_fields: FxHashSet<Arc<str>> = Default::default();
-        let mut seen_classes: FxHashSet<Arc<str>> = Default::default();
-        let mut queue: std::collections::VecDeque<Arc<str>> = Default::default();
-
-        queue.push_back(Arc::from(class_internal));
-
-        while let Some(internal) = queue.pop_front() {
-            if !seen_classes.insert(Arc::clone(&internal)) {
-                continue; // Prevent infinite loop on cyclic or fuzzy-resolved inheritance
-            }
-
-            let meta = match self.get_class(&internal) {
-                Some(m) => m,
-                None => continue,
-            };
-
-            // Add methods not yet shadowed by a subclass
-            for method in &meta.methods {
-                let key = (Arc::clone(&method.name), Arc::clone(&method.desc()));
-                if seen_methods.insert(key) {
-                    methods.push(Arc::new(method.clone()));
-                }
-            }
-            for field in &meta.fields {
-                if seen_fields.insert(Arc::clone(&field.name)) {
-                    fields.push(Arc::new(field.clone()));
-                }
-            }
-
-            // Enqueue super class
-            if let Some(ref super_name) = meta.super_name
-                && !super_name.is_empty()
-            {
-                queue.push_back(super_name.clone());
-            }
-            // Enqueue interfaces
-            for iface in &meta.interfaces {
-                if !iface.is_empty() {
-                    queue.push_back(Arc::clone(iface));
-                }
-            }
-        }
-        let result = (methods, fields);
-        self.mro_cache
-            .insert(Arc::from(class_internal), result.clone());
-
-        result
+        self.bucket.collect_inherited_members(class_internal)
     }
 
     /// Return all classes in the MRO (Method Resolution Order) of `class_internal`,
     /// starting from the class itself, walking super_name then interfaces.
     /// Classes not in the index are silently skipped.
     pub fn mro(&self, class_internal: &str) -> Vec<Arc<ClassMetadata>> {
-        let mut result = Vec::new();
-        let mut seen: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
-        let mut queue: std::collections::VecDeque<Arc<str>> = std::collections::VecDeque::new();
-
-        queue.push_back(Arc::from(class_internal));
-        while let Some(internal) = queue.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue; // avoid cycles (e.g. broken index)
-            }
-            let meta = match self.get_class(&internal) {
-                Some(m) => m,
-                None => continue,
-            };
-            // Enqueue super + interfaces before pushing meta,
-            // so we process in BFS order (subclass first)
-            if let Some(ref super_name) = meta.super_name
-                && !super_name.is_empty()
-            {
-                queue.push_back(super_name.clone());
-            }
-            for iface in &meta.interfaces {
-                if !iface.is_empty() {
-                    queue.push_back(iface.clone());
-                }
-            }
-            result.push(meta);
-        }
-        result
+        self.bucket.mro(class_internal)
     }
 
     pub fn fuzzy_autocomplete(&mut self, query: &str, limit: usize) -> Vec<Arc<str>> {
-        self.fuzzy_matcher.pattern.reparse(
-            0,
-            query,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            false,
-        );
-        let _status = self.fuzzy_matcher.tick(10);
-        let snapshot = self.fuzzy_matcher.snapshot();
-        let count = snapshot.matched_item_count();
-        let end_bound = (limit as u32).min(count);
-        snapshot
-            .matched_items(..end_bound)
-            .map(|item| Arc::clone(item.data))
-            .collect()
+        self.bucket.fuzzy_autocomplete(query, limit)
     }
 
     pub fn fuzzy_search_classes(&mut self, query: &str, limit: usize) -> Vec<Arc<ClassMetadata>> {
-        if query.is_empty() {
-            // Nucleo returns nothing for empty query; fall back to iter_all_classes
-            return self.exact_match.values().take(limit).cloned().collect();
-        }
-        let simple_names = self.fuzzy_autocomplete(query, limit);
-        simple_names
-            .into_iter()
-            .flat_map(|name| self.get_classes_by_simple_name(&name).iter().cloned())
-            .collect()
+        self.bucket.fuzzy_search_classes(query, limit)
     }
 
-    pub fn exact_match_keys(&self) -> impl Iterator<Item = &Arc<str>> {
-        self.exact_match.keys()
+    pub fn exact_match_keys(&self) -> Vec<Arc<str>> {
+        self.bucket.exact_match_keys()
     }
 
     pub fn class_count(&self) -> usize {
-        self.exact_match.len()
-    }
-
-    fn rebuild_fuzzy(&mut self) {
-        let waker = Arc::new(|| {});
-        self.fuzzy_matcher = Nucleo::new(nucleo::Config::DEFAULT, waker, None, 1);
-        let injector = self.fuzzy_matcher.injector();
-        for name in self.simple_name_index.keys() {
-            let n = Arc::clone(name);
-            injector.push(n, |item, cols| {
-                cols[0] = item.as_ref().into();
-            });
-        }
+        self.bucket.class_count()
     }
 
     /// Iterate through all indexed classes (used for scenarios requiring a full scan, such as import completion).
-    pub fn iter_all_classes(&self) -> impl Iterator<Item = &Arc<ClassMetadata>> {
-        self.exact_match.values()
+    pub fn iter_all_classes(&self) -> Vec<Arc<ClassMetadata>> {
+        self.bucket.iter_all_classes()
     }
 
     /// Build a lightweight snapshot for use across `spawn_blocking` boundaries.
     pub fn build_name_table(&self) -> Arc<NameTable> {
-        Arc::new(NameTable(self.exact_match.keys().cloned().collect()))
+        self.bucket.build_name_table()
     }
 }
 

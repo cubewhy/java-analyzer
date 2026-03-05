@@ -1,6 +1,6 @@
 use super::Language;
 use crate::completion::provider::CompletionProvider;
-use crate::index::{IndexScope, WorkspaceIndex};
+use crate::index::{IndexScope, IndexView};
 use crate::language::ClassifiedToken;
 use crate::language::java::completion::providers::{
     annotation::AnnotationProvider, constructor::ConstructorProvider,
@@ -133,10 +133,10 @@ impl Language for JavaLanguage {
     fn enrich_completion_context(
         &self,
         ctx: &mut SemanticContext,
-        scope: IndexScope,
-        index: &WorkspaceIndex,
+        _scope: IndexScope,
+        index: &IndexView,
     ) {
-        completion_context::ContextEnricher::new(index, scope).enrich(ctx);
+        completion_context::ContextEnricher::new(index).enrich(ctx);
     }
 
     fn supports_semantic_tokens(&self) -> bool {
@@ -303,7 +303,6 @@ impl JavaContextExtractor {
         &self.source
     }
 
-    /// 字节范围切片（tree-sitter 给出的 start/end 直接用）
     pub fn byte_slice(&self, start: usize, end: usize) -> &str {
         &self.source[start..end]
     }
@@ -312,7 +311,6 @@ impl JavaContextExtractor {
         node.utf8_text(self.source.as_bytes()).unwrap_or("")
     }
 
-    /// 判断当前 offset 是否在注释中
     pub fn is_in_comment(&self) -> bool {
         utils::is_cursor_in_comment_with_rope(&self.source, &self.rope, self.offset)
     }
@@ -329,7 +327,7 @@ impl JavaContextExtractor {
 
         let (location, query) = location::determine_location(&self, cursor_node, trigger_char);
 
-        // 如果 AST 解析失败，走注入路径
+        // If AST parsing fails, proceed with the injection path.
         let (location, query) = if matches!(location, CursorLocation::Unknown) {
             injection::inject_and_determine(&self, cursor_node, trigger_char)
                 .unwrap_or((location, query))
@@ -347,7 +345,7 @@ impl JavaContextExtractor {
         let type_ctx = SourceTypeCtx::new(
             enclosing_package.clone(),
             existing_imports.clone(),
-            None, // completion path 没有 index 快照，None 触发 hardcode java.lang fallback
+            None, // TODO: pass name_table there
         );
         let existing_static_imports = scope::extract_static_imports(&self, root);
         let current_class_members = cursor_node

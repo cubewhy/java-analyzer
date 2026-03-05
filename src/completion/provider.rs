@@ -1,5 +1,5 @@
 use super::candidate::CompletionCandidate;
-use crate::index::{IndexScope, WorkspaceIndex};
+use crate::index::{IndexScope, IndexView};
 use crate::semantic::SemanticContext;
 
 pub trait CompletionProvider: Send + Sync {
@@ -9,6 +9,6 @@ pub trait CompletionProvider: Send + Sync {
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate>;
 }

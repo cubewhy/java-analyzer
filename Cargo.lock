@@ -856,6 +856,7 @@ dependencies = [
  "nucleo",
  "nucleo-matcher",
  "once_cell",
+ "parking_lot",
  "postcard",
  "rayon",
  "ropey",

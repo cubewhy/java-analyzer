@@ -1,6 +1,6 @@
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -31,7 +31,7 @@ impl CompletionProvider for KeywordProvider {
         &self,
         _scope: IndexScope,
         ctx: &SemanticContext,
-        _index: &mut WorkspaceIndex,
+        _index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),

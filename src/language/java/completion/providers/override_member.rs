@@ -5,7 +5,7 @@ use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_STATIC};
 
 use crate::{
     completion::{CandidateKind, CompletionCandidate, provider::CompletionProvider},
-    index::{IndexScope, MethodSummary, WorkspaceIndex},
+    index::{IndexScope, MethodSummary, IndexView},
     semantic::{
         context::{CursorLocation, SemanticContext},
         types::ContextualResolver,
@@ -23,7 +23,7 @@ impl CompletionProvider for OverrideProvider {
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
@@ -48,11 +48,11 @@ impl CompletionProvider for OverrideProvider {
         // (name, descriptor) already appearing in this candidate list, to avoid the same method appearing repeatedly from multiple ancestors.
         let mut emitted: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
-        let mut mro = index.mro(scope, enclosing);
+        let mut mro = index.mro(enclosing);
         let has_object = mro
             .iter()
             .any(|c| c.internal_name.as_ref() == "java/lang/Object");
-        if !has_object && let Some(object_meta) = index.get_class(scope, "java/lang/Object") {
+        if !has_object && let Some(object_meta) = index.get_class("java/lang/Object") {
             mro.push(object_meta);
         }
 
@@ -92,7 +92,7 @@ impl CompletionProvider for OverrideProvider {
                     continue;
                 }
 
-                let resolver = ContextualResolver::new(index, scope, ctx);
+                let resolver = ContextualResolver::new(index, ctx);
 
                 let Some((params_source, return_type_source)) =
                     crate::semantic::types::parse_strict_method_signature(
@@ -128,11 +128,11 @@ impl OverrideProvider {
     fn collect_current_class_methods(
         &self,
         enclosing: &str,
-        index: &WorkspaceIndex,
-        scope: IndexScope,
+        index: &IndexView,
+        _scope: IndexScope,
     ) -> HashSet<(Arc<str>, Arc<str>)> {
         let mut set: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
-        if let Some(meta) = index.get_class(scope, enclosing) {
+        if let Some(meta) = index.get_class(enclosing) {
             for m in &meta.methods {
                 set.insert((Arc::clone(&m.name), m.desc()));
             }
@@ -180,8 +180,8 @@ fn build_candidate(
     params_source: &[String],
     defining_class_internal: &Arc<str>,
     ctx: &SemanticContext,
-    index: &WorkspaceIndex,
-    scope: IndexScope,
+    index: &IndexView,
+    _scope: IndexScope,
     source: &'static str,
 ) -> CompletionCandidate {
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC};
@@ -232,7 +232,7 @@ fn build_candidate(
 
     // 查找展示名称，如果因为某些极端的并发原因没查到，做个兜底展示
     let defining_class_display = index
-        .get_source_type_name(scope, defining_class_internal)
+        .get_source_type_name(defining_class_internal)
         .unwrap_or_else(|| defining_class_internal.replace(['/', '$'], "."));
 
     let detail = format!("@Override — {}", defining_class_display);
@@ -252,10 +252,11 @@ fn build_candidate(
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
-        WorkspaceIndex,
+        IndexView,
     };
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
@@ -378,7 +379,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
 
         assert!(
@@ -402,7 +403,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let candidate = results.iter().find(|c| c.label.contains("doWork")).unwrap();
 
         assert!(
@@ -426,7 +427,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let c = results.iter().find(|c| c.label.contains("doWork")).unwrap();
 
         assert!(c.insert_text.contains('{'), "should have opening brace");
@@ -453,7 +454,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
 
         assert!(
@@ -490,7 +491,7 @@ mod tests {
         let ctx = ctx_with_prefix("pub", "com/example/Child")
             .with_class_members(std::iter::once(source_member));
 
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.iter().all(|l| !l.contains("doWork")),
@@ -517,7 +518,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let compute_count = results
             .iter()
             .filter(|c| c.label.contains("compute"))
@@ -554,7 +555,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let compute: Vec<_> = results
             .iter()
             .filter(|c| c.label.contains("compute"))
@@ -589,7 +590,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("secret")),
             "private method must not appear"
@@ -610,7 +611,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("staticFn")),
             "static method must not appear"
@@ -631,7 +632,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("locked")),
             "final method must not appear"
@@ -652,7 +653,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("access$")),
             "synthetic method must not appear"
@@ -673,7 +674,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("<init>")),
             "<init> must not appear"
@@ -694,7 +695,7 @@ mod tests {
             None,
             vec![],
         );
-        assert!(OverrideProvider.provide(root_scope(), &ctx, &mut idx).is_empty());
+        assert!(OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope())).is_empty());
     }
 
     #[test]
@@ -711,7 +712,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pro", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let c = results.iter().find(|c| c.label.contains("hook")).unwrap();
         assert!(
             c.insert_text.contains("protected"),
@@ -740,7 +741,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.contains("ancientMethod")),
             "grandparent method should be overridable: {:?}",
@@ -769,7 +770,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let count = results
             .iter()
             .filter(|c| c.label.contains("shared"))
@@ -809,7 +810,7 @@ mod tests {
             None,
             vec![],
         );
-        assert!(OverrideProvider.provide(root_scope(), &ctx, &mut idx).is_empty());
+        assert!(OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope())).is_empty());
     }
 
     #[test]
@@ -842,7 +843,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Plain");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
 
         assert!(
@@ -887,7 +888,7 @@ mod tests {
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let count = results
             .iter()
             .filter(|c| c.label.contains("toString"))
@@ -958,7 +959,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/MyTask");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.iter().any(|l| l.contains("run")),
@@ -983,7 +984,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/HelloGreeter");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.contains("greet")),
             "default interface method should be overridable: {:?}",
@@ -1011,7 +1012,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/MyTask");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("run")),
             "already implemented run() must not appear: {:?}",
@@ -1036,7 +1037,7 @@ mod tests {
         let ctx = ctx_with_prefix("pub", "com/example/MyTask")
             .with_class_members(std::iter::once(source_member));
 
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.iter().all(|c| !c.label.contains("run")),
             "run() in source members must be excluded: {:?}",
@@ -1067,7 +1068,7 @@ mod tests {
         idx.add_classes(vec![cls]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Resource");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let labels: Vec<_> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(
             labels.iter().any(|l| l.contains("run")),
@@ -1096,7 +1097,7 @@ mod tests {
         idx.add_classes(vec![parent, child]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Child");
-        let results = OverrideProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = OverrideProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let count = results.iter().filter(|c| c.label.contains("run")).count();
         assert_eq!(
             count,

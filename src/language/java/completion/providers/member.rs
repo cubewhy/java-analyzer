@@ -7,7 +7,7 @@ use crate::language::java::render;
 use crate::semantic::context::{CursorLocation, SemanticContext};
 use crate::{
     completion::fuzzy,
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::types::{ContextualResolver, TypeResolver, type_name::TypeName},
 };
 use std::sync::Arc;
@@ -23,7 +23,7 @@ impl CompletionProvider for MemberProvider {
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let (receiver_type, member_prefix, receiver_expr) = match &ctx.location {
             CursorLocation::MemberAccess {
@@ -47,7 +47,7 @@ impl CompletionProvider for MemberProvider {
             "MemberProvider.provide"
         );
 
-        let resolver = ContextualResolver::new(index, scope, ctx);
+        let resolver = ContextualResolver::new(index, ctx);
 
         if receiver_expr == "this" {
             if ctx.is_in_static_context() {
@@ -70,7 +70,7 @@ impl CompletionProvider for MemberProvider {
                 //
                 // When source members have already covered the current class, the index entries of the current class will be skipped due to
                 // source_names deduplication, and will not be repeated.
-                let mro = index.mro(scope, enclosing);
+                let mro = index.mro(enclosing);
 
                 for (i, class_meta) in mro.iter().enumerate() {
                     let filter = if i == 0 {
@@ -237,11 +237,11 @@ impl CompletionProvider for MemberProvider {
         let prefix_lower = member_prefix.to_lowercase();
         let mut results = Vec::new();
 
-        let mro = index.mro(scope, base_class_internal);
+        let mro = index.mro(base_class_internal);
         let mut seen_methods = std::collections::HashSet::new();
         let mut seen_fields = std::collections::HashSet::new();
 
-        let resolver = ContextualResolver::new(index, scope, ctx);
+        let resolver = ContextualResolver::new(index, ctx);
 
         for class_meta in &mro {
             for method in &class_meta.methods {
@@ -398,7 +398,7 @@ impl MemberProvider {
 fn resolve_receiver_type(
     expr: &str,
     ctx: &SemanticContext,
-    index: &mut WorkspaceIndex,
+    index: &IndexView,
     scope: IndexScope,
 ) -> Option<Arc<str>> {
     tracing::debug!(
@@ -458,8 +458,8 @@ fn resolve_receiver_type(
 fn resolve_strict_class_name(
     simple_name: &str,
     ctx: &SemanticContext,
-    index: &mut WorkspaceIndex,
-    scope: IndexScope,
+    index: &IndexView,
+    _scope: IndexScope,
 ) -> Option<Arc<str>> {
     // Enclosing class
     if let Some(enclosing) = &ctx.enclosing_internal_name {
@@ -487,7 +487,7 @@ fn resolve_strict_class_name(
         if let Some(pkg) = imp.strip_suffix("/*") {
             let candidate = format!("{}/{}", pkg, simple_name);
 
-            if index.get_class(scope, &candidate).is_some() {
+            if index.get_class(&candidate).is_some() {
                 return Some(Arc::from(candidate));
             }
         }
@@ -500,14 +500,14 @@ fn resolve_strict_class_name(
         let pkg = &enclosing[..last_slash];
         let candidate = format!("{}/{}", pkg, simple_name);
 
-        if index.get_class(scope, &candidate).is_some() {
+        if index.get_class(&candidate).is_some() {
             return Some(Arc::from(candidate));
         }
     }
 
     // java.lang.*
     let java_lang_candidate = format!("java/lang/{}", simple_name);
-    if index.get_class(scope, &java_lang_candidate).is_some() {
+    if index.get_class(&java_lang_candidate).is_some() {
         return Some(Arc::from(java_lang_candidate));
     }
 
@@ -518,7 +518,7 @@ fn resolve_strict_class_name(
 fn resolve_complex_type_to_internal(
     ty: &str,
     ctx: &SemanticContext,
-    index: &mut WorkspaceIndex,
+    index: &IndexView,
     scope: IndexScope,
 ) -> Option<String> {
     let ty = ty.trim();
@@ -633,8 +633,8 @@ fn extract_constructor_class(expr: &str) -> Option<&str> {
 fn resolve_method_call_receiver(
     expr: &str,
     ctx: &SemanticContext,
-    index: &mut WorkspaceIndex,
-    scope: IndexScope,
+    index: &IndexView,
+    _scope: IndexScope,
 ) -> Option<Arc<str>> {
     // Must contain '(' and end with ')'
     let paren = expr.find('(')?;
@@ -654,7 +654,7 @@ fn resolve_method_call_receiver(
     };
 
     let enclosing = ctx.enclosing_internal_name.as_deref()?;
-    let resolver = TypeResolver::new(index, scope);
+    let resolver = TypeResolver::new(index);
     resolver
         .resolve_method_return(enclosing, method_name, arg_count, &[])
         .map(|i| TypeName::to_arc(&i))
@@ -665,12 +665,12 @@ fn resolve_method_call_receiver(
 fn resolve_simple_name_to_internal(
     simple: &str,
     ctx: &SemanticContext,
-    index: &mut WorkspaceIndex,
-    scope: IndexScope,
+    index: &IndexView,
+    _scope: IndexScope,
 ) -> Option<Arc<str>> {
     tracing::debug!(simple, "resolve_simple_name_to_internal called");
 
-    let imported = index.resolve_imports(scope, &ctx.existing_imports);
+    let imported = index.resolve_imports(&ctx.existing_imports);
     tracing::debug!(
         simple,
         imported = ?imported.iter().map(|m| format!("name={} internal={}", m.name, m.internal_name)).collect::<Vec<_>>(),
@@ -678,7 +678,7 @@ fn resolve_simple_name_to_internal(
     );
 
     if let Some(m) = imported.iter().find(|m| m.name.as_ref() == simple) {
-        let exists = index.get_class(scope, m.internal_name.as_ref()).is_some();
+        let exists = index.get_class(m.internal_name.as_ref()).is_some();
         tracing::debug!(
             internal = m.internal_name.as_ref(),
             exists,
@@ -688,14 +688,14 @@ fn resolve_simple_name_to_internal(
     }
 
     if let Some(pkg) = ctx.enclosing_package.as_deref() {
-        let classes = index.classes_in_package(scope, pkg);
+        let classes = index.classes_in_package(pkg);
         tracing::debug!(pkg, count = classes.len(), "same package classes");
         if let Some(m) = classes.iter().find(|m| m.name.as_ref() == simple) {
             return Some(Arc::clone(&m.internal_name));
         }
     }
 
-    let candidates = index.get_classes_by_simple_name(scope, simple);
+    let candidates = index.get_classes_by_simple_name(simple);
     tracing::debug!(simple, count = candidates.len(), internals = ?candidates.iter().map(|c| c.internal_name.as_ref()).collect::<Vec<_>>(), "global lookup");
 
     if !candidates.is_empty() {
@@ -706,13 +706,14 @@ fn resolve_simple_name_to_internal(
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use rust_asm::constants::{ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC};
     use std::sync::Arc;
 
     use crate::completion::provider::CompletionProvider;
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
-        WorkspaceIndex,
+        IndexView,
     };
     use crate::language::java::completion::providers::member::MemberProvider;
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
@@ -833,7 +834,7 @@ mod tests {
             vec![],
         );
         let ctx = ctx_with_type("com/example/Foo", "get");
-        let results = MemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "getValue"));
     }
 
@@ -848,7 +849,7 @@ mod tests {
             vec![],
         );
         let ctx = ctx_with_type("com/example/Foo", "");
-        let results = MemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert_eq!(results.len(), 2);
     }
 
@@ -874,7 +875,7 @@ mod tests {
         }]);
 
         let ctx = ctx_this("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "pr");
-        let results = MemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "pri"));
     }
 
@@ -890,7 +891,7 @@ mod tests {
         let ctx =
             ctx_this("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "").with_class_members(members);
 
-        let results = MemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "priFunc"));
         assert!(results.iter().any(|c| c.label.as_ref() == "fun"));
     }
@@ -914,7 +915,7 @@ mod tests {
             .with_class_members(members)
             .with_enclosing_member(Some(CurrentClassMember::Method(enclosing_method)));
 
-        let results = MemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.is_empty());
     }
 
@@ -967,7 +968,7 @@ mod tests {
             vec![],
         );
 
-        let results = MemberProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
     }
 }

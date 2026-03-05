@@ -6,7 +6,7 @@ use crate::index::{ClassMetadata, ClassOrigin};
 use crate::language::java::type_ctx::{SourceTypeCtx, build_java_descriptor};
 use crate::language::java::utils::extract_generic_signature;
 use crate::{
-    index::{IndexScope, WorkspaceIndex, intern_str},
+    index::{IndexView, intern_str},
     language::{
         java::{
             JavaContextExtractor, make_java_parser,
@@ -137,14 +137,13 @@ fn parse_java_class(
     })
 }
 
-/// AST-based 精准符号范围查找 (供 Goto Definition 使用)
+/// AST-based precise symbol range lookup
 pub fn find_symbol_range(
     content: &str,
     target_internal: &str,
     member_name: Option<&str>,
     descriptor: Option<&str>,
-    index: &WorkspaceIndex,
-    scope: IndexScope,
+    index: &IndexView,
 ) -> Option<tower_lsp::lsp_types::Range> {
     let ctx = JavaContextExtractor::for_indexing(content);
     let mut parser = make_java_parser();
@@ -152,7 +151,7 @@ pub fn find_symbol_range(
     let root = tree.root_node();
     let package = extract_package(&ctx, root);
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table(scope)));
+    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table()));
 
     let target_simple = target_internal
         .rsplit('/')

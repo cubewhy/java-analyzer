@@ -1,6 +1,6 @@
 use super::context::{LocalVar, SemanticContext};
 use crate::{
-    index::{IndexScope, MethodSummary, WorkspaceIndex},
+    index::{IndexView, MethodSummary},
     jvm::descriptor::{consume_one_descriptor_type, split_param_descriptors},
 };
 use self::generics::{split_internal_name, substitute_type, JvmType};
@@ -19,13 +19,12 @@ pub trait SymbolProvider {
 }
 
 pub struct TypeResolver<'idx> {
-    index: &'idx WorkspaceIndex,
-    scope: IndexScope,
+    view: &'idx IndexView,
 }
 
 impl<'idx> TypeResolver<'idx> {
-    pub fn new(index: &'idx WorkspaceIndex, scope: IndexScope) -> Self {
-        Self { index, scope }
+    pub fn new(view: &'idx IndexView) -> Self {
+        Self { view }
     }
 
     pub fn resolve(
@@ -108,7 +107,7 @@ impl<'idx> TypeResolver<'idx> {
         }
 
         if let Some(enc) = enclosing {
-            for class in self.index.mro(self.scope, enc) {
+            for class in self.view.mro(enc) {
                 if let Some(f) = class.fields.iter().find(|f| f.name.as_ref() == expr) {
                     if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
                         return Some(TypeName::new(ty));
@@ -120,7 +119,7 @@ impl<'idx> TypeResolver<'idx> {
         }
 
         // Class name (index lookup)
-        if self.index.get_class(self.scope, expr).is_some() {
+        if self.view.get_class(expr).is_some() {
             return Some(TypeName::new(expr));
         }
 
@@ -175,7 +174,7 @@ impl<'idx> TypeResolver<'idx> {
         let (base_receiver, _receiver_type_args) = split_internal_name(receiver_internal);
 
         // Use base_receiver to find MRO in the index
-        for class in self.index.mro(self.scope, base_receiver) {
+        for class in self.view.mro(base_receiver) {
             let candidates: Vec<&MethodSummary> = class
                 .methods
                 .iter()
@@ -334,7 +333,7 @@ impl<'idx> TypeResolver<'idx> {
                 } else {
                     // 字段读取
                     let mut found_field: Option<TypeName> = None;
-                    for class in self.index.mro(self.scope, receiver.as_str()) {
+                    for class in self.view.mro(receiver.as_str()) {
                         if let Some(f) =
                             class.fields.iter().find(|f| f.name.as_ref() == actual_name)
                         {
@@ -749,14 +748,13 @@ pub fn java_source_type_to_jvm_generic(
 /// 结合了全局索引和当前文件上下文的解析器。
 /// 严格遵守 Java 语言规范 (JLS) 的类型可见性规则，拒绝任何启发式猜测。
 pub struct ContextualResolver<'a> {
-    pub index: &'a WorkspaceIndex,
+    pub view: &'a IndexView,
     pub ctx: &'a SemanticContext,
-    pub scope: IndexScope,
 }
 
 impl<'a> ContextualResolver<'a> {
-    pub fn new(index: &'a WorkspaceIndex, scope: IndexScope, ctx: &'a SemanticContext) -> Self {
-        Self { index, ctx, scope }
+    pub fn new(view: &'a IndexView, ctx: &'a SemanticContext) -> Self {
+        Self { view, ctx }
     }
 }
 
@@ -765,7 +763,7 @@ impl<'a> SymbolProvider for ContextualResolver<'a> {
         // 1. 如果包含 '/'，说明它已经是来自字节码的内部名 (如 "java/util/List")
         // 直接向 index 查真理
         if type_name.contains('/') {
-            return self.index.get_source_type_name(self.scope, type_name);
+            return self.view.get_source_type_name(type_name);
         }
 
         // 2. 如果没有 '/'，说明它是来自当前文件 AST 的简单名 (如 "String", "List")
@@ -779,9 +777,7 @@ impl<'a> SymbolProvider for ContextualResolver<'a> {
                 && (imp.as_ref() == simple_name || imp.ends_with(&format!(".{}", simple_name)))
             {
                 let internal = imp.replace('.', "/");
-                if let Some(source_name) =
-                    self.index.get_source_type_name(self.scope, &internal)
-                {
+                if let Some(source_name) = self.view.get_source_type_name(&internal) {
                     return Some(source_name);
                 }
             }
@@ -791,9 +787,7 @@ impl<'a> SymbolProvider for ContextualResolver<'a> {
         // 优先使用 effective_package (AST 解析 > 路径推断)
         if let Some(pkg) = self.ctx.effective_package() {
             let internal = format!("{}/{}", pkg.replace('.', "/"), simple_name);
-            if let Some(source_name) =
-                self.index.get_source_type_name(self.scope, &internal)
-            {
+            if let Some(source_name) = self.view.get_source_type_name(&internal) {
                 return Some(source_name);
             }
         }
@@ -801,9 +795,7 @@ impl<'a> SymbolProvider for ContextualResolver<'a> {
         // 规则 C: Java 隐式导入 (java.lang.*)
         // 这是解决 String, Object 等核心类的关键
         let lang_internal = format!("java/lang/{}", simple_name);
-        if let Some(source_name) =
-            self.index.get_source_type_name(self.scope, &lang_internal)
-        {
+        if let Some(source_name) = self.view.get_source_type_name(&lang_internal) {
             return Some(source_name);
         }
 
@@ -813,9 +805,7 @@ impl<'a> SymbolProvider for ContextualResolver<'a> {
             if imp.ends_with(".*") {
                 let pkg = imp.trim_end_matches(".*").replace('.', "/");
                 let internal = format!("{}/{}", pkg, simple_name);
-                if let Some(source_name) =
-                    self.index.get_source_type_name(self.scope, &internal)
-                {
+                if let Some(source_name) = self.view.get_source_type_name(&internal) {
                     return Some(source_name);
                 }
             }
@@ -831,14 +821,14 @@ mod tests {
     use super::*;
     use crate::{
         completion::parser::parse_chain_from_expr,
-        index::{IndexScope, MethodParams, ModuleId, WorkspaceIndex},
+        index::{IndexScope, IndexView, MethodParams, ModuleId, WorkspaceIndex},
     };
 
     fn root_scope() -> IndexScope {
         IndexScope { module: ModuleId::ROOT }
     }
 
-    fn make_resolver() -> (WorkspaceIndex, Vec<LocalVar>) {
+    fn make_resolver() -> (IndexView, Vec<LocalVar>) {
         let idx = WorkspaceIndex::new();
         let locals = vec![
             LocalVar {
@@ -862,13 +852,13 @@ mod tests {
                 init_expr: None,
             },
         ];
-        (idx, locals)
+        (idx.view(root_scope()), locals)
     }
 
     #[test]
     fn test_variable_ending_with_l_not_confused_with_long() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         // "cl" ends with 'l', but it's a local variable and shouldn't be evaluated as long.
         assert_eq!(
             r.resolve("cl", &locals, None).as_deref(),
@@ -879,8 +869,8 @@ mod tests {
 
     #[test]
     fn test_variable_ending_with_f_not_confused_with_float() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         // "sf" ends with 'f', but it's a local variable
         assert_eq!(
             r.resolve("sf", &locals, None).as_deref(),
@@ -891,8 +881,8 @@ mod tests {
 
     #[test]
     fn test_long_literal_recognized() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(r.resolve("123L", &locals, None).as_deref(), Some("long"));
         assert_eq!(r.resolve("0l", &locals, None).as_deref(), Some("long"));
         assert_eq!(r.resolve("999L", &locals, None).as_deref(), Some("long"));
@@ -900,32 +890,32 @@ mod tests {
 
     #[test]
     fn test_float_literal_recognized() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(r.resolve("1.5f", &locals, None).as_deref(), Some("float"));
         assert_eq!(r.resolve("3F", &locals, None).as_deref(), Some("float"));
     }
 
     #[test]
     fn test_double_literal_recognized() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(r.resolve("1.5d", &locals, None).as_deref(), Some("double"));
         assert_eq!(r.resolve("3.14", &locals, None).as_deref(), Some("double"));
     }
 
     #[test]
     fn test_int_literal_recognized() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(r.resolve("42", &locals, None).as_deref(), Some("int"));
         assert_eq!(r.resolve("0", &locals, None).as_deref(), Some("int"));
     }
 
     #[test]
     fn test_string_literal_recognized() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(
             r.resolve("\"hello\"", &locals, None).as_deref(),
             Some("java/lang/String")
@@ -934,8 +924,8 @@ mod tests {
 
     #[test]
     fn test_this_resolves_to_enclosing() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         let enclosing = Arc::from("org/cubewhy/Main");
         assert_eq!(
             r.resolve("this", &locals, Some(&enclosing)).as_deref(),
@@ -945,8 +935,8 @@ mod tests {
 
     #[test]
     fn test_unknown_expr_returns_none() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(r.resolve("unknownVar", &locals, None), None);
     }
 
@@ -962,7 +952,8 @@ mod tests {
                 init_expr: None,
             },
         ];
-        let r = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let r = TypeResolver::new(&view);
         // "myL" ends with 'L' but is not a numeric prefix, and should not be recognized as long.
         assert_eq!(
             r.resolve("myL", &locals, None).as_deref(),
@@ -1012,7 +1003,8 @@ mod tests {
             origin: ClassOrigin::Unknown,
         }]);
 
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
 
         // arg_types: String + long → should match (String, J) → Main2
         let result = resolver.resolve_method_return(
@@ -1096,7 +1088,8 @@ mod tests {
             },
         ]);
 
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
         let enclosing = Arc::from("Main");
 
         // "getMain2()" → chain = [method("getMain2", 0)]
@@ -1139,7 +1132,8 @@ mod tests {
             origin: ClassOrigin::Unknown,
         }]);
 
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
 
         // 模拟推导 `myList.get()`
         // receiver 是我们带有泛型尾巴的完整形式
@@ -1160,7 +1154,7 @@ mod tests {
     #[test]
     fn test_resolve_variable_array_access() {
         // 模拟 `var c = arr[0];` 场景
-        let (idx, locals) = make_resolver();
+        let (view, locals) = make_resolver();
         let mut locals = locals;
         locals.push(LocalVar {
             name: Arc::from("arr"),
@@ -1168,7 +1162,7 @@ mod tests {
             init_expr: None,
         });
 
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let resolver = TypeResolver::new(&view);
         let result = resolver.resolve("arr[0]", &locals, None);
         assert_eq!(result.as_deref(), Some("char"));
     }
@@ -1202,7 +1196,8 @@ mod tests {
             origin: ClassOrigin::Unknown,
         }]);
 
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
         let enclosing = Arc::from("Main");
 
         // 模拟解析连缀调用 `getCharArr()[0]`
@@ -1216,7 +1211,8 @@ mod tests {
     #[test]
     fn test_scoring_system_primitive_match() {
         let idx = WorkspaceIndex::new();
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
         assert_eq!(resolver.score_single_descriptor("I", "int"), 10);
         assert_eq!(resolver.score_single_descriptor("I", "long"), -1);
     }
@@ -1247,7 +1243,8 @@ mod tests {
         };
 
         let idx = WorkspaceIndex::new();
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
         let candidates = vec![&method_object, &method_string];
 
         // 当传入 java/lang/String 时，println(String) 应该得到 10 分，println(Object) 得到 5 分。
@@ -1260,8 +1257,8 @@ mod tests {
 
     #[test]
     fn test_boolean_literal_recognized() {
-        let (idx, locals) = make_resolver();
-        let r = TypeResolver::new(&idx, root_scope());
+        let (view, locals) = make_resolver();
+        let r = TypeResolver::new(&view);
         assert_eq!(r.resolve("true", &locals, None).as_deref(), Some("boolean"));
         assert_eq!(
             r.resolve("false", &locals, None).as_deref(),
@@ -1272,7 +1269,8 @@ mod tests {
     #[test]
     fn test_scoring_system_autoboxing() {
         let idx = WorkspaceIndex::new();
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
 
         // Primitive expected, wrapper provided (Unboxing)
         assert_eq!(
@@ -1321,7 +1319,8 @@ mod tests {
         };
 
         let idx = WorkspaceIndex::new();
-        let resolver = TypeResolver::new(&idx, root_scope());
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
         let candidates = vec![&method_wrapper, &method_primitive];
 
         // 传入 int，应该优先匹配 process(int) 而不是 process(Integer)

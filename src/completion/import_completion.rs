@@ -3,14 +3,14 @@ use tower_lsp::lsp_types::*;
 
 use crate::completion::candidate::{CandidateKind, CompletionCandidate};
 use crate::completion::fuzzy::fuzzy_match;
-use crate::index::{IndexScope, WorkspaceIndex};
+use crate::index::{IndexScope, IndexView};
 
 /// Generates all candidate classes (classes + packages) based on the import prefix.
 /// This is the unified entry point for ImportProvider and PackageProvider in import scenarios.
 pub fn candidates_for_import(
     prefix: &str,
-    scope: IndexScope,
-    index: &WorkspaceIndex,
+    _scope: IndexScope,
+    index: &IndexView,
 ) -> Vec<CompletionCandidate> {
     if prefix.is_empty() {
         return vec![];
@@ -25,7 +25,7 @@ pub fn candidates_for_import(
             let mut results = Vec::new();
 
             // 当前包下的类，用 fuzzy 匹配
-            for meta in index.classes_in_package(scope, &internal_pkg) {
+            for meta in index.classes_in_package(&internal_pkg) {
                 if !name_prefix.is_empty() && fuzzy_match(name_prefix, &meta.name).is_none() {
                     continue;
                 }
@@ -51,7 +51,7 @@ pub fn candidates_for_import(
             let pkg_prefix_slash = format!("{}/", internal_pkg);
             let mut sub_packages: std::collections::BTreeSet<String> =
                 std::collections::BTreeSet::new();
-            for meta in index.iter_all_classes(scope) {
+            for meta in index.iter_all_classes() {
                 if let Some(pkg) = &meta.package
                     && pkg.starts_with(&pkg_prefix_slash)
                 {
@@ -86,7 +86,7 @@ pub fn candidates_for_import(
 
             // 顶层包
             let mut tops: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            for meta in index.iter_all_classes(scope) {
+            for meta in index.iter_all_classes() {
                 if let Some(pkg) = &meta.package {
                     let top = pkg.split('/').next().unwrap_or("");
                     if !top.is_empty() && fuzzy_match(prefix, top).is_some() {
@@ -109,9 +109,9 @@ pub fn candidates_for_import(
             }
 
             // 类名，fuzzy 匹配
-            for meta in index.iter_all_classes(scope).take(200) {
+            for meta in index.iter_all_classes().into_iter().take(200) {
                 if fuzzy_match(prefix, &meta.name).is_some() {
-                    let fqn = fqn_of_meta(meta);
+                    let fqn = fqn_of_meta(&meta);
                     let score = 55.0 + fuzzy_match(prefix, &meta.name).unwrap_or(0) as f32 * 0.01;
                     results.push(
                         CompletionCandidate::new(
@@ -196,7 +196,7 @@ pub fn make_import_text_edit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, IndexView, ModuleId, WorkspaceIndex};
     use rust_asm::constants::ACC_PUBLIC;
 
     fn root_scope() -> IndexScope {
@@ -214,6 +214,11 @@ mod tests {
             make_cls("java/lang", "String"),
         ]);
         idx
+    }
+
+    fn make_view() -> IndexView {
+        let idx = make_index();
+        idx.view(root_scope())
     }
 
     fn make_cls(pkg: &str, name: &str) -> ClassMetadata {
@@ -237,8 +242,8 @@ mod tests {
 
     #[test]
     fn test_candidates_pkg_dot_lists_classes_and_subpkgs() {
-        let idx = make_index();
-        let results = candidates_for_import("org.cubewhy.", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("org.cubewhy.", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
         assert!(labels.contains(&"org.cubewhy.RealMain"), "{:?}", labels);
@@ -247,24 +252,24 @@ mod tests {
 
     #[test]
     fn test_candidates_top_level_pkg() {
-        let idx = make_index();
-        let results = candidates_for_import("org", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("org", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org."), "{:?}", labels);
     }
 
     #[test]
     fn test_candidates_uppercase_matches_class() {
-        let idx = make_index();
-        let results = candidates_for_import("Array", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("Array", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"java.util.ArrayList"), "{:?}", labels);
     }
 
     #[test]
     fn test_candidates_subpkg_prefix() {
-        let idx = make_index();
-        let results = candidates_for_import("java.u", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("java.u", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"java.util."), "{:?}", labels);
         assert!(!labels.iter().any(|l| l.contains("lang")), "{:?}", labels);
@@ -272,8 +277,8 @@ mod tests {
 
     #[test]
     fn test_candidates_label_is_fqn_for_classes() {
-        let idx = make_index();
-        let results = candidates_for_import("org.cubewhy.Ma", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("org.cubewhy.Ma", root_scope(), &view);
         let main = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.Main")
@@ -284,8 +289,8 @@ mod tests {
 
     #[test]
     fn test_candidates_pkg_kind_is_package() {
-        let idx = make_index();
-        let results = candidates_for_import("org.cubewhy.", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("org.cubewhy.", root_scope(), &view);
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -359,8 +364,8 @@ mod tests {
 
     #[test]
     fn test_candidates_pkg_with_name_prefix() {
-        let idx = make_index();
-        let results = candidates_for_import("org.cubewhy.Ma", root_scope(), &idx);
+        let view = make_view();
+        let results = candidates_for_import("org.cubewhy.Ma", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
         // RealMain fuzzy 匹配 "Ma" 也应该出现（Ma 是 RealMain 的子序列）
@@ -369,18 +374,18 @@ mod tests {
 
     #[test]
     fn test_candidates_subpkg_fuzzy() {
-        let idx = make_index();
+        let view = make_view();
         // "utl" fuzzy 匹配 "utils"
-        let results = candidates_for_import("org.cubewhy.utl", root_scope(), &idx);
+        let results = candidates_for_import("org.cubewhy.utl", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.utils."), "{:?}", labels);
     }
 
     #[test]
     fn test_candidates_no_dot_fuzzy_class() {
-        let idx = make_index();
+        let view = make_view();
         // "real" fuzzy 匹配 "RealMain"
-        let results = candidates_for_import("real", root_scope(), &idx);
+        let results = candidates_for_import("real", root_scope(), &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.RealMain"), "{:?}", labels);
     }

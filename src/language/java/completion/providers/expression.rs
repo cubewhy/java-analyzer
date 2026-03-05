@@ -3,7 +3,7 @@ use crate::{
         CandidateKind, CompletionCandidate, fuzzy, import_utils::is_import_needed,
         provider::CompletionProvider,
     },
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 use std::sync::Arc;
@@ -17,9 +17,9 @@ impl CompletionProvider for ExpressionProvider {
 
     fn provide(
         &self,
-        scope: IndexScope,
+        _scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
@@ -40,7 +40,7 @@ impl CompletionProvider for ExpressionProvider {
         let mut results = Vec::new();
 
         // Classes that have already been imported in current context
-        let imported = index.resolve_imports(scope, &ctx.existing_imports);
+        let imported = index.resolve_imports(&ctx.existing_imports);
         for meta in &imported {
             // Theoretically, it is not possible to import nested classes.
             if meta.inner_class_of.is_some() {
@@ -74,7 +74,7 @@ impl CompletionProvider for ExpressionProvider {
 
         // Same package
         if let Some(pkg) = current_pkg {
-            for meta in index.classes_in_package(scope, pkg) {
+            for meta in index.classes_in_package(pkg) {
                 if meta.inner_class_of.is_some() {
                     continue;
                 }
@@ -89,7 +89,7 @@ impl CompletionProvider for ExpressionProvider {
                         None => continue,
                     }
                 };
-                let fqn = fqn_of(meta);
+                let fqn = fqn_of(&meta);
                 results.push(
                     CompletionCandidate::new(
                         Arc::clone(&meta.name),
@@ -105,7 +105,7 @@ impl CompletionProvider for ExpressionProvider {
 
         // Other classes (global, require auto-import)
         if !prefix.is_empty() {
-            for meta in index.iter_all_classes(scope) {
+            for meta in index.iter_all_classes() {
                 // skip nested classes
                 if meta.inner_class_of.is_some() {
                     continue;
@@ -117,7 +117,7 @@ impl CompletionProvider for ExpressionProvider {
                     Some(s) => s,
                     None => continue,
                 };
-                let fqn = fqn_of(meta);
+                let fqn = fqn_of(&meta);
 
                 let boost = calculate_boost(meta.package.as_deref());
                 let base_score = 40.0;
@@ -182,10 +182,11 @@ fn fqn_of(meta: &crate::index::ClassMetadata) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use rust_asm::constants::ACC_PUBLIC;
 
     use super::*;
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, IndexView};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use std::sync::Arc;
 
@@ -246,7 +247,7 @@ mod tests {
         let mut index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         // com/other/Main should appear (with auto-import)
         assert!(
             results.iter().any(|c| {
@@ -261,7 +262,7 @@ mod tests {
         // The class itself should appear in the completion (this can be used for type annotations, static access, etc.)
         let mut index = make_index();
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Main"),
             "enclosing class itself should appear as a completion candidate: {:?}",
@@ -274,7 +275,7 @@ mod tests {
         let mut index = make_index();
         index.add_classes(vec![make_cls("com/other", "Main")]);
         let ctx = ctx("Main", "Main", "org/cubewhy", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
         // Both Main (no import) and com/other/Main (requires import) in the same package should appear.
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Main"),
@@ -297,7 +298,7 @@ mod tests {
         index.add_classes(vec![nested_cls, make_cls("java/util", "Map")]);
 
         let ctx = ctx("Map", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
 
         // Map 应该出现，但 Map$Entry 不应该出现
         assert!(results.iter().any(|c| c.label.as_ref() == "Map"));
@@ -313,7 +314,7 @@ mod tests {
         ]);
 
         let ctx = ctx("List", "Test", "app", vec![]);
-        let results = ExpressionProvider.provide(root_scope(), &ctx, &mut index);
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
 
         // 验证两个 List 都存在
         let list_candidates: Vec<_> = results

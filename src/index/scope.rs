@@ -9,3 +9,14 @@ impl ModuleId {
 pub struct IndexScope {
     pub module: ModuleId,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ClasspathId {
+    Main,
+}
+
+impl Default for ClasspathId {
+    fn default() -> Self {
+        ClasspathId::Main
+    }
+}

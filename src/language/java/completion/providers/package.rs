@@ -1,6 +1,6 @@
 use crate::{
     completion::{CompletionCandidate, provider::CompletionProvider},
-    index::{IndexScope, WorkspaceIndex},
+    index::{IndexScope, IndexView},
     semantic::context::{CursorLocation, SemanticContext},
 };
 
@@ -15,7 +15,7 @@ impl CompletionProvider for PackageProvider {
         &self,
         scope: IndexScope,
         ctx: &SemanticContext,
-        index: &mut WorkspaceIndex,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         match &ctx.location {
             CursorLocation::Import { prefix } => {
@@ -58,9 +58,10 @@ impl CompletionProvider for PackageProvider {
 
 #[cfg(test)]
 mod tests {
+    use crate::index::WorkspaceIndex;
     use super::*;
     use crate::completion::CandidateKind;
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId, IndexView};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
@@ -130,7 +131,7 @@ mod tests {
     fn test_top_level_package_no_dot() {
         let mut idx = make_index();
         let scope = IndexScope { module: ModuleId::ROOT };
-        let results = PackageProvider.provide(scope, &import_ctx("org"), &mut idx);
+        let results = PackageProvider.provide(scope, &import_ctx("org"), &idx.view(root_scope()));
         let org = results.iter().find(|c| c.label.as_ref() == "org.");
         assert!(
             org.is_some(),
@@ -143,14 +144,14 @@ mod tests {
     #[test]
     fn test_expression_no_dot_no_package_completion() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &expr_ctx("Main"), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &expr_ctx("Main"), &idx.view(root_scope()));
         assert!(results.is_empty(), "no dot = no package completion");
     }
 
     #[test]
     fn test_empty_prefix_no_crash() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx(""), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx(""), &idx.view(root_scope()));
         assert!(results.is_empty());
     }
 
@@ -172,7 +173,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.is_empty(),
             "String.| should not trigger package completion"
@@ -182,7 +183,7 @@ mod tests {
     #[test]
     fn test_top_level_package_label_has_dot() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org"), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org"), &idx.view(root_scope()));
         let org = results.iter().find(|c| c.label.as_ref() == "org.").unwrap();
         assert_eq!(org.insert_text, "org.");
     }
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn test_import_pkg_dot_lists_classes() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &idx.view(root_scope()));
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
         assert!(labels.contains(&"org.cubewhy.Main2"), "{:?}", labels);
@@ -199,7 +200,7 @@ mod tests {
     #[test]
     fn test_import_pkg_dot_lists_sub_packages() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &idx.view(root_scope()));
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.utils."), "{:?}", labels);
     }
@@ -207,7 +208,7 @@ mod tests {
     #[test]
     fn test_import_pkg_with_name_prefix() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy.Ma"), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy.Ma"), &idx.view(root_scope()));
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
         assert!(labels.contains(&"org.cubewhy.Main"), "{:?}", labels);
         assert!(labels.contains(&"org.cubewhy.Main2"), "{:?}", labels);
@@ -217,7 +218,7 @@ mod tests {
     #[test]
     fn test_import_insert_text_is_fqn() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy.Ma"), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy.Ma"), &idx.view(root_scope()));
         let main = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.Main")
@@ -228,7 +229,7 @@ mod tests {
     #[test]
     fn test_sub_package_insert_text_ends_with_dot() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &idx.view(root_scope()));
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -239,7 +240,7 @@ mod tests {
     #[test]
     fn test_sub_package_kind_is_package() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &idx.view(root_scope()));
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -250,7 +251,7 @@ mod tests {
     #[test]
     fn test_import_no_dot_returns_top_level_packages() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("Main"), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("Main"), &idx.view(root_scope()));
         // 大写开头不匹配包名，但现在 candidates_for_import 会匹配类名
         // PackageProvider 在 Import 场景下直接转发给 candidates_for_import
         // "Main" 大写开头 → 返回类，不返回包
@@ -264,7 +265,7 @@ mod tests {
     #[test]
     fn test_sub_package_label_is_full_path() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &import_ctx("org.cubewhy."), &idx.view(root_scope()));
         let utils = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.utils.")
@@ -275,14 +276,14 @@ mod tests {
     #[test]
     fn test_expression_with_dot_triggers() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &expr_ctx("org.cubewhy."), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &expr_ctx("org.cubewhy."), &idx.view(root_scope()));
         assert!(!results.is_empty(), "prefix with dot should trigger");
     }
 
     #[test]
     fn test_expression_no_dot_no_completion() {
         let mut idx = make_index();
-        let results = PackageProvider.provide(root_scope(), &expr_ctx("Main"), &mut idx);
+        let results = PackageProvider.provide(root_scope(), &expr_ctx("Main"), &idx.view(root_scope()));
         assert!(results.is_empty(), "no dot = no package completion");
     }
 
@@ -303,7 +304,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results.is_empty(),
             "single uppercase segment should not trigger package completion"
@@ -328,7 +329,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         let main = results
             .iter()
             .find(|c| c.label.as_ref() == "org.cubewhy.Main")
@@ -356,7 +357,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             !results.is_empty(),
             "org.cubewhy.| should trigger package completion: {:?}",
@@ -389,7 +390,7 @@ mod tests {
             None,
             vec![],
         );
-        let results = PackageProvider.provide(root_scope(), &ctx, &mut idx);
+        let results = PackageProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(
             results
                 .iter()
