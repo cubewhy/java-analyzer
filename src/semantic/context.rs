@@ -65,6 +65,8 @@ pub enum CursorLocation {
     },
     /// `someObj.|` or `someObj.prefix|`
     MemberAccess {
+        /// The inferred semantic type of the accessed object, preserving generics/arrays when known.
+        receiver_semantic_type: Option<TypeName>,
         /// The inferred type of the accessed object (internal name, such as "java/lang/String")
         receiver_type: Option<Arc<str>>,
         /// Prefix of members entered before the cursor

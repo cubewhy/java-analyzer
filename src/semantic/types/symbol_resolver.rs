@@ -376,6 +376,7 @@ mod tests {
         // 测试 1: 解析 System.out.println(1) 应该落在 (I)V
         let ctx_int = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: Some(Arc::from("java/io/PrintStream")),
                 receiver_expr: "out".to_string(),
                 member_prefix: "println".to_string(),
@@ -405,6 +406,7 @@ mod tests {
         // 测试 2: 解析 System.out.println("hello") 应该落在 (Ljava/lang/String;)V
         let ctx_str = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: Some(Arc::from("java/io/PrintStream")),
                 receiver_expr: "out".to_string(),
                 member_prefix: "println".to_string(),

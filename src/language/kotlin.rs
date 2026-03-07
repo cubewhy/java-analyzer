@@ -262,6 +262,7 @@ impl<'s> KotlinContextExtractor<'s> {
 
         (
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: member_prefix.clone(),
                 receiver_expr,
@@ -295,6 +296,7 @@ impl<'s> KotlinContextExtractor<'s> {
             } else {
                 (
                     CursorLocation::MemberAccess {
+                        receiver_semantic_type: None,
                         receiver_type: None,
                         member_prefix: member_prefix.clone(),
                         receiver_expr: receiver.to_string(),

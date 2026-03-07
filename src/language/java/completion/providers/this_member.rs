@@ -492,6 +492,7 @@ mod tests {
         let idx = WorkspaceIndex::new();
         let mut ctx = ctx_with_members_static("", members, enclosing);
         ctx.location = CursorLocation::MemberAccess {
+            receiver_semantic_type: None,
             receiver_type: None,
             member_prefix: "fi".to_string(),
             receiver_expr: "this".to_string(),

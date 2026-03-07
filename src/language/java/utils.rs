@@ -114,11 +114,13 @@ pub(crate) fn strip_sentinel(s: &str) -> String {
 pub(crate) fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocation {
     match loc {
         CursorLocation::MemberAccess {
+            receiver_semantic_type,
             receiver_type,
             member_prefix,
             receiver_expr,
             arguments,
         } => CursorLocation::MemberAccess {
+            receiver_semantic_type,
             receiver_type,
             member_prefix: strip_sentinel(&member_prefix),
             receiver_expr: strip_sentinel(&receiver_expr),

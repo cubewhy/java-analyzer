@@ -221,6 +221,7 @@ fn handle_member_access(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
             if arguments.is_some() {
                 return (
                     CursorLocation::MemberAccess {
+                        receiver_semantic_type: None,
                         receiver_type: None,
                         member_prefix: clean.clone(),
                         receiver_expr: String::new(), // 空字符串代表隐式 this
@@ -301,6 +302,7 @@ fn handle_member_access(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
 
     (
         CursorLocation::MemberAccess {
+            receiver_semantic_type: None,
             receiver_type: None,
             member_prefix: member_prefix.clone(),
             receiver_expr,
@@ -475,6 +477,7 @@ fn handle_argument_list(ctx: &JavaContextExtractor, node: Node) -> (CursorLocati
     if let Some((receiver_expr, member_prefix)) = detect_member_access_in_arg_list(ctx, node) {
         return (
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: member_prefix.clone(),
                 receiver_expr,

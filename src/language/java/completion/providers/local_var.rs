@@ -194,6 +194,7 @@ mod tests {
         let scope = root_scope();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "cl".to_string(),

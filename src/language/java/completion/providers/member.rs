@@ -25,13 +25,15 @@ impl CompletionProvider for MemberProvider {
         ctx: &SemanticContext,
         index: &IndexView,
     ) -> Vec<CompletionCandidate> {
-        let (receiver_type, member_prefix, receiver_expr) = match &ctx.location {
+        let (receiver_semantic_type, receiver_type, member_prefix, receiver_expr) = match &ctx.location {
             CursorLocation::MemberAccess {
+                receiver_semantic_type,
                 receiver_type,
                 member_prefix,
                 receiver_expr,
                 ..
             } => (
+                receiver_semantic_type.as_ref(),
                 receiver_type.as_ref(),
                 member_prefix.as_str(),
                 receiver_expr.as_str(),
@@ -199,13 +201,13 @@ impl CompletionProvider for MemberProvider {
             return results;
         }
 
-        let resolved: Option<Arc<str>> = receiver_type.map(Arc::clone).or_else(|| {
-            let r = resolve_receiver_type(receiver_expr, ctx, index, scope);
-            tracing::debug!(?r, receiver_expr, "resolve_receiver_type result");
-            r
+        let resolved_semantic = receiver_semantic_type.cloned().or_else(|| {
+            receiver_type
+                .map(|s| TypeName::new(Arc::clone(s)))
+                .or_else(|| resolve_receiver_type(receiver_expr, ctx, index, scope).map(TypeName::from))
         });
 
-        let class_internal = match resolved.as_deref() {
+        let resolved = match resolved_semantic {
             Some(t) => t,
             None => {
                 tracing::debug!(
@@ -216,8 +218,8 @@ impl CompletionProvider for MemberProvider {
             }
         };
 
-        // type with generics removed. e.g List<String> -> List
-        let base_class_internal = class_internal.split('<').next().unwrap_or(class_internal);
+        let class_internal = resolved.to_internal_with_generics();
+        let base_class_internal = resolved.erased_internal();
 
         tracing::debug!(
             base_class_internal,
@@ -267,12 +269,12 @@ impl CompletionProvider for MemberProvider {
                 let kind = if is_static {
                     CandidateKind::StaticMethod {
                         descriptor: method.desc(),
-                        defining_class: Arc::from(class_internal),
+                        defining_class: Arc::from(class_internal.as_str()),
                     }
                 } else {
                     CandidateKind::Method {
                         descriptor: method.desc(),
-                        defining_class: Arc::from(class_internal),
+                        defining_class: Arc::from(class_internal.as_str()),
                     }
                 };
                 results.push(
@@ -287,7 +289,7 @@ impl CompletionProvider for MemberProvider {
                         self.name(),
                     )
                     .with_detail(render::method_detail(
-                        class_internal,
+                        &class_internal,
                         class_meta,
                         method,
                         &resolver,
@@ -309,12 +311,12 @@ impl CompletionProvider for MemberProvider {
                 let kind = if is_static {
                     CandidateKind::StaticField {
                         descriptor: Arc::clone(&field.descriptor),
-                        defining_class: Arc::from(class_internal),
+                        defining_class: Arc::from(class_internal.as_str()),
                     }
                 } else {
                     CandidateKind::Field {
                         descriptor: Arc::clone(&field.descriptor),
-                        defining_class: Arc::from(class_internal),
+                        defining_class: Arc::from(class_internal.as_str()),
                     }
                 };
                 results.push(
@@ -325,7 +327,7 @@ impl CompletionProvider for MemberProvider {
                         self.name(),
                     )
                     .with_detail(render::field_detail(
-                        class_internal,
+                        &class_internal,
                         class_meta,
                         field,
                         &resolver,
@@ -696,7 +698,7 @@ mod tests {
     };
     use crate::language::java::completion::providers::member::MemberProvider;
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
-    use crate::semantic::types::parse_return_type_from_descriptor;
+    use crate::semantic::types::{parse_return_type_from_descriptor, type_name::TypeName};
 
     fn root_scope() -> IndexScope {
         IndexScope {
@@ -767,7 +769,30 @@ mod tests {
     fn ctx_with_type(receiver_internal: &str, prefix: &str) -> SemanticContext {
         SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: Some(Arc::from(receiver_internal)),
+                member_prefix: prefix.to_string(),
+                receiver_expr: "someObj".to_string(),
+                arguments: None,
+            },
+            prefix,
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        )
+    }
+
+    fn ctx_with_semantic_and_erased(
+        semantic_receiver: TypeName,
+        erased_receiver: &str,
+        prefix: &str,
+    ) -> SemanticContext {
+        SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(semantic_receiver),
+                receiver_type: Some(Arc::from(erased_receiver)),
                 member_prefix: prefix.to_string(),
                 receiver_expr: "someObj".to_string(),
                 arguments: None,
@@ -789,6 +814,7 @@ mod tests {
     ) -> SemanticContext {
         SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: prefix.to_string(),
                 receiver_expr: "this".to_string(),
@@ -936,6 +962,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "getMain2()".to_string(),
@@ -951,5 +978,73 @@ mod tests {
 
         let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
         assert!(results.iter().any(|c| c.label.as_ref() == "func"));
+    }
+
+    #[test]
+    fn test_member_provider_prefers_semantic_receiver_type() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("com/example")),
+                name: Arc::from("Legacy"),
+                internal_name: Arc::from("com/example/Legacy"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![make_method("legacyOnly", "()V", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("com/example")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/util/List"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![make_method("listOnly", "()V", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = ctx_with_semantic_and_erased(
+            TypeName::with_args("java/util/List", vec![TypeName::new("java/lang/String")]),
+            "com/example/Legacy",
+            "",
+        );
+
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        assert!(results.iter().any(|c| c.label.as_ref() == "listOnly"));
+        assert!(!results.iter().any(|c| c.label.as_ref() == "legacyOnly"));
+    }
+
+    #[test]
+    fn test_member_provider_falls_back_to_legacy_receiver_type() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("com/example")),
+            name: Arc::from("Legacy"),
+            internal_name: Arc::from("com/example/Legacy"),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![make_method("legacyOnly", "()V", ACC_PUBLIC, false)],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+
+        let ctx = ctx_with_type("com/example/Legacy", "");
+        let results = MemberProvider.provide(root_scope(), &ctx, &idx.view(root_scope()));
+        assert!(results.iter().any(|c| c.label.as_ref() == "legacyOnly"));
     }
 }

@@ -428,6 +428,7 @@ mod tests {
         let idx = WorkspaceIndex::new();
         let mut c = ctx("class", Some("file:///Foo.java"), None, None);
         c.location = CursorLocation::MemberAccess {
+            receiver_semantic_type: None,
             receiver_type: None,
             member_prefix: "class".to_string(),
             receiver_expr: "obj".to_string(),

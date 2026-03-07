@@ -58,6 +58,7 @@ impl<'a> ContextEnricher<'a> {
 
         if let CursorLocation::MemberAccess { .. } = &ctx.location
             && let CursorLocation::MemberAccess {
+                receiver_semantic_type,
                 receiver_type,
                 receiver_expr,
                 ..
@@ -107,20 +108,29 @@ impl<'a> ContextEnricher<'a> {
 
                 tracing::debug!(?resolved, "enrich_context: resolved before final match");
 
-                // If the result is a simple name (without '/'), it needs to be further parsed into an internal name.
-                *receiver_type = match resolved {
+                // Normalize to a canonical semantic receiver type before writing either field.
+                // If the result is a simple name (without '/'), try strict expansion.
+                let resolved_semantic = match resolved {
                     None => {
                         tracing::debug!("enrich_context: final match -> None");
                         None
                     }
-                    Some(ref ty) if ty.contains_slash() => Some(Arc::from(ty.erased_internal())),
+                    Some(ty) if ty.contains_slash() => Some(ty),
                     Some(ty) => {
                         let ty_str = ty.erased_internal_with_arrays();
                         let r = type_ctx.resolve_type_name_strict(&ty_str);
                         tracing::debug!(?r, ?ty, "enrich_context: final match -> resolve strict");
-                        r.map(|t| Arc::from(t.erased_internal()))
+                        r
                     }
                 };
+
+                if receiver_semantic_type.is_none() {
+                    *receiver_semantic_type = resolved_semantic.clone();
+                }
+
+                *receiver_type = resolved_semantic
+                    .as_ref()
+                    .map(|t| Arc::from(t.erased_internal()));
             }
 
         // receiver_expr 是已知包名 -> 转成 Import
@@ -617,6 +627,7 @@ mod tests {
         ));
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "f".to_string(),
                 receiver_expr: "cl".to_string(),
@@ -636,7 +647,17 @@ mod tests {
         )
         .with_extension(type_ctx);
         ContextEnricher::new(&view).enrich(&mut ctx);
-        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+        if let CursorLocation::MemberAccess {
+            receiver_semantic_type,
+            receiver_type,
+            ..
+        } = &ctx.location
+        {
+            assert_eq!(
+                receiver_semantic_type.as_ref().map(|t| t.erased_internal()),
+                Some("org/cubewhy/RandomClass"),
+                "receiver_semantic_type should preserve resolved TypeName"
+            );
             assert_eq!(
                 receiver_type.as_deref(),
                 Some("org/cubewhy/RandomClass"),
@@ -660,6 +681,7 @@ mod tests {
         ));
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "cl".to_string(),
@@ -678,8 +700,67 @@ mod tests {
         )
         .with_extension(type_ctx);
         ContextEnricher::new(&view).enrich(&mut ctx);
-        if let CursorLocation::MemberAccess { receiver_type, .. } = &ctx.location {
+        if let CursorLocation::MemberAccess {
+            receiver_semantic_type,
+            receiver_type,
+            ..
+        } = &ctx.location
+        {
+            assert_eq!(
+                receiver_semantic_type.as_ref().map(|t| t.erased_internal()),
+                Some("org/cubewhy/RandomClass")
+            );
             assert_eq!(receiver_type.as_deref(), Some("org/cubewhy/RandomClass"),);
+        }
+    }
+
+    #[test]
+    fn test_enrich_context_does_not_overwrite_existing_receiver_semantic_type() {
+        let idx = make_index_with_random_class();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy/a")),
+            vec!["org.cubewhy.RandomClass".into()],
+            Some(name_table),
+        ));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(TypeName::new("java/lang/Object")),
+                receiver_type: None,
+                member_prefix: "f".to_string(),
+                receiver_expr: "cl".to_string(),
+                arguments: None,
+            },
+            "f",
+            vec![LocalVar {
+                name: Arc::from("cl"),
+                type_internal: TypeName::new("RandomClass"),
+                init_expr: None,
+            }],
+            Some(Arc::from("Main")),
+            Some(Arc::from("org/cubewhy/a/Main")),
+            Some(Arc::from("org/cubewhy/a")),
+            vec!["org.cubewhy.RandomClass".into()],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        if let CursorLocation::MemberAccess {
+            receiver_semantic_type,
+            receiver_type,
+            ..
+        } = &ctx.location
+        {
+            assert_eq!(
+                receiver_semantic_type.as_ref().map(|t| t.erased_internal()),
+                Some("java/lang/Object")
+            );
+            assert_eq!(receiver_type.as_deref(), Some("org/cubewhy/RandomClass"));
         }
     }
 }

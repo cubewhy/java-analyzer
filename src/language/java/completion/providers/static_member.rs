@@ -34,6 +34,7 @@ impl CompletionProvider for StaticMemberProvider {
             CursorLocation::MemberAccess {
                 receiver_expr,
                 member_prefix,
+                receiver_semantic_type: None,
                 receiver_type: None,
                 arguments: None,
             } if is_likely_static_receiver(receiver_expr, ctx) => {
@@ -783,6 +784,7 @@ mod tests {
         // Parser 产生 MemberAccess，enrich 后 receiver_type 仍为 None（不是局部变量）
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "FIELD".to_string(),
                 receiver_expr: "myClass".to_string(),

@@ -797,6 +797,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "pub".to_string(),
                 receiver_expr: "obj".to_string(),

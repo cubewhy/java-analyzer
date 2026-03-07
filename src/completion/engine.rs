@@ -169,6 +169,7 @@ mod tests {
         let idx = make_index_with_random_class();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "f".to_string(),
                 receiver_expr: "cl".to_string(),
@@ -203,6 +204,7 @@ mod tests {
         let idx = make_index_with_random_class();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "cl".to_string(),
@@ -232,6 +234,7 @@ mod tests {
         let idx = make_index_with_random_class();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "f".to_string(),
                 receiver_expr: "cl".to_string(),
@@ -305,6 +308,7 @@ mod tests {
         // 模拟用户输入了 System.out.|
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "System.out".to_string(),
@@ -420,6 +424,7 @@ mod tests {
         }]);
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "str".to_string(),
@@ -496,6 +501,7 @@ mod tests {
         }]);
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "str".to_string(),
@@ -559,6 +565,7 @@ mod tests {
         }]);
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "str".to_string(),
@@ -690,6 +697,7 @@ mod tests {
         let engine = CompletionEngine::new();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "getMain2()".to_string(),
@@ -727,6 +735,7 @@ mod tests {
         }]);
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "a".to_string(),
@@ -766,6 +775,7 @@ mod tests {
         let idx = WorkspaceIndex::new();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "x".to_string(),
@@ -827,6 +837,7 @@ mod tests {
         }]);
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "b[0]".to_string(),
@@ -872,6 +883,7 @@ mod tests {
         }]);
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "ArrayL".to_string(),
                 receiver_expr: "java.util".to_string(),
@@ -898,6 +910,7 @@ mod tests {
         let idx = WorkspaceIndex::new();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "foo".to_string(),
                 receiver_expr: "unknownPkg".to_string(),
@@ -939,6 +952,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "strItem".to_string(), // 触发位置
@@ -1039,6 +1053,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "item".to_string(),
@@ -1089,6 +1104,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "m".to_string(), // m.a
@@ -1141,6 +1157,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "res[0][0]".to_string(), // 多维数组访问
@@ -1220,6 +1237,7 @@ mod tests {
 
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "m.arr[0][0][0][0]".to_string(), // 4层访问

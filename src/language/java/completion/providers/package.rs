@@ -161,6 +161,7 @@ mod tests {
         let idx = make_index();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "String".to_string(),
@@ -292,6 +293,7 @@ mod tests {
         let idx = make_index();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "String".to_string(),
@@ -317,6 +319,7 @@ mod tests {
         let idx = make_index();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "org.cubewhy".to_string(),
@@ -345,6 +348,7 @@ mod tests {
         let idx = make_index();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "".to_string(),
                 receiver_expr: "org.cubewhy".to_string(),
@@ -378,6 +382,7 @@ mod tests {
         let idx = make_index();
         let ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
                 receiver_type: None,
                 member_prefix: "Ma".to_string(),
                 receiver_expr: "org.cubewhy".to_string(),
