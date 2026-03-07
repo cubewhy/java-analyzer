@@ -1,0 +1,6 @@
+---
+source: src/language/java/completion/providers/member.rs
+expression: "labels.join(\"\\n\")"
+---
+add
+size

@@ -1,0 +1,22 @@
+---
+source: src/language/java/completion_context.rs
+expression: out
+---
+case1_box_map_list_size_get:
+receiver_semantic=Some("Box<I>")
+receiver_type=Some("Box")
+
+case2_function_string_integer_string_length:
+expected_type=Some(("java/util/function/Function<Ljava/lang/String;>", AssignmentRhs, Partial))
+expected_sam=Some(("apply", 1, Some(TypeName { base_internal: "java/lang/Object", args: [], array_dims: 0 })))
+functional_compat=Some((Incompatible, Some("java/lang/String"), Some("int")))
+
+case3_stream_map_string_trim:
+expected_type=Some(("java/util/function/Function", MethodArgument { arg_index: 0 }, Exact))
+expected_sam=Some(("apply", 1, Some(TypeName { base_internal: "java/lang/Object", args: [], array_dims: 0 })))
+functional_compat=Some((Partial, Some("java/lang/String"), Some("java/lang/String")))
+
+case5_nums_add_argument_context:
+expected_type=Some(("Box", MethodArgument { arg_index: 0 }, Exact))
+receiver_type=Some("java/util/List<TBox;>")
+receiver_semantic=None

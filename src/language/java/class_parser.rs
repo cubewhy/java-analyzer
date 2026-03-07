@@ -1140,6 +1140,56 @@ public class Main {
     }
 
     #[test]
+    fn test_snapshot_method_detail_source_vs_index_consistency() {
+        use crate::index::ClassMetadata;
+
+        let src = indoc::indoc! {r#"
+            package org.example;
+            import java.util.List;
+            import java.util.Map;
+            import java.util.function.Function;
+            public class Box<R> {
+                public <K, V> Map<K, List<V>> groupBy(
+                    Function<? super R, ? extends K> keyFn,
+                    Function<? super R, ? extends V> valueFn
+                ) { return null; }
+            }
+        "#};
+        let parsed = parse_java_source(src, ClassOrigin::Unknown, None);
+        let source_cls = parsed
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Box")
+            .expect("source class");
+        let source_method = source_cls
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "groupBy")
+            .expect("source method");
+
+        // Simulate index-visible metadata path by cloning source-derived class metadata.
+        let indexed_cls: ClassMetadata = source_cls.clone();
+        let indexed_method = indexed_cls
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "groupBy")
+            .expect("indexed method");
+
+        let receiver_internal = "org/example/Box<Ljava/util/List<Ljava/lang/String;>;>";
+        let source_detail = render::method_detail(receiver_internal, source_cls, source_method, &TestProvider);
+        let indexed_detail =
+            render::method_detail(receiver_internal, &indexed_cls, indexed_method, &TestProvider);
+
+        let out = format!(
+            "source_detail:\n{}\n\nindexed_detail:\n{}\n\nequal={}\n",
+            source_detail,
+            indexed_detail,
+            source_detail == indexed_detail
+        );
+        insta::assert_snapshot!("method_detail_source_vs_index_consistency", out);
+        assert_eq!(source_detail, indexed_detail);
+    }
+
+    #[test]
     fn test_class_level_annotations() {
         let src = r#"
 package com.example;

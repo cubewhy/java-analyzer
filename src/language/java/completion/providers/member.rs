@@ -958,6 +958,96 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_member_completion_on_wildcard_generic_receiver() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/util")),
+                name: Arc::from("List"),
+                internal_name: Arc::from("java/util/List"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    make_method("size", "()I", ACC_PUBLIC, false),
+                    make_method("add", "(Ljava/lang/Object;)Z", ACC_PUBLIC, false),
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: None,
+                name: Arc::from("Box"),
+                internal_name: Arc::from("Box"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Number"),
+                internal_name: Arc::from("java/lang/Number"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let view = idx.view(root_scope());
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec!["java.util.*".into()],
+            Some(name_table),
+        ));
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "nums".to_string(),
+                arguments: None,
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("nums"),
+                type_internal: TypeName::new("List<Box<? extends Number>>"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec!["java.util.*".into()],
+        )
+        .with_extension(type_ctx);
+
+        let mut labels: Vec<String> = MemberProvider
+            .provide(root_scope(), &ctx, &view)
+            .into_iter()
+            .map(|c| c.label.to_string())
+            .collect();
+        labels.sort();
+        insta::assert_snapshot!(
+            "member_completion_wildcard_generic_receiver_labels",
+            labels.join("\n")
+        );
+    }
+
+    #[test]
     fn test_same_class_private_visible_via_this() {
         let idx = WorkspaceIndex::new();
         idx.add_classes(vec![ClassMetadata {

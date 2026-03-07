@@ -1,0 +1,11 @@
+---
+source: src/language/java/class_parser.rs
+expression: out
+---
+source_detail:
+Box — Map<K, List<V>> groupBy(Function<? super java.util.List<java.lang.String>, ? extends K> keyFn, Function<? super java.util.List<java.lang.String>, ? extends V> valueFn)
+
+indexed_detail:
+Box — Map<K, List<V>> groupBy(Function<? super java.util.List<java.lang.String>, ? extends K> keyFn, Function<? super java.util.List<java.lang.String>, ? extends V> valueFn)
+
+equal=true

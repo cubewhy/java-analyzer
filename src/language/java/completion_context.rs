@@ -1595,6 +1595,68 @@ mod tests {
         idx
     }
 
+    fn make_index_with_list_add_box_for_expected_arg() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("java/util")),
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("java/util/List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("add"),
+                        params: MethodParams::from([("LBox;", "item")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(LBox<+Ljava/lang/Number;>;)Z")),
+                        return_type: Some(Arc::from("Z")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: None,
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Number"),
+                    internal_name: Arc::from("java/lang/Number"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
     #[test]
     fn test_enrich_context_resolves_simple_name_via_import() {
         let idx = make_index_with_random_class();
@@ -2444,5 +2506,287 @@ mod tests {
                 .map(|c| c.status),
             Some(crate::semantic::context::FunctionalCompatStatus::Incompatible)
         );
+    }
+
+    #[test]
+    fn test_snapshot_semantic_pipeline_regression_baseline() {
+        let mut out = String::new();
+
+        // 1) box.map(List::size).get() chain concretization in completion context
+        {
+            let idx = make_index_with_box_map_get_ambiguous_list_size();
+            let scope = IndexScope {
+                module: ModuleId::ROOT,
+            };
+            let view = idx.view(scope);
+            let name_table = view.build_name_table();
+            let type_ctx = Arc::new(SourceTypeCtx::new(None, vec!["java.util.*".into()], Some(name_table)));
+            let mut ctx = SemanticContext::new(
+                CursorLocation::MemberAccess {
+                    receiver_semantic_type: None,
+                    receiver_type: None,
+                    member_prefix: "ge".to_string(),
+                    receiver_expr: "box.map(List::size)".to_string(),
+                    arguments: Some("()".to_string()),
+                },
+                "ge",
+                vec![LocalVar {
+                    name: Arc::from("box"),
+                    type_internal: TypeName::with_args(
+                        "Box",
+                        vec![TypeName::with_args(
+                            "java/util/List",
+                            vec![TypeName::new("java/lang/String")],
+                        )],
+                    ),
+                    init_expr: None,
+                }],
+                Some(Arc::from("Demo")),
+                Some(Arc::from("Demo")),
+                None,
+                vec!["java.util.*".into()],
+            )
+            .with_extension(type_ctx);
+            ContextEnricher::new(&view).enrich(&mut ctx);
+
+            if let CursorLocation::MemberAccess {
+                receiver_semantic_type,
+                receiver_type,
+                ..
+            } = &ctx.location
+            {
+                out.push_str("case1_box_map_list_size_get:\n");
+                out.push_str(&format!(
+                    "receiver_semantic={:?}\nreceiver_type={:?}\n\n",
+                    receiver_semantic_type
+                        .as_ref()
+                        .map(TypeName::to_internal_with_generics),
+                    receiver_type
+                ));
+            }
+        }
+
+        // 2) Function<String, Integer> f = String::length
+        {
+            let idx = make_index_with_functional_types();
+            let scope = IndexScope {
+                module: ModuleId::ROOT,
+            };
+            let view = idx.view(scope);
+            let name_table = view.build_name_table();
+            let type_ctx = Arc::new(SourceTypeCtx::new(
+                Some(Arc::from("org/cubewhy/a")),
+                vec!["java.util.function.*".into(), "java.lang.*".into()],
+                Some(name_table),
+            ));
+            let mut ctx = SemanticContext::new(
+                CursorLocation::MethodReference {
+                    qualifier_expr: "String".to_string(),
+                    member_prefix: "length".to_string(),
+                    is_constructor: false,
+                },
+                "length",
+                vec![],
+                Some(Arc::from("Main")),
+                Some(Arc::from("org/cubewhy/a/Main")),
+                Some(Arc::from("org/cubewhy/a")),
+                vec!["java.util.function.*".into(), "java.lang.*".into()],
+            )
+            .with_functional_target_hint(Some(crate::semantic::context::FunctionalTargetHint {
+                expected_type_source: Some("Function<String, Integer>".to_string()),
+                method_call: None,
+                expr_shape: Some(
+                    crate::semantic::context::FunctionalExprShape::MethodReference {
+                        qualifier_expr: "String".to_string(),
+                        member_name: "length".to_string(),
+                        is_constructor: false,
+                        qualifier_kind: crate::semantic::context::MethodRefQualifierKind::Type,
+                    },
+                ),
+            }))
+            .with_extension(type_ctx);
+            ContextEnricher::new(&view).enrich(&mut ctx);
+
+            out.push_str("case2_function_string_integer_string_length:\n");
+            out.push_str(&format!(
+                "expected_type={:?}\nexpected_sam={:?}\nfunctional_compat={:?}\n\n",
+                ctx.typed_expr_ctx
+                    .as_ref()
+                    .and_then(|t| t.expected_type.as_ref())
+                    .map(|e| (
+                        e.ty.to_internal_with_generics(),
+                        e.source.clone(),
+                        e.confidence.clone()
+                    )),
+                ctx.expected_sam
+                    .as_ref()
+                    .map(|s| (s.method_name.clone(), s.param_types.len(), s.return_type.clone())),
+                ctx.typed_expr_ctx
+                    .as_ref()
+                    .and_then(|t| t.functional_compat.as_ref())
+                    .map(|c| (
+                        c.status,
+                        c.resolved_owner
+                            .as_ref()
+                            .map(TypeName::to_internal_with_generics),
+                        c.resolved_return
+                            .as_ref()
+                            .map(TypeName::to_internal_with_generics)
+                    )),
+            ));
+        }
+
+        // 3) stream.map(String::trim)
+        {
+            let idx = make_index_with_functional_types();
+            let scope = IndexScope {
+                module: ModuleId::ROOT,
+            };
+            let view = idx.view(scope);
+            let name_table = view.build_name_table();
+            let type_ctx = Arc::new(SourceTypeCtx::new(
+                Some(Arc::from("org/cubewhy/a")),
+                vec![
+                    "java.util.stream.*".into(),
+                    "java.util.function.*".into(),
+                    "java.lang.*".into(),
+                ],
+                Some(name_table),
+            ));
+            let mut ctx = SemanticContext::new(
+                CursorLocation::MethodReference {
+                    qualifier_expr: "String".to_string(),
+                    member_prefix: "trim".to_string(),
+                    is_constructor: false,
+                },
+                "trim",
+                vec![LocalVar {
+                    name: Arc::from("stream"),
+                    type_internal: TypeName::new("java/util/stream/Stream"),
+                    init_expr: None,
+                }],
+                Some(Arc::from("Main")),
+                Some(Arc::from("org/cubewhy/a/Main")),
+                Some(Arc::from("org/cubewhy/a")),
+                vec![
+                    "java.util.stream.*".into(),
+                    "java.util.function.*".into(),
+                    "java.lang.*".into(),
+                ],
+            )
+            .with_functional_target_hint(Some(crate::semantic::context::FunctionalTargetHint {
+                expected_type_source: None,
+                method_call: Some(crate::semantic::context::FunctionalMethodCallHint {
+                    receiver_expr: "stream".to_string(),
+                    method_name: "map".to_string(),
+                    arg_index: 0,
+                    arg_texts: vec!["String::trim".to_string()],
+                }),
+                expr_shape: Some(
+                    crate::semantic::context::FunctionalExprShape::MethodReference {
+                        qualifier_expr: "String".to_string(),
+                        member_name: "trim".to_string(),
+                        is_constructor: false,
+                        qualifier_kind: crate::semantic::context::MethodRefQualifierKind::Type,
+                    },
+                ),
+            }))
+            .with_extension(type_ctx);
+            ContextEnricher::new(&view).enrich(&mut ctx);
+
+            out.push_str("case3_stream_map_string_trim:\n");
+            out.push_str(&format!(
+                "expected_type={:?}\nexpected_sam={:?}\nfunctional_compat={:?}\n\n",
+                ctx.typed_expr_ctx
+                    .as_ref()
+                    .and_then(|t| t.expected_type.as_ref())
+                    .map(|e| (
+                        e.ty.to_internal_with_generics(),
+                        e.source.clone(),
+                        e.confidence.clone()
+                    )),
+                ctx.expected_sam
+                    .as_ref()
+                    .map(|s| (s.method_name.clone(), s.param_types.len(), s.return_type.clone())),
+                ctx.typed_expr_ctx
+                    .as_ref()
+                    .and_then(|t| t.functional_compat.as_ref())
+                    .map(|c| (
+                        c.status,
+                        c.resolved_owner
+                            .as_ref()
+                            .map(TypeName::to_internal_with_generics),
+                        c.resolved_return
+                            .as_ref()
+                            .map(TypeName::to_internal_with_generics)
+                    )),
+            ));
+        }
+
+        // 5) nums.add( ... ) method-argument expected type + receiver preservation
+        {
+            let idx = make_index_with_list_add_box_for_expected_arg();
+            let scope = IndexScope {
+                module: ModuleId::ROOT,
+            };
+            let view = idx.view(scope);
+            let name_table = view.build_name_table();
+            let type_ctx = Arc::new(SourceTypeCtx::new(None, vec!["java.util.*".into()], Some(name_table)));
+            let mut ctx = SemanticContext::new(
+                CursorLocation::Expression {
+                    prefix: "".to_string(),
+                },
+                "",
+                vec![LocalVar {
+                    name: Arc::from("nums"),
+                    type_internal: TypeName::with_args("java/util/List", vec![TypeName::new("Box")]),
+                    init_expr: None,
+                }],
+                Some(Arc::from("Demo")),
+                Some(Arc::from("Demo")),
+                None,
+                vec!["java.util.*".into()],
+            )
+            .with_functional_target_hint(Some(crate::semantic::context::FunctionalTargetHint {
+                expected_type_source: None,
+                method_call: Some(crate::semantic::context::FunctionalMethodCallHint {
+                    receiver_expr: "nums".to_string(),
+                    method_name: "add".to_string(),
+                    arg_index: 0,
+                    arg_texts: vec!["new Box()".to_string()],
+                }),
+                expr_shape: None,
+            }))
+            .with_extension(type_ctx);
+            ContextEnricher::new(&view).enrich(&mut ctx);
+
+            out.push_str("case5_nums_add_argument_context:\n");
+            out.push_str(&format!(
+                "expected_type={:?}\nreceiver_type={:?}\nreceiver_semantic={:?}\n\n",
+                ctx.typed_expr_ctx
+                    .as_ref()
+                    .and_then(|t| t.expected_type.as_ref())
+                    .map(|e| (
+                        e.ty.to_internal_with_generics(),
+                        e.source.clone(),
+                        e.confidence.clone()
+                    )),
+                ctx.typed_expr_ctx
+                    .as_ref()
+                    .and_then(|t| t.receiver_type.as_ref())
+                    .map(TypeName::to_internal_with_generics),
+                match &ctx.location {
+                    CursorLocation::MemberAccess {
+                        receiver_semantic_type,
+                        ..
+                    } => receiver_semantic_type
+                        .as_ref()
+                        .map(TypeName::to_internal_with_generics),
+                    _ => None,
+                },
+            ));
+        }
+
+        insta::assert_snapshot!("semantic_pipeline_regression_baseline", out);
     }
 }
