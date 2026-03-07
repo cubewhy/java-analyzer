@@ -20,7 +20,7 @@ impl Decompiler for VineflowerDecompiler {
         // parse class metadata
         let cr = ClassReader::new(class_data);
         let cn = cr.to_class_node()?;
-        let class_name = cn.name.rsplit_once("/").context("Bad class name")?.1;
+        let simple_name = cn.name.rsplit_once("/").context("Bad class name")?.1;
 
         let temp_dir = tempfile::tempdir()?;
         let input_class = temp_dir.path().join("Input.class");
@@ -47,7 +47,7 @@ impl Decompiler for VineflowerDecompiler {
             return Err(anyhow::anyhow!("Decompiler failed: {}", err));
         }
 
-        let result_file = out_dir.join(format!("{class_name}.java"));
+        let result_file = out_dir.join(format!("{simple_name}.java"));
         tracing::info!(?result_file);
         for entry in walkdir::WalkDir::new(&out_dir) {
             let entry = entry?;
