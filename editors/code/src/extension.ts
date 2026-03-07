@@ -13,7 +13,9 @@ let clientManager: LanguageClientManager | undefined;
 
 export async function activate(context: vscode.ExtensionContext) {
   await migrateLegacyDecompilerPathIfNeeded();
+
   clientManager = new LanguageClientManager(context);
+  context.subscriptions.push(clientManager);
 
   context.subscriptions.push(
     ...registerCommands({
