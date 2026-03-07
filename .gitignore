@@ -2,3 +2,4 @@
 dist/
 node_modules
 /.direnv
+editors/code/resources/decompilers
