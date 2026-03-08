@@ -460,7 +460,10 @@ mod tests {
             ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
             WorkspaceIndex,
         },
-        language::{java::injection::build_injected_source, rope_utils::line_col_to_offset},
+        language::{
+            java::{class_parser::parse_java_source, injection::build_injected_source},
+            rope_utils::line_col_to_offset,
+        },
         semantic::context::{CurrentClassMember, CursorLocation},
     };
     use rust_asm::constants::ACC_PUBLIC;
@@ -1019,6 +1022,195 @@ mod tests {
             "force_injection_predicates_member_tail_vs_generic_type_arg",
             out
         );
+    }
+
+    #[test]
+    fn test_snapshot_inner_class_box_visibility_pipeline_provenance() {
+        let src_base = indoc::indoc! {r#"
+        package org.cubewhy;
+
+        import java.util.*;
+
+        public class ClassWithGenerics<T> {
+            class Box<T> {}
+
+            public T get() {
+                return null;
+            }
+        }
+        "#};
+
+        let parsed = parse_java_source(src_base, ClassOrigin::Unknown, None);
+        let mut parsed_classes: Vec<String> = parsed
+            .iter()
+            .map(|c| {
+                format!(
+                    "name={} internal={} inner_of={:?}",
+                    c.name, c.internal_name, c.inner_class_of
+                )
+            })
+            .collect();
+        parsed_classes.sort();
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(parsed);
+        let view = idx.view(root_scope());
+
+        let mut index_box_hits: Vec<String> = view
+            .get_classes_by_simple_name("Box")
+            .into_iter()
+            .map(|c| {
+                format!(
+                    "name={} internal={} inner_of={:?}",
+                    c.name, c.internal_name, c.inner_class_of
+                )
+            })
+            .collect();
+        index_box_hits.sort();
+
+        let engine = CompletionEngine::new();
+
+        let src_type = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        public class ClassWithGenerics<T> {
+            class Box<T> {}
+            public T get() {
+                List<Bo> nums = new ArrayList<>();
+                return null;
+            }
+        }
+        "#};
+        let (type_line, type_col) = src_type
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("Bo>").map(|c| (i as u32, c as u32 + 2)))
+            .expect("List<Bo> marker");
+        let type_ctx = {
+            let rope = ropey::Rope::from_str(src_type);
+            let mut parser = super::make_java_parser();
+            let tree = parser.parse(src_type, None).expect("parse");
+            super::JavaLanguage
+                .parse_completion_context_with_tree(
+                    src_type,
+                    &rope,
+                    tree.root_node(),
+                    type_line,
+                    type_col,
+                    None,
+                    &ParseEnv {
+                        name_table: Some(view.build_name_table()),
+                    },
+                )
+                .expect("type ctx")
+        };
+        let type_location = format!("{:?}", type_ctx.location);
+        let mut type_labels: Vec<String> = engine
+            .complete(root_scope(), type_ctx, &JavaLanguage, &view)
+            .into_iter()
+            .map(|c| c.label.to_string())
+            .collect();
+        type_labels.sort();
+
+        let src_ctor = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        public class ClassWithGenerics<T> {
+            class Box<T> {}
+            public T get() {
+                new Bo
+                return null;
+            }
+        }
+        "#};
+        let (ctor_line, ctor_col) = src_ctor
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("new Bo").map(|c| (i as u32, c as u32 + "new Bo".len() as u32)))
+            .expect("new Bo marker");
+        let ctor_ctx = {
+            let rope = ropey::Rope::from_str(src_ctor);
+            let mut parser = super::make_java_parser();
+            let tree = parser.parse(src_ctor, None).expect("parse");
+            super::JavaLanguage
+                .parse_completion_context_with_tree(
+                    src_ctor,
+                    &rope,
+                    tree.root_node(),
+                    ctor_line,
+                    ctor_col,
+                    None,
+                    &ParseEnv {
+                        name_table: Some(view.build_name_table()),
+                    },
+                )
+                .expect("ctor ctx")
+        };
+        let ctor_location = format!("{:?}", ctor_ctx.location);
+        let mut ctor_labels: Vec<String> = engine
+            .complete(root_scope(), ctor_ctx, &JavaLanguage, &view)
+            .into_iter()
+            .map(|c| c.label.to_string())
+            .collect();
+        ctor_labels.sort();
+
+        let src_decl = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        public class ClassWithGenerics<T> {
+            class Box<T> {}
+            public T get() {
+                Box<String> x = null;
+                return null;
+            }
+        }
+        "#};
+        let (decl_line, decl_col) = src_decl
+            .lines()
+            .enumerate()
+            .find_map(|(i, l)| l.find("Box<String>").map(|c| (i as u32, c as u32 + 2)))
+            .expect("Box<String> marker");
+        let decl_ctx = {
+            let rope = ropey::Rope::from_str(src_decl);
+            let mut parser = super::make_java_parser();
+            let tree = parser.parse(src_decl, None).expect("parse");
+            super::JavaLanguage
+                .parse_completion_context_with_tree(
+                    src_decl,
+                    &rope,
+                    tree.root_node(),
+                    decl_line,
+                    decl_col,
+                    None,
+                    &ParseEnv {
+                        name_table: Some(view.build_name_table()),
+                    },
+                )
+                .expect("decl ctx")
+        };
+        let decl_location = format!("{:?}", decl_ctx.location);
+        let mut decl_labels: Vec<String> = engine
+            .complete(root_scope(), decl_ctx, &JavaLanguage, &view)
+            .into_iter()
+            .map(|c| c.label.to_string())
+            .collect();
+        decl_labels.sort();
+
+        let out = format!(
+            "parsed_classes:\n{}\n\nindex_lookup_box:\n{}\n\ntype_location={}\ntype_annotation_list_bo_candidates_contains_box={}\nfirst_20={:?}\n\nctor_location={}\nconstructor_new_bo_candidates_contains_box={}\nfirst_20={:?}\n\ndecl_location={}\ndeclaration_box_string_candidates_contains_box={}\nfirst_20={:?}\n",
+            parsed_classes.join("\n"),
+            index_box_hits.join("\n"),
+            type_location,
+            type_labels.iter().any(|l| l == "Box"),
+            type_labels.iter().take(20).collect::<Vec<_>>(),
+            ctor_location,
+            ctor_labels.iter().any(|l| l == "Box"),
+            ctor_labels.iter().take(20).collect::<Vec<_>>(),
+            decl_location,
+            decl_labels.iter().any(|l| l == "Box"),
+            decl_labels.iter().take(20).collect::<Vec<_>>(),
+        );
+        insta::assert_snapshot!("inner_class_box_visibility_pipeline_provenance", out);
     }
 
     #[test]

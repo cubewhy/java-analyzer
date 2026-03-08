@@ -56,6 +56,69 @@ impl IndexView {
         self.get_class(internal).map(|meta| meta.source_name())
     }
 
+    /// Resolve a simple inner-class name within the current enclosing-class scope.
+    /// Uses `inner_class_of` metadata as the primary relation source.
+    pub fn resolve_scoped_inner_class(
+        &self,
+        enclosing_internal: &str,
+        simple_name: &str,
+    ) -> Option<Arc<ClassMetadata>> {
+        let enclosing = self.get_class(enclosing_internal)?;
+        let enclosing_pkg = enclosing.package.clone();
+
+        let mut scope_chain: Vec<Arc<str>> = vec![Arc::clone(&enclosing.name)];
+        let mut cur = enclosing;
+        while let Some(parent_name) = cur.inner_class_of.clone() {
+            scope_chain.push(Arc::clone(&parent_name));
+            let parent = self
+                .iter_all_classes()
+                .into_iter()
+                .find(|c| c.name.as_ref() == parent_name.as_ref() && c.package == enclosing_pkg);
+            match parent {
+                Some(p) => cur = p,
+                None => break,
+            }
+        }
+
+        let mut best: Option<(usize, Arc<ClassMetadata>)> = None;
+        for class in self.get_classes_by_simple_name(simple_name) {
+            if class.package != enclosing_pkg {
+                continue;
+            }
+            if let Some(parent) = class.inner_class_of.clone()
+                && let Some(pos) = scope_chain.iter().position(|n| n.as_ref() == parent.as_ref())
+            {
+                match &best {
+                    Some((best_pos, _)) if *best_pos <= pos => {}
+                    _ => best = Some((pos, class)),
+                }
+            } else if class.inner_class_of.is_none()
+                && class.internal_name.contains('$')
+                && class
+                    .internal_name
+                    .rsplit('$')
+                    .next()
+                    .is_some_and(|tail| tail == simple_name)
+            {
+                // Compatibility fallback when inner_class_of is missing.
+                let owner_tail = class
+                    .internal_name
+                    .rsplit_once('$')
+                    .and_then(|(owner, _)| owner.rsplit('/').next());
+                if let Some(owner_tail) = owner_tail
+                    && let Some(pos) = scope_chain.iter().position(|n| n.as_ref() == owner_tail)
+                {
+                    match &best {
+                        Some((best_pos, _)) if *best_pos <= pos => {}
+                        _ => best = Some((pos, class)),
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, c)| c)
+    }
+
     pub fn get_classes_by_simple_name(&self, simple_name: &str) -> Vec<Arc<ClassMetadata>> {
         let mut by_internal: rustc_hash::FxHashMap<Arc<str>, Arc<ClassMetadata>> =
             Default::default();

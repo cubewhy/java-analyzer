@@ -27,6 +27,7 @@ impl CompletionProvider for ExpressionProvider {
             CursorLocation::MethodArgument { prefix } => prefix.as_str(),
             _ => return vec![],
         };
+        let is_type_annotation = matches!(&ctx.location, CursorLocation::TypeAnnotation { .. });
 
         if prefix.contains('.') {
             return vec![];
@@ -42,8 +43,7 @@ impl CompletionProvider for ExpressionProvider {
         // Classes that have already been imported in current context
         let imported = index.resolve_imports(&ctx.existing_imports);
         for meta in &imported {
-            // Theoretically, it is not possible to import nested classes.
-            if meta.inner_class_of.is_some() {
+            if !is_type_visible_in_context(meta, ctx, index, is_type_annotation) {
                 continue;
             }
             let score = if prefix.is_empty() {
@@ -75,7 +75,7 @@ impl CompletionProvider for ExpressionProvider {
         // Same package
         if let Some(pkg) = current_pkg {
             for meta in index.classes_in_package(pkg) {
-                if meta.inner_class_of.is_some() {
+                if !is_type_visible_in_context(&meta, ctx, index, is_type_annotation) {
                     continue;
                 }
                 if imported_internals.contains(&meta.internal_name) {
@@ -106,8 +106,7 @@ impl CompletionProvider for ExpressionProvider {
         // Other classes (global, require auto-import)
         if !prefix.is_empty() {
             for meta in index.iter_all_classes() {
-                // skip nested classes
-                if meta.inner_class_of.is_some() {
+                if !is_type_visible_in_context(&meta, ctx, index, is_type_annotation) {
                     continue;
                 }
                 if imported_internals.contains(&meta.internal_name) {
@@ -178,6 +177,26 @@ fn fqn_of(meta: &crate::index::ClassMetadata) -> String {
         Some(pkg) => format!("{}.{}", pkg.replace('/', "."), meta.name),
         None => meta.name.to_string(),
     }
+}
+
+fn is_type_visible_in_context(
+    meta: &crate::index::ClassMetadata,
+    ctx: &SemanticContext,
+    index: &IndexView,
+    is_type_annotation: bool,
+) -> bool {
+    if meta.inner_class_of.is_none() {
+        return true;
+    }
+    if !is_type_annotation {
+        return false;
+    }
+    let Some(enclosing) = ctx.enclosing_internal_name.as_deref() else {
+        return false;
+    };
+    index
+        .resolve_scoped_inner_class(enclosing, meta.name.as_ref())
+        .is_some_and(|resolved| resolved.internal_name == meta.internal_name)
 }
 
 #[cfg(test)]
@@ -328,6 +347,67 @@ mod tests {
             list_candidates.len(),
             2,
             "Both java.util.List and java.awt.List should be present"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_includes_scoped_inner_box() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![
+            make_cls("org/cubewhy", "ClassWithGenerics"),
+            {
+                let mut c = make_cls("org/cubewhy", "Box");
+                c.internal_name = Arc::from("org/cubewhy/ClassWithGenerics$Box");
+                c.inner_class_of = Some(Arc::from("ClassWithGenerics"));
+                c
+            },
+        ]);
+        let ctx = SemanticContext::new(
+            CursorLocation::TypeAnnotation {
+                prefix: "Bo".to_string(),
+            },
+            "Bo",
+            vec![],
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        assert!(
+            results.iter().any(|c| c.label.as_ref() == "Box"),
+            "in-scope inner Box should be visible for TypeAnnotation"
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_excludes_unrelated_inner_box() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![
+            make_cls("org/cubewhy", "ClassWithGenerics"),
+            make_cls("org/cubewhy", "Other"),
+            {
+                let mut c = make_cls("org/cubewhy", "Box");
+                c.internal_name = Arc::from("org/cubewhy/Other$Box");
+                c.inner_class_of = Some(Arc::from("Other"));
+                c
+            },
+        ]);
+        let ctx = SemanticContext::new(
+            CursorLocation::TypeAnnotation {
+                prefix: "Bo".to_string(),
+            },
+            "Bo",
+            vec![],
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+        let results = ExpressionProvider.provide(root_scope(), &ctx, &index.view(root_scope()));
+        assert!(
+            !results.iter().any(|c| c.label.as_ref() == "Box"),
+            "unrelated inner Box should remain hidden"
         );
     }
 }

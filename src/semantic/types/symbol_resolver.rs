@@ -272,6 +272,12 @@ impl<'a> SymbolResolver<'a> {
             return Some(Arc::from(resolved));
         }
 
+        if let Some(enclosing) = ctx.enclosing_internal_name.as_deref()
+            && let Some(inner) = self.view.resolve_scoped_inner_class(enclosing, name)
+        {
+            return Some(Arc::clone(&inner.internal_name));
+        }
+
         tracing::debug!(name = %name, "resolve: type not found in index");
         None
     }
@@ -319,6 +325,7 @@ mod tests {
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
         WorkspaceIndex,
     };
+    use crate::language::java::type_ctx::SourceTypeCtx;
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use rust_asm::constants::ACC_PUBLIC;
 
@@ -554,5 +561,233 @@ mod tests {
             }
             _ => panic!("Expected method resolution"),
         }
+    }
+
+    #[test]
+    fn test_resolve_type_name_prefers_scoped_inner_class_when_strict_rules_fail() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.add_jar_classes(
+            scope,
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ClassWithGenerics"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: Some(Arc::from("ClassWithGenerics")),
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        let resolved = resolver.resolve_type_name(&ctx, "Box");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("org/cubewhy/ClassWithGenerics$Box"),
+            "scoped inner class should resolve when strict rules cannot prove top-level Box"
+        );
+    }
+
+    #[test]
+    fn test_resolve_type_name_keeps_top_level_resolution_before_inner_fallback() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.add_jar_classes(
+            scope,
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ClassWithGenerics"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: Some(Arc::from("ClassWithGenerics")),
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        let resolved = resolver.resolve_type_name(&ctx, "Box");
+        assert_eq!(
+            resolved.as_deref(),
+            Some("org/cubewhy/Box"),
+            "top-level same-package class should still win before scoped inner fallback"
+        );
+    }
+
+    #[test]
+    fn test_resolve_type_name_does_not_pick_unrelated_inner_class() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.add_jar_classes(
+            scope,
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ClassWithGenerics"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Other"),
+                    internal_name: Arc::from("org/cubewhy/Other"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/Other$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: Some(Arc::from("Other")),
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        let resolved = resolver.resolve_type_name(&ctx, "Box");
+        assert!(
+            resolved.is_none(),
+            "unrelated inner class should not be guessed across enclosing scope"
+        );
     }
 }

@@ -1687,6 +1687,82 @@ mod tests {
         idx
     }
 
+    fn make_index_with_list_add_generic_and_scoped_inner_box() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("java/util")),
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("java/util/List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("add"),
+                        params: MethodParams::from([("Ljava/lang/Object;", "item")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(TE;)Z")),
+                        return_type: Some(Arc::from("Z")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ClassWithGenerics"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: Some(Arc::from("ClassWithGenerics")),
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Number"),
+                    internal_name: Arc::from("java/lang/Number"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
     fn make_index_with_box_map_get_trim_and_constructor_chain() -> WorkspaceIndex {
         let idx = WorkspaceIndex::new();
         idx.add_jar_classes(
@@ -2583,7 +2659,7 @@ mod tests {
                 receiver_expr: "nums".to_string(),
                 method_name: "add".to_string(),
                 arg_index: 0,
-                arg_texts: vec!["new Box()".to_string()],
+                arg_texts: vec!["\"x\"".to_string()],
             }),
             expr_shape: None,
         }))
@@ -2604,6 +2680,68 @@ mod tests {
             expected.ty.args[0].base_internal.as_ref(),
             "+",
             "expected wildcard-bound generic to be preserved"
+        );
+        assert_eq!(expected.confidence, ExpectedTypeConfidence::Partial);
+    }
+
+    #[test]
+    fn test_method_argument_expected_type_preserves_scoped_inner_box_wildcard() {
+        let idx = make_index_with_list_add_generic_and_scoped_inner_box();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+            Some(name_table),
+        ));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![LocalVar {
+                name: Arc::from("nums"),
+                type_internal: TypeName::with_args(
+                    "java/util/List",
+                    vec![TypeName::with_args(
+                        "Box",
+                        vec![TypeName::with_args(
+                            "+",
+                            vec![TypeName::new("java/lang/Number")],
+                        )],
+                    )],
+                ),
+                init_expr: None,
+            }],
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+        )
+        .with_functional_target_hint(Some(crate::semantic::context::FunctionalTargetHint {
+            expected_type_source: None,
+            method_call: Some(crate::semantic::context::FunctionalMethodCallHint {
+                receiver_expr: "nums".to_string(),
+                method_name: "add".to_string(),
+                arg_index: 0,
+                arg_texts: vec!["new Box()".to_string()],
+            }),
+            expr_shape: None,
+        }))
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+        let expected = ctx
+            .typed_expr_ctx
+            .as_ref()
+            .and_then(|t| t.expected_type.as_ref())
+            .expect("expected type should be present");
+        assert_eq!(
+            expected.ty.to_internal_with_generics(),
+            "org/cubewhy/ClassWithGenerics$Box<+Ljava/lang/Number;>"
         );
         assert_eq!(expected.confidence, ExpectedTypeConfidence::Partial);
     }
