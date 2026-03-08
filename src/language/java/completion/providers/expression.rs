@@ -9,6 +9,7 @@ use crate::{
     semantic::context::{CursorLocation, SemanticContext},
     semantic::types::symbol_resolver::SymbolResolver,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -209,19 +210,20 @@ impl ExpressionProvider {
 
         let prefix_lower = prefix.to_lowercase();
         let current_pkg = ctx.enclosing_package.as_deref();
-        let mut results = Vec::new();
+        let mut seeds = Vec::new();
         let mut seen_internals: std::collections::HashSet<Arc<str>> = Default::default();
         let reached_limit = |len: usize, lim: Option<usize>| {
             lim.is_some_and(|effective_limit| len >= effective_limit)
         };
+        let mut visibility_filter = VisibilityFilter::new(ctx, index, is_type_annotation);
 
         let t_imports = Instant::now();
         let imported = index.resolve_imports(&ctx.existing_imports);
         for meta in &imported {
-            if reached_limit(results.len(), limit) {
+            if reached_limit(seeds.len(), limit) {
                 break;
             }
-            if !is_type_visible_in_context(meta, ctx, index, is_type_annotation) {
+            if !visibility_filter.allows(meta) {
                 continue;
             }
             if !seen_internals.insert(Arc::clone(&meta.internal_name)) {
@@ -235,17 +237,11 @@ impl ExpressionProvider {
                     None => continue,
                 }
             };
-            let fqn = source_fqn_of(meta, index);
-            results.push(
-                CompletionCandidate::new(
-                    Arc::clone(&meta.name),
-                    meta.name.to_string(),
-                    CandidateKind::ClassName,
-                    self.name(),
-                )
-                .with_detail(fqn)
-                .with_score(80.0 + score as f32 * 0.1),
-            );
+            seeds.push(CandidateSeed {
+                meta: Arc::clone(meta),
+                score: 80.0 + score as f32 * 0.1,
+                source_group: CandidateSourceGroup::Imported,
+            });
         }
         let imports_ms = t_imports.elapsed().as_secs_f64() * 1000.0;
 
@@ -275,10 +271,10 @@ impl ExpressionProvider {
             };
 
             for meta in iter {
-                if reached_limit(results.len(), limit) {
+                if reached_limit(seeds.len(), limit) {
                     break;
                 }
-                if !is_type_visible_in_context(&meta, ctx, index, is_type_annotation) {
+                if !visibility_filter.allows(&meta) {
                     continue;
                 }
                 if imported_internals.contains(&meta.internal_name) {
@@ -295,17 +291,11 @@ impl ExpressionProvider {
                         None => continue,
                     }
                 };
-                let fqn = source_fqn_of(&meta, index);
-                results.push(
-                    CompletionCandidate::new(
-                        Arc::clone(&meta.name),
-                        meta.name.to_string(),
-                        CandidateKind::ClassName,
-                        self.name(),
-                    )
-                    .with_detail(fqn)
-                    .with_score(90.0 + score as f32 * 0.1),
-                );
+                seeds.push(CandidateSeed {
+                    meta,
+                    score: 90.0 + score as f32 * 0.1,
+                    source_group: CandidateSourceGroup::SamePackage,
+                });
             }
         }
         let same_pkg_ms = t_same_pkg.elapsed().as_secs_f64() * 1000.0;
@@ -313,13 +303,13 @@ impl ExpressionProvider {
         let t_global = Instant::now();
         if !prefix.is_empty() {
             for meta in fuzzy_pool {
-                if reached_limit(results.len(), limit) {
+                if reached_limit(seeds.len(), limit) {
                     break;
                 }
                 if current_pkg.is_some_and(|pkg| meta.package.as_deref() == Some(pkg)) {
                     continue;
                 }
-                if !is_type_visible_in_context(&meta, ctx, index, is_type_annotation) {
+                if !visibility_filter.allows(&meta) {
                     continue;
                 }
                 if imported_internals.contains(&meta.internal_name) {
@@ -332,33 +322,44 @@ impl ExpressionProvider {
                     Some(s) => s,
                     None => continue,
                 };
-                let fqn = source_fqn_of(&meta, index);
                 let boost = calculate_boost(meta.package.as_deref());
                 let base_score = 40.0;
                 let length_penalty = meta.name.len() as f32 * 0.05;
 
-                let candidate = CompletionCandidate::new(
-                    Arc::clone(&meta.name),
-                    meta.name.to_string(),
-                    CandidateKind::ClassName,
-                    self.name(),
-                )
-                .with_detail(fqn.clone())
-                .with_score(base_score + score as f32 * 0.1 - length_penalty + boost);
+                seeds.push(CandidateSeed {
+                    meta,
+                    score: base_score + score as f32 * 0.1 - length_penalty + boost,
+                    source_group: CandidateSourceGroup::Global,
+                });
+            }
+        }
+        let global_ms = t_global.elapsed().as_secs_f64() * 1000.0;
 
+        let t_decorate = Instant::now();
+        let mut results = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            let fqn = source_fqn_of(&seed.meta, index);
+            let mut candidate = CompletionCandidate::new(
+                Arc::clone(&seed.meta.name),
+                seed.meta.name.to_string(),
+                CandidateKind::ClassName,
+                self.name(),
+            )
+            .with_detail(fqn.clone())
+            .with_score(seed.score);
+            if matches!(seed.source_group, CandidateSourceGroup::Global) {
                 let needs_import = is_import_needed(
                     &fqn,
                     &ctx.existing_imports,
                     ctx.enclosing_package.as_deref(),
                 );
-                results.push(if needs_import {
-                    candidate.with_import(fqn)
-                } else {
-                    candidate
-                });
+                if needs_import {
+                    candidate = candidate.with_import(fqn);
+                }
             }
+            results.push(candidate);
         }
-        let global_ms = t_global.elapsed().as_secs_f64() * 1000.0;
+        let decoration_ms = t_decorate.elapsed().as_secs_f64() * 1000.0;
 
         let is_incomplete = reached_limit(results.len(), limit);
         if trace_enabled {
@@ -371,8 +372,12 @@ impl ExpressionProvider {
                 incomplete = is_incomplete,
                 imports_ms,
                 fuzzy_ms,
+                visibility_ms = visibility_filter.visibility_ms(),
+                visibility_checks = visibility_filter.total_checks,
+                nested_visibility_checks = visibility_filter.nested_checks,
                 same_pkg_ms,
                 global_ms,
+                decoration_ms,
                 elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0,
                 "completion provider timing"
             );
@@ -382,6 +387,71 @@ impl ExpressionProvider {
             candidates: results,
             is_incomplete,
         }
+    }
+}
+
+#[derive(Clone)]
+struct CandidateSeed {
+    meta: Arc<crate::index::ClassMetadata>,
+    score: f32,
+    source_group: CandidateSourceGroup,
+}
+
+#[derive(Clone, Copy)]
+enum CandidateSourceGroup {
+    Imported,
+    SamePackage,
+    Global,
+}
+
+struct VisibilityFilter {
+    is_type_annotation: bool,
+    visible_inner_by_simple_name: HashMap<Arc<str>, Arc<str>>,
+    total_checks: usize,
+    nested_checks: usize,
+    visibility_ns: u128,
+}
+
+impl VisibilityFilter {
+    fn new(ctx: &SemanticContext, index: &IndexView, is_type_annotation: bool) -> Self {
+        let mut visible_inner_by_simple_name = HashMap::new();
+        if is_type_annotation
+            && let Some(enclosing_internal) = ctx.enclosing_internal_name.as_deref()
+        {
+            for inner in index.direct_inner_classes_of(enclosing_internal) {
+                visible_inner_by_simple_name
+                    .entry(Arc::clone(&inner.name))
+                    .or_insert_with(|| Arc::clone(&inner.internal_name));
+            }
+        }
+        Self {
+            is_type_annotation,
+            visible_inner_by_simple_name,
+            total_checks: 0,
+            nested_checks: 0,
+            visibility_ns: 0,
+        }
+    }
+
+    fn allows(&mut self, meta: &crate::index::ClassMetadata) -> bool {
+        let start = Instant::now();
+        self.total_checks += 1;
+        let visible = if meta.inner_class_of.is_none() {
+            true
+        } else if !self.is_type_annotation {
+            false
+        } else {
+            self.nested_checks += 1;
+            self.visible_inner_by_simple_name
+                .get(&meta.name)
+                .is_some_and(|internal| internal.as_ref() == meta.internal_name.as_ref())
+        };
+        self.visibility_ns += start.elapsed().as_nanos();
+        visible
+    }
+
+    fn visibility_ms(&self) -> f64 {
+        self.visibility_ns as f64 / 1_000_000.0
     }
 }
 
@@ -447,26 +517,6 @@ fn source_fqn_of(meta: &crate::index::ClassMetadata, index: &IndexView) -> Strin
     crate::completion::import_utils::source_fqn_of_meta(meta, index)
 }
 
-fn is_type_visible_in_context(
-    meta: &crate::index::ClassMetadata,
-    ctx: &SemanticContext,
-    index: &IndexView,
-    is_type_annotation: bool,
-) -> bool {
-    if meta.inner_class_of.is_none() {
-        return true;
-    }
-    if !is_type_annotation {
-        return false;
-    }
-    let Some(enclosing) = ctx.enclosing_internal_name.as_deref() else {
-        return false;
-    };
-    index
-        .resolve_scoped_inner_class(enclosing, meta.name.as_ref())
-        .is_some_and(|resolved| resolved.internal_name == meta.internal_name)
-}
-
 #[cfg(test)]
 mod tests {
     use crate::index::WorkspaceIndex;
@@ -476,6 +526,7 @@ mod tests {
     use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId};
     use crate::semantic::context::{CursorLocation, SemanticContext};
     use std::sync::Arc;
+    use tracing_subscriber::{EnvFilter, fmt};
 
     fn root_scope() -> IndexScope {
         IndexScope {
@@ -953,6 +1004,51 @@ mod tests {
         assert!(
             !results.is_empty(),
             "provider should still produce valid expression candidates"
+        );
+    }
+
+    #[test]
+    fn test_broad_path_emits_timing_breakdown() {
+        let _ = fmt()
+            .with_env_filter(EnvFilter::new("debug"))
+            .with_test_writer()
+            .try_init();
+
+        let index = WorkspaceIndex::new();
+        let mut classes = Vec::new();
+        for i in 0..10_000 {
+            classes.push(make_cls("bench/p", &format!("Class{i:05}")));
+        }
+        for i in 0..2_000 {
+            let mut inner = make_cls("bench/p", &format!("Inner{i:05}"));
+            inner.internal_name = Arc::from(format!("bench/p/Outer$Inner{i:05}"));
+            inner.inner_class_of = Some(Arc::from("Outer"));
+            classes.push(inner);
+        }
+        classes.push(make_cls("bench/p", "Owner"));
+        classes.push(make_cls("java/util", "ArrayList"));
+        classes.push(make_cls("java/util", "ArrayDeque"));
+        index.add_classes(classes);
+        let view = index.view(root_scope());
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "Array".to_string(),
+            },
+            "Array",
+            vec![],
+            Some(Arc::from("Owner")),
+            Some(Arc::from("bench/p/Owner")),
+            Some(Arc::from("bench/p")),
+            vec![
+                Arc::from("java.util.ArrayList"),
+                Arc::from("java.util.ArrayDeque"),
+            ],
+        );
+
+        let results = ExpressionProvider.provide_with_limit(root_scope(), &ctx, &view, Some(256));
+        assert!(
+            !results.candidates.is_empty(),
+            "broad path should still produce candidates"
         );
     }
 }
