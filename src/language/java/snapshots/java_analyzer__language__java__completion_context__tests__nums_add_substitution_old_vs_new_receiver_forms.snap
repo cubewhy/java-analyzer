@@ -1,0 +1,21 @@
+---
+source: src/language/java/completion_context.rs
+expression: "format!(\"method_sig={:?}\\nclass_sig={:?}\\nparam_token={}\\nparsed_param={:?}\\nreceiver_old={}\\nreceiver_new={}\\nparsed_old_arg={:?}\\nparsed_new_arg={:?}\\nold_sub={:?}\\nnew_sub={:?}\\nold_resolved={:?}\\nnew_resolved={:?}\\nunresolved_old={}\\nunresolved_old_sub={:?}\\nunresolved_old_resolved={:?}\\nunresolved_new_sub={:?}\\nunresolved_new_resolved={:?}\\n\",\nadd.generic_signature, list_meta.generic_signature, param_token, parsed_param,\nreceiver_old, receiver_new, parsed_old_arg, parsed_new_arg, old_sub, new_sub,\nold_resolved, new_resolved, unresolved_old, unresolved_old_sub,\nunresolved_old_resolved, unresolved_new_sub, unresolved_new_resolved)"
+---
+method_sig=Some("(LBox<+Ljava/lang/Number;>;)Z")
+class_sig=Some("<E:Ljava/lang/Object;>Ljava/lang/Object;")
+param_token=LBox<+Ljava/lang/Number;>;
+parsed_param=Some("LBox<+Ljava/lang/Number;>;")
+receiver_old=java/util/List<TBox;>
+receiver_new=java/util/List<LBox<+Ljava/lang/Number;>;>
+parsed_old_arg=Some("TBox;")
+parsed_new_arg=Some("LBox<+Ljava/lang/Number;>;")
+old_sub=Some("Box<+Ljava/lang/Number;>")
+new_sub=Some("Box<+Ljava/lang/Number;>")
+old_resolved=Some(("Box<+Ljava/lang/Number;>", false))
+new_resolved=Some(("Box<+Ljava/lang/Number;>", false))
+unresolved_old=List<Box<? extends Number>>
+unresolved_old_sub=Some("Box<+Ljava/lang/Number;>")
+unresolved_old_resolved=Some(("Box<+Ljava/lang/Number;>", false))
+unresolved_new_sub=Some("Box<+Ljava/lang/Number;>")
+unresolved_new_resolved=Some(("Box<+Ljava/lang/Number;>", false))

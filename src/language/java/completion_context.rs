@@ -712,7 +712,7 @@ fn resolve_expected_type_from_method_argument(
     if selected.params.items.get(hint.arg_index).is_none() {
         return (None, Some(receiver));
     }
-    let receiver_internal = receiver.to_internal_with_generics();
+    let receiver_internal = receiver.to_internal_with_generics_for_substitution();
     let expected = resolver
         .resolve_selected_param_type_from_generic_signature(
             &receiver_internal,
@@ -2560,7 +2560,16 @@ mod tests {
             "",
             vec![LocalVar {
                 name: Arc::from("nums"),
-                type_internal: TypeName::with_args("java/util/List", vec![TypeName::new("Box")]),
+                type_internal: TypeName::with_args(
+                    "java/util/List",
+                    vec![TypeName::with_args(
+                        "Box",
+                        vec![TypeName::with_args(
+                            "+",
+                            vec![TypeName::new("java/lang/Number")],
+                        )],
+                    )],
+                ),
                 init_expr: None,
             }],
             Some(Arc::from("Demo")),
@@ -2591,7 +2600,200 @@ mod tests {
             !expected.ty.args.is_empty(),
             "wildcard generic structure should be preserved"
         );
+        assert_eq!(
+            expected.ty.args[0].base_internal.as_ref(),
+            "+",
+            "expected wildcard-bound generic to be preserved"
+        );
         assert_eq!(expected.confidence, ExpectedTypeConfidence::Partial);
+    }
+
+    #[test]
+    fn test_nums_add_expected_type_and_detail_preserve_wildcard_structure() {
+        use crate::completion::provider::CompletionProvider;
+        use crate::language::java::completion::providers::member::MemberProvider;
+
+        let idx = make_index_with_list_add_box_for_expected_arg();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec!["java.util.*".into()],
+            Some(name_table),
+        ));
+
+        let receiver_semantic = TypeName::with_args(
+            "java/util/List",
+            vec![TypeName::with_args(
+                "Box",
+                vec![TypeName::with_args(
+                    "+",
+                    vec![TypeName::new("java/lang/Number")],
+                )],
+            )],
+        );
+
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(receiver_semantic.clone()),
+                receiver_type: Some(Arc::from("java/util/List")),
+                member_prefix: "add".to_string(),
+                receiver_expr: "nums".to_string(),
+                arguments: None,
+            },
+            "add",
+            vec![LocalVar {
+                name: Arc::from("nums"),
+                type_internal: receiver_semantic,
+                init_expr: None,
+            }],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec!["java.util.*".into()],
+        )
+        .with_functional_target_hint(Some(crate::semantic::context::FunctionalTargetHint {
+            expected_type_source: None,
+            method_call: Some(crate::semantic::context::FunctionalMethodCallHint {
+                receiver_expr: "nums".to_string(),
+                method_name: "add".to_string(),
+                arg_index: 0,
+                arg_texts: vec!["new Box()".to_string()],
+            }),
+            expr_shape: None,
+        }))
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+        let expected = ctx
+            .typed_expr_ctx
+            .as_ref()
+            .and_then(|t| t.expected_type.as_ref())
+            .expect("expected type should be present");
+        assert_eq!(
+            expected.ty.to_internal_with_generics(),
+            "Box<+Ljava/lang/Number;>"
+        );
+
+        let provider = MemberProvider;
+        let results = provider.provide(scope, &ctx, &view);
+        let add = results
+            .iter()
+            .find(|c| c.label.as_ref() == "add")
+            .expect("expected add candidate");
+        let detail = add.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("Box<? extends"),
+            "detail should preserve wildcard bound structure, got: {}",
+            detail
+        );
+    }
+
+    #[test]
+    fn test_snapshot_nums_add_substitution_old_vs_new_receiver_forms() {
+        use crate::semantic::types::generics::{JvmType, parse_method_signature_types, substitute_type};
+
+        let idx = make_index_with_list_add_box_for_expected_arg();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let resolver = TypeResolver::new(&view);
+
+        let list_meta = view
+            .get_class("java/util/List")
+            .expect("List class should exist");
+        let add = list_meta
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "add")
+            .expect("add method should exist");
+        let sig = add
+            .generic_signature
+            .as_deref()
+            .expect("add should have generic signature");
+        let (params, _ret) =
+            parse_method_signature_types(sig).expect("parse add generic signature");
+        let param0 = params.first().expect("first param should exist");
+        let param_token = param0.to_signature_string();
+
+        let receiver_structured = TypeName::with_args(
+            "java/util/List",
+            vec![TypeName::with_args(
+                "Box",
+                vec![TypeName::with_args(
+                    "+",
+                    vec![TypeName::new("java/lang/Number")],
+                )],
+            )],
+        );
+        let receiver_old = receiver_structured.to_internal_with_generics();
+        let receiver_new = receiver_structured.to_internal_with_generics_for_substitution();
+
+        let old_sub = substitute_type(&receiver_old, list_meta.generic_signature.as_deref(), &param_token)
+            .map(|t| t.to_internal_with_generics());
+        let new_sub = substitute_type(&receiver_new, list_meta.generic_signature.as_deref(), &param_token)
+            .map(|t| t.to_internal_with_generics());
+
+        let old_resolved = resolver
+            .resolve_selected_param_type_from_generic_signature(&receiver_old, add, 0)
+            .map(|(t, exact)| (t.to_internal_with_generics(), exact));
+        let new_resolved = resolver
+            .resolve_selected_param_type_from_generic_signature(&receiver_new, add, 0)
+            .map(|(t, exact)| (t.to_internal_with_generics(), exact));
+
+        let unresolved_old = "List<Box<? extends Number>>".to_string();
+        let unresolved_new = unresolved_old.clone();
+        let unresolved_old_resolved = resolver
+            .resolve_selected_param_type_from_generic_signature(&unresolved_old, add, 0)
+            .map(|(t, exact)| (t.to_internal_with_generics(), exact));
+        let unresolved_new_resolved = resolver
+            .resolve_selected_param_type_from_generic_signature(&unresolved_new, add, 0)
+            .map(|(t, exact)| (t.to_internal_with_generics(), exact));
+
+        let unresolved_old_sub =
+            substitute_type(&unresolved_old, list_meta.generic_signature.as_deref(), &param_token)
+                .map(|t| t.to_internal_with_generics());
+        let unresolved_new_sub =
+            substitute_type(&unresolved_new, list_meta.generic_signature.as_deref(), &param_token)
+                .map(|t| t.to_internal_with_generics());
+
+        let parsed_new_arg = crate::semantic::types::generics::split_internal_name(&receiver_new)
+            .1
+            .first()
+            .map(|j| j.to_signature_string());
+        let parsed_old_arg = crate::semantic::types::generics::split_internal_name(&receiver_old)
+            .1
+            .first()
+            .map(|j| j.to_signature_string());
+        let parsed_param = JvmType::parse(&param_token).map(|(j, _)| j.to_signature_string());
+
+        insta::assert_snapshot!(
+            "nums_add_substitution_old_vs_new_receiver_forms",
+            format!(
+                "method_sig={:?}\nclass_sig={:?}\nparam_token={}\nparsed_param={:?}\nreceiver_old={}\nreceiver_new={}\nparsed_old_arg={:?}\nparsed_new_arg={:?}\nold_sub={:?}\nnew_sub={:?}\nold_resolved={:?}\nnew_resolved={:?}\nunresolved_old={}\nunresolved_old_sub={:?}\nunresolved_old_resolved={:?}\nunresolved_new_sub={:?}\nunresolved_new_resolved={:?}\n",
+                add.generic_signature,
+                list_meta.generic_signature,
+                param_token,
+                parsed_param,
+                receiver_old,
+                receiver_new,
+                parsed_old_arg,
+                parsed_new_arg,
+                old_sub,
+                new_sub,
+                old_resolved,
+                new_resolved,
+                unresolved_old,
+                unresolved_old_sub,
+                unresolved_old_resolved,
+                unresolved_new_sub,
+                unresolved_new_resolved
+            )
+        );
     }
 
     #[test]
@@ -3143,7 +3345,13 @@ mod tests {
                     name: Arc::from("nums"),
                     type_internal: TypeName::with_args(
                         "java/util/List",
-                        vec![TypeName::new("Box")],
+                        vec![TypeName::with_args(
+                            "Box",
+                            vec![TypeName::with_args(
+                                "+",
+                                vec![TypeName::new("java/lang/Number")],
+                            )],
+                        )],
                     ),
                     init_expr: None,
                 }],

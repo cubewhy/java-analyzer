@@ -729,6 +729,12 @@ impl<'idx> TypeResolver<'idx> {
             }
         }
 
+        // If class/receiver substitution still leaves a bare type variable (e.g. `E`),
+        // treat this as unresolved so callers can use their existing fallback path.
+        if matches!(param, JvmType::TypeVar(_)) {
+            return None;
+        }
+
         let exact = is_concrete_jvm_type(&param);
         Some((param.to_type_name(), exact))
     }
