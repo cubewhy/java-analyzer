@@ -255,6 +255,25 @@ pub struct TypedExpressionContext {
     pub functional_compat: Option<FunctionalCompat>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedChainConfidence {
+    Exact,
+    Partial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypedChainReceiverMode {
+    Concrete,
+    WildcardUpperBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypedChainReceiver {
+    pub receiver_ty: TypeName,
+    pub confidence: TypedChainConfidence,
+    pub receiver_mode: TypedChainReceiverMode,
+}
+
 #[derive(Debug, Clone)]
 pub struct SemanticContext {
     pub location: CursorLocation,
@@ -276,6 +295,7 @@ pub struct SemanticContext {
     pub language_id: LanguageId,
     pub functional_target_hint: Option<FunctionalTargetHint>,
     pub typed_expr_ctx: Option<TypedExpressionContext>,
+    pub typed_chain_receiver: Option<TypedChainReceiver>,
     pub expected_functional_interface: Option<TypeName>,
     pub expected_sam: Option<SamSignature>,
     pub ext: Option<Arc<dyn Any + Send + Sync>>,
@@ -318,6 +338,7 @@ impl SemanticContext {
             language_id: LanguageId::new("unknown"),
             functional_target_hint: None,
             typed_expr_ctx: None,
+            typed_chain_receiver: None,
             expected_functional_interface: None,
             expected_sam: None,
             ext: None,

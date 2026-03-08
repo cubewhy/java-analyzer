@@ -358,7 +358,6 @@ impl JavaContextExtractor {
         };
         let functional_target_hint = location::infer_functional_target_hint(&self, cursor_node);
 
-        let local_variables = locals::extract_locals(&self, root, cursor_node);
         let enclosing_class = scope::extract_enclosing_class(&self, cursor_node)
             .or_else(|| scope::extract_enclosing_class_by_offset(&self, root));
         let enclosing_package = scope::extract_package(&self, root);
@@ -370,6 +369,8 @@ impl JavaContextExtractor {
             existing_imports.clone(),
             self.name_table.clone(),
         ));
+        let local_variables =
+            locals::extract_locals_with_type_ctx(&self, root, cursor_node, Some(&type_ctx));
         let existing_static_imports = scope::extract_static_imports(&self, root);
         let current_class_members = cursor_node
             .and_then(|n| utils::find_ancestor(n, "class_declaration"))

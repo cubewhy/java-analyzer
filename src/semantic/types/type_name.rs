@@ -74,6 +74,13 @@ impl TypeName {
         self.base_internal.contains('/')
     }
 
+    pub fn wildcard_upper_bound(&self) -> Option<&TypeName> {
+        if self.base_internal.as_ref() == "+" {
+            return self.args.first();
+        }
+        None
+    }
+
     /// "java/lang/String[][]" → Some("java/lang/String[]")
     pub fn element_type(&self) -> Option<TypeName> {
         if self.array_dims == 0 {

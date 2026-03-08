@@ -200,7 +200,7 @@ impl CompletionProvider for MemberProvider {
             .or_else(|| receiver_owner_internal.map(TypeName::new))
             .or_else(|| resolve_receiver_type(receiver_expr, ctx, index, scope));
 
-        let resolved = match resolved_semantic {
+        let resolved_original = match resolved_semantic {
             Some(t) => t,
             None => {
                 tracing::debug!(
@@ -211,9 +211,16 @@ impl CompletionProvider for MemberProvider {
             }
         };
 
-        let class_internal = resolved.to_internal_with_generics();
-        let class_internal_for_substitution = resolved.to_internal_with_generics_for_substitution();
-        let base_class_internal = resolved.erased_internal();
+        let resolved_effective = ctx
+            .typed_chain_receiver
+            .as_ref()
+            .map(|t| t.receiver_ty.clone())
+            .unwrap_or_else(|| resolved_original.clone());
+
+        let class_internal = resolved_effective.to_internal_with_generics();
+        let class_internal_for_substitution =
+            resolved_effective.to_internal_with_generics_for_substitution();
+        let base_class_internal = resolved_effective.erased_internal();
 
         tracing::debug!(
             base_class_internal,

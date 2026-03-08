@@ -9,7 +9,8 @@ use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::context::{
     ExpectedType, ExpectedTypeConfidence, ExpectedTypeSource, FunctionalCompat,
     FunctionalCompatStatus, FunctionalExprShape, FunctionalMethodCallHint, MethodRefQualifierKind,
-    SamSignature, TypedExpressionContext,
+    SamSignature, TypedChainConfidence, TypedChainReceiver, TypedChainReceiverMode,
+    TypedExpressionContext,
 };
 use crate::semantic::types::symbol_resolver::SymbolResolver;
 use crate::semantic::types::type_name::TypeName;
@@ -29,6 +30,7 @@ impl<'a> ContextEnricher<'a> {
     }
 
     pub fn enrich(&self, ctx: &mut SemanticContext) {
+        ctx.typed_chain_receiver = None;
         let type_ctx = match ctx.extension_arc::<SourceTypeCtx>() {
             Some(ctx) => ctx,
             None => {
@@ -93,6 +95,19 @@ impl<'a> ContextEnricher<'a> {
                     ctx.local_variables[idx_in_vec].type_internal = resolved;
                 }
             }
+
+            // Expand declared/local source types into structured semantic types
+            // before any receiver-chain resolution uses locals.
+            let sym = SymbolResolver::new(self.view);
+            let new_types: Vec<TypeName> = ctx
+                .local_variables
+                .iter()
+                .map(|lv| expand_local_type_strict(&sym, ctx, &type_ctx, &lv.type_internal))
+                .collect();
+
+            for (lv, new_ty) in ctx.local_variables.iter_mut().zip(new_types) {
+                lv.type_internal = new_ty;
+            }
         }
 
         if let CursorLocation::MemberAccess { .. } = &ctx.location
@@ -149,6 +164,10 @@ impl<'a> ContextEnricher<'a> {
 
             // Normalize to a canonical semantic receiver type before writing either field.
             let resolved_semantic = canonicalize_receiver_semantic(resolved, &type_ctx);
+            let typed_chain_receiver = resolved_semantic
+                .as_ref()
+                .map(build_typed_chain_receiver);
+            ctx.typed_chain_receiver = typed_chain_receiver;
 
             if receiver_semantic_type.is_none() {
                 *receiver_semantic_type = resolved_semantic.clone();
@@ -186,48 +205,6 @@ impl<'a> ContextEnricher<'a> {
             ctx.query = query;
         }
 
-        // Resolve `var` local variables
-        {
-            let resolver = TypeResolver::new(self.view);
-            let to_resolve: Vec<(usize, String)> = ctx
-                .local_variables
-                .iter()
-                .enumerate()
-                .filter_map(|(i, lv)| {
-                    if lv.type_internal.erased_internal() == "var" {
-                        lv.init_expr.as_deref().map(|e| (i, e.to_string()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // infer `var`
-            for (idx_in_vec, init_expr) in to_resolve {
-                if let Some(resolved) = resolve_var_init_expr(
-                    &init_expr,
-                    &ctx.local_variables,
-                    ctx.enclosing_internal_name.as_ref(),
-                    &resolver,
-                    &type_ctx,
-                    self.view,
-                ) {
-                    ctx.local_variables[idx_in_vec].type_internal = resolved;
-                }
-            }
-
-            let sym = SymbolResolver::new(self.view);
-            let new_types: Vec<TypeName> = ctx
-                .local_variables
-                .iter()
-                .map(|lv| expand_local_type_strict(&sym, ctx, &type_ctx, &lv.type_internal))
-                .collect();
-
-            for (lv, new_ty) in ctx.local_variables.iter_mut().zip(new_types) {
-                lv.type_internal = new_ty;
-            }
-        }
-
         enrich_expected_type_context(ctx, self.view, &type_ctx);
     }
 }
@@ -263,6 +240,16 @@ fn canonicalize_receiver_semantic(
             None
         }
         Some(ty) if ty.contains_slash() => Some(ty),
+        Some(ty)
+            if matches!(
+                ty.base_internal.as_ref(),
+                "+" | "-" | "?" | "*" | "capture"
+            ) =>
+        {
+            // Wildcard/capture receivers are not strict-resolvable class names.
+            // Keep structured type so upper-bound lifting can pick an effective owner.
+            Some(ty)
+        }
         Some(ty) => {
             let ty_str = ty.erased_internal_with_arrays();
             let r = type_ctx.resolve_type_name_strict(&ty_str);
@@ -278,6 +265,26 @@ fn canonicalize_receiver_semantic(
                 None => None,
             }
         }
+    }
+}
+
+fn build_typed_chain_receiver(receiver_ty: &TypeName) -> TypedChainReceiver {
+    if let Some(upper) = receiver_ty.wildcard_upper_bound() {
+        return TypedChainReceiver {
+            receiver_ty: upper.clone(),
+            confidence: TypedChainConfidence::Partial,
+            receiver_mode: TypedChainReceiverMode::WildcardUpperBound,
+        };
+    }
+
+    TypedChainReceiver {
+        receiver_ty: receiver_ty.clone(),
+        confidence: if receiver_ty.contains_slash() {
+            TypedChainConfidence::Exact
+        } else {
+            TypedChainConfidence::Partial
+        },
+        receiver_mode: TypedChainReceiverMode::Concrete,
     }
 }
 
@@ -1991,6 +1998,182 @@ mod tests {
         idx
     }
 
+    fn make_index_with_scoped_inner_box_get_and_list_add() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("java/util")),
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("java/util/List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("add"),
+                        params: MethodParams::from([("Ljava/lang/Object;", "e")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(TE;)Z")),
+                        return_type: Some(Arc::from("Z")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ClassWithGenerics"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<B:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/ClassWithGenerics$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("get"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("()TT;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: Some(Arc::from("ClassWithGenerics")),
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("String"),
+                    internal_name: Arc::from("java/lang/String"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Number"),
+                    internal_name: Arc::from("java/lang/Number"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
+    fn make_index_with_list_box_wildcard_chain() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_jar_classes(
+            IndexScope {
+                module: ModuleId::ROOT,
+            },
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("java/util")),
+                    name: Arc::from("List"),
+                    internal_name: Arc::from("java/util/List"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("get"),
+                        params: MethodParams::from([("I", "index")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(I)TE;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("get"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("()TT;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<T:Ljava/lang/Object;>Ljava/lang/Object;")),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Number"),
+                    internal_name: Arc::from("java/lang/Number"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("doubleValue"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("D")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+        idx
+    }
+
     fn make_index_with_box_map_get_trim_and_constructor_chain() -> WorkspaceIndex {
         let idx = WorkspaceIndex::new();
         idx.add_jar_classes(
@@ -2226,7 +2409,7 @@ mod tests {
         let type_ctx = Arc::new(SourceTypeCtx::new(
             Some(Arc::from("org/cubewhy/a")),
             vec!["org.cubewhy.RandomClass".into()],
-            Some(name_table),
+            Some(Arc::clone(&name_table)),
         ));
         let mut ctx = SemanticContext::new(
             CursorLocation::MemberAccess {
@@ -2923,7 +3106,7 @@ mod tests {
         let type_ctx = Arc::new(SourceTypeCtx::new(
             Some(Arc::from("org/cubewhy")),
             vec!["java.util.*".into()],
-            Some(name_table),
+            Some(Arc::clone(&name_table)),
         ));
         let mut ctx = SemanticContext::new(
             CursorLocation::Expression {
@@ -2988,7 +3171,7 @@ mod tests {
         let type_ctx = Arc::new(SourceTypeCtx::new(
             Some(Arc::from("org/cubewhy")),
             vec!["java.util.*".into()],
-            Some(name_table),
+            Some(Arc::clone(&name_table)),
         ));
 
         let mut ctx = SemanticContext::new(
@@ -3395,6 +3578,245 @@ mod tests {
         ));
 
         insta::assert_snapshot!("inner_vs_top_level_box_nums_add_provenance", out);
+    }
+
+    #[test]
+    fn test_snapshot_m1_single_get_and_nums_add_provenance() {
+        use crate::completion::provider::CompletionProvider;
+        use crate::language::java::completion::providers::member::MemberProvider;
+        use crate::language::java::locals::extract_locals_with_type_ctx;
+        use tree_sitter::Parser;
+
+        let idx = make_index_with_scoped_inner_box_get_and_list_add();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+            Some(Arc::clone(&name_table)),
+        ));
+
+        let src = indoc::indoc! {r#"
+            package org.cubewhy;
+            import java.util.*;
+            class ClassWithGenerics<B> {
+                class Box<T> {}
+                void f() {
+                    Box<String> single = new Box<>();
+                    List<Box<? extends Number>> nums = List.of();
+                    single.get().subs
+                    nums.add(
+                }
+            }
+        "#};
+        let offset = src.find("nums.add(").expect("offset");
+        let extractor =
+            crate::language::java::JavaContextExtractor::new(src, offset, Some(name_table));
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_java::LANGUAGE.into())
+            .expect("java grammar");
+        let tree = parser.parse(src, None).expect("parsed");
+        let root = tree.root_node();
+        let cursor_node = extractor.find_cursor_node(root);
+        let locals = extract_locals_with_type_ctx(&extractor, root, cursor_node, Some(&type_ctx));
+
+        let single_local = locals
+            .iter()
+            .find(|lv| lv.name.as_ref() == "single")
+            .map(|lv| lv.type_internal.to_internal_with_generics());
+        let nums_local = locals
+            .iter()
+            .find(|lv| lv.name.as_ref() == "nums")
+            .map(|lv| lv.type_internal.to_internal_with_generics());
+
+        let resolver = TypeResolver::new(&view);
+        let single_chain = parse_chain_from_expr("single.get()");
+        let single_eval = evaluate_chain(
+            &single_chain,
+            &locals,
+            Some(&Arc::from("org/cubewhy/ClassWithGenerics")),
+            &resolver,
+            &type_ctx,
+            &view,
+        );
+
+        let mut single_ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "subs".to_string(),
+                receiver_expr: "single.get()".to_string(),
+                arguments: None,
+            },
+            "subs",
+            locals.clone(),
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+        )
+        .with_extension(Arc::clone(&type_ctx) as Arc<dyn std::any::Any + Send + Sync>);
+        ContextEnricher::new(&view).enrich(&mut single_ctx);
+        let single_receiver = single_ctx.location.member_access_receiver_semantic_type();
+        let single_local_after = single_ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "single")
+            .map(|lv| lv.type_internal.to_internal_with_generics());
+
+        let mut nums_ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "add".to_string(),
+                receiver_expr: "nums".to_string(),
+                arguments: Some("(".to_string()),
+            },
+            "add",
+            locals.clone(),
+            Some(Arc::from("ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy/ClassWithGenerics")),
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+        )
+        .with_functional_target_hint(Some(crate::semantic::context::FunctionalTargetHint {
+            expected_type_source: None,
+            method_call: Some(crate::semantic::context::FunctionalMethodCallHint {
+                receiver_expr: "nums".to_string(),
+                method_name: "add".to_string(),
+                arg_index: 0,
+                arg_texts: vec!["".to_string()],
+            }),
+            expr_shape: None,
+        }))
+        .with_extension(type_ctx);
+        ContextEnricher::new(&view).enrich(&mut nums_ctx);
+        let nums_receiver = nums_ctx.typed_expr_ctx.as_ref().and_then(|t| t.receiver_type.clone());
+        let nums_expected = nums_ctx
+            .typed_expr_ctx
+            .as_ref()
+            .and_then(|t| t.expected_type.as_ref())
+            .map(|e| (e.ty.to_internal_with_generics(), e.confidence));
+        let nums_local_after = nums_ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "nums")
+            .map(|lv| lv.type_internal.to_internal_with_generics());
+        let nums_add_detail = MemberProvider
+            .provide(scope, &nums_ctx, &view)
+            .into_iter()
+            .find(|c| c.label.as_ref() == "add")
+            .and_then(|c| c.detail)
+            .unwrap_or_else(|| "<none>".to_string());
+
+        insta::assert_snapshot!(
+            "m1_single_get_and_nums_add_provenance",
+            format!(
+                "single_local={:?}\nsingle_local_after_enrich={:?}\nnums_local={:?}\nnums_local_after_enrich={:?}\nsingle_eval_chain={:?}\nsingle_receiver_semantic={:?}\nnums_receiver_type={:?}\nnums_expected={:?}\nnums_add_detail={}\n",
+                single_local,
+                single_local_after,
+                nums_local,
+                nums_local_after,
+                single_eval.as_ref().map(TypeName::to_internal_with_generics),
+                single_receiver.map(|t| t.to_internal_with_generics()),
+                nums_receiver.map(|t| t.to_internal_with_generics()),
+                nums_expected,
+                nums_add_detail
+            )
+        );
+    }
+
+    #[test]
+    fn test_snapshot_wildcard_upper_bound_chain_lifting() {
+        use crate::completion::provider::CompletionProvider;
+        use crate::language::java::completion::providers::member::MemberProvider;
+
+        let idx = make_index_with_list_box_wildcard_chain();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+            Some(name_table),
+        ));
+
+        let nums_ty = TypeName::with_args(
+            "java/util/List",
+            vec![TypeName::with_args(
+                "org/cubewhy/Box",
+                vec![TypeName::with_args(
+                    "+",
+                    vec![TypeName::new("java/lang/Number")],
+                )],
+            )],
+        );
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "doubleV".to_string(),
+                receiver_expr: "nums.get(0).get()".to_string(),
+                arguments: None,
+            },
+            "doubleV",
+            vec![LocalVar {
+                name: Arc::from("nums"),
+                type_internal: nums_ty,
+                init_expr: None,
+            }],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.util.*".into()],
+        )
+        .with_extension(type_ctx);
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        let chain_mode = ctx
+            .typed_chain_receiver
+            .as_ref()
+            .map(|r| (r.receiver_mode, r.confidence));
+        let chain_receiver = ctx
+            .typed_chain_receiver
+            .as_ref()
+            .map(|r| r.receiver_ty.to_internal_with_generics());
+        let semantic_receiver = ctx
+            .location
+            .member_access_receiver_semantic_type()
+            .map(TypeName::to_internal_with_generics);
+        let effective_owner = ctx
+            .typed_chain_receiver
+            .as_ref()
+            .map(|r| r.receiver_ty.erased_internal().to_string())
+            .or_else(|| {
+                ctx.location
+                    .member_access_receiver_owner_internal()
+                    .map(|s| s.to_string())
+            });
+        let member_labels: Vec<String> = MemberProvider
+            .provide(scope, &ctx, &view)
+            .into_iter()
+            .map(|c| c.label.to_string())
+            .collect();
+
+        insta::assert_snapshot!(
+            "wildcard_upper_bound_chain_lifting",
+            format!(
+                "semantic_receiver={:?}\nchain_receiver={:?}\nchain_mode={:?}\neffective_owner={:?}\nmember_labels={:?}\n",
+                semantic_receiver,
+                chain_receiver,
+                chain_mode,
+                effective_owner,
+                member_labels
+            )
+        );
     }
 
     #[test]

@@ -1,0 +1,13 @@
+---
+source: src/language/java/completion_context.rs
+expression: "format!(\"single_local={:?}\\nsingle_local_after_enrich={:?}\\nnums_local={:?}\\nnums_local_after_enrich={:?}\\nsingle_eval_chain={:?}\\nsingle_receiver_semantic={:?}\\nnums_receiver_type={:?}\\nnums_expected={:?}\\nnums_add_detail={}\\n\",\nsingle_local, single_local_after, nums_local, nums_local_after,\nsingle_eval.as_ref().map(TypeName::to_internal_with_generics),\nsingle_receiver.map(|t| t.to_internal_with_generics()),\nnums_receiver.map(|t| t.to_internal_with_generics()), nums_expected,\nnums_add_detail)"
+---
+single_local=Some("Box<String>")
+single_local_after_enrich=Some("org/cubewhy/ClassWithGenerics$Box<Ljava/lang/String;>")
+nums_local=Some("List<Box<? extends Number>>")
+nums_local_after_enrich=Some("java/util/List<Lorg/cubewhy/ClassWithGenerics$Box<+Ljava/lang/Number;>;>")
+single_eval_chain=None
+single_receiver_semantic=Some("java/lang/String")
+nums_receiver_type=Some("java/util/List<Lorg/cubewhy/ClassWithGenerics$Box<+Ljava/lang/Number;>;>")
+nums_expected=Some(("org/cubewhy/ClassWithGenerics$Box<+Ljava/lang/Number;>", Partial))
+nums_add_detail=List — boolean add(org.cubewhy.ClassWithGenerics.Box<? extends java.lang.Number> e)

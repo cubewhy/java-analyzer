@@ -6,6 +6,7 @@ use crate::{
     language::{
         java::{
             JavaContextExtractor,
+            type_ctx::SourceTypeCtx,
             utils::{
                 find_ancestor, get_initializer_text, infer_type_from_initializer,
                 java_type_to_internal,
@@ -20,6 +21,15 @@ pub fn extract_locals(
     ctx: &JavaContextExtractor,
     root: Node,
     cursor_node: Option<Node>,
+) -> Vec<LocalVar> {
+    extract_locals_with_type_ctx(ctx, root, cursor_node, None)
+}
+
+pub fn extract_locals_with_type_ctx(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<LocalVar> {
     let search_root = cursor_node
         .and_then(|n| find_ancestor(n, "method_declaration"))
@@ -92,26 +102,49 @@ pub fn extract_locals(
 
             Some(LocalVar {
                 name: Arc::from(name),
-                type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
+                type_internal: resolve_declared_source_type(raw_ty, type_ctx),
                 init_expr: None,
             })
         })
         .collect();
 
-    vars.extend(extract_misread_var_decls(ctx, search_root));
-    vars.extend(extract_locals_from_error_nodes(ctx, search_root));
-    vars.extend(extract_params(ctx, root, cursor_node));
+    vars.extend(extract_misread_var_decls(ctx, search_root, type_ctx));
+    vars.extend(extract_locals_from_error_nodes(ctx, search_root, type_ctx));
+    vars.extend(extract_params(ctx, root, cursor_node, type_ctx));
 
     vars
 }
 
-fn extract_misread_var_decls(ctx: &JavaContextExtractor, root: Node) -> Vec<LocalVar> {
+fn resolve_declared_source_type(raw_ty: &str, type_ctx: Option<&SourceTypeCtx>) -> TypeName {
+    if let Some(type_ctx) = type_ctx
+        && let Some(resolved) = type_ctx.resolve_type_name_relaxed(raw_ty.trim())
+    {
+        // Avoid committing a lossy base-only relaxed result for generic source types.
+        // Keep raw fallback so later scoped expansion can recover argument structure.
+        if raw_ty.contains('<') && resolved.ty.args.is_empty() {
+            return TypeName::new(java_type_to_internal(raw_ty).as_str());
+        }
+        return resolved.ty;
+    }
+    TypeName::new(java_type_to_internal(raw_ty).as_str())
+}
+
+fn extract_misread_var_decls(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<LocalVar> {
     let mut result = Vec::new();
-    collect_misread_decls(ctx, root, &mut result);
+    collect_misread_decls(ctx, root, &mut result, type_ctx);
     result
 }
 
-fn collect_misread_decls(ctx: &JavaContextExtractor, node: Node, vars: &mut Vec<LocalVar>) {
+fn collect_misread_decls(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    vars: &mut Vec<LocalVar>,
+    type_ctx: Option<&SourceTypeCtx>,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         // Pattern: variable_declarator containing assignment_expression
@@ -151,9 +184,7 @@ fn collect_misread_decls(ctx: &JavaContextExtractor, node: Node, vars: &mut Vec<
                             let raw_ty = type_name.as_deref().unwrap_or("Object");
                             LocalVar {
                                 name: Arc::from(name),
-                                type_internal: TypeName::new(
-                                    java_type_to_internal(raw_ty).as_str(),
-                                ),
+                                type_internal: resolve_declared_source_type(raw_ty, type_ctx),
                                 init_expr: None,
                             }
                         };
@@ -162,7 +193,7 @@ fn collect_misread_decls(ctx: &JavaContextExtractor, node: Node, vars: &mut Vec<
                 }
             }
         }
-        collect_misread_decls(ctx, child, vars);
+        collect_misread_decls(ctx, child, vars, type_ctx);
     }
 }
 
@@ -189,6 +220,7 @@ fn extract_params(
     ctx: &JavaContextExtractor,
     root: Node,
     cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<LocalVar> {
     let method = match cursor_node
         .and_then(|n| find_ancestor(n, "method_declaration"))
@@ -212,20 +244,29 @@ fn extract_params(
             let raw_ty = ty.trim();
             Some(LocalVar {
                 name: Arc::from(name),
-                type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
+                type_internal: resolve_declared_source_type(raw_ty, type_ctx),
                 init_expr: None,
             })
         })
         .collect()
 }
 
-fn extract_locals_from_error_nodes(ctx: &JavaContextExtractor, root: Node) -> Vec<LocalVar> {
+fn extract_locals_from_error_nodes(
+    ctx: &JavaContextExtractor,
+    root: Node,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<LocalVar> {
     let mut result = Vec::new();
-    collect_locals_in_errors(ctx, root, &mut result);
+    collect_locals_in_errors(ctx, root, &mut result, type_ctx);
     result
 }
 
-fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut Vec<LocalVar>) {
+fn collect_locals_in_errors(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    vars: &mut Vec<LocalVar>,
+    type_ctx: Option<&SourceTypeCtx>,
+) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         if child.kind() == "ERROR" {
@@ -255,9 +296,7 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                             return Some(match infer_type_from_initializer(ty_node, ctx.bytes()) {
                                 Some(t) => LocalVar {
                                     name: Arc::from(name),
-                                    type_internal: TypeName::new(
-                                        java_type_to_internal(&t).as_str(),
-                                    ),
+                                    type_internal: resolve_declared_source_type(&t, type_ctx),
                                     init_expr: None,
                                 },
                                 None => LocalVar {
@@ -270,7 +309,7 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
 
                         Some(LocalVar {
                             name: Arc::from(name),
-                            type_internal: TypeName::new(java_type_to_internal(raw_ty).as_str()),
+                            type_internal: resolve_declared_source_type(raw_ty, type_ctx),
                             init_expr: None,
                         })
                     })
@@ -278,9 +317,9 @@ fn collect_locals_in_errors(ctx: &JavaContextExtractor, node: Node, vars: &mut V
                 vars.extend(found);
             }
             // Recursive entry into nested ERROR
-            collect_locals_in_errors(ctx, child, vars);
+            collect_locals_in_errors(ctx, child, vars, type_ctx);
         } else {
-            collect_locals_in_errors(ctx, child, vars);
+            collect_locals_in_errors(ctx, child, vars, type_ctx);
         }
     }
 }
@@ -506,7 +545,7 @@ mod tests {
 
         // 我们直接调用 extract_locals_from_error_nodes 来测试私有/crate私有逻辑
         // 因为 tree-sitter 可能会把整个 try-catch 块标记为 ERROR
-        let vars = extract_locals_from_error_nodes(&ctx, tree.root_node());
+        let vars = extract_locals_from_error_nodes(&ctx, tree.root_node(), None);
 
         assert!(
             vars.iter().any(|v| v.name.as_ref() == "insideError"),

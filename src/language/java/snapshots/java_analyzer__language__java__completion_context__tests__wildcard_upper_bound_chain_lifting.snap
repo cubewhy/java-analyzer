@@ -1,0 +1,9 @@
+---
+source: src/language/java/completion_context.rs
+expression: "format!(\"semantic_receiver={:?}\\nchain_receiver={:?}\\nchain_mode={:?}\\neffective_owner={:?}\\nmember_labels={:?}\\n\",\nsemantic_receiver, chain_receiver, chain_mode, effective_owner, member_labels)"
+---
+semantic_receiver=Some("+<Ljava/lang/Number;>")
+chain_receiver=Some("java/lang/Number")
+chain_mode=Some((WildcardUpperBound, Partial))
+effective_owner=Some("java/lang/Number")
+member_labels=["doubleValue"]
