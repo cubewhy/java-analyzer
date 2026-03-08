@@ -3,6 +3,7 @@ use rust_asm::constants::ACC_STATIC;
 use crate::completion::provider::CompletionProvider;
 use crate::completion::scorer::AccessFilter;
 use crate::completion::{CandidateKind, CompletionCandidate};
+use crate::language::java::expression_typing;
 use crate::language::java::render;
 use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::context::{CursorLocation, SemanticContext};
@@ -38,6 +39,12 @@ impl CompletionProvider for MemberProvider {
         tracing::debug!(
             receiver_expr,
             member_prefix,
+            receiver_semantic_type = ?receiver_semantic_type
+                .map(TypeName::to_internal_with_generics),
+            receiver_owner_internal = ?receiver_owner_internal,
+            typed_chain_receiver = ?ctx.typed_chain_receiver
+                .as_ref()
+                .map(|t| t.receiver_ty.to_internal_with_generics()),
             locals = ?ctx.local_variables.iter().map(|lv| format!("{}:{}", lv.name, lv.type_internal)).collect::<Vec<_>>(),
             imports = ?ctx.existing_imports,
             "MemberProvider.provide"
@@ -198,6 +205,7 @@ impl CompletionProvider for MemberProvider {
         let resolved_semantic = receiver_semantic_type
             .cloned()
             .or_else(|| receiver_owner_internal.map(TypeName::new))
+            .or_else(|| ctx.typed_chain_receiver.as_ref().map(|t| t.receiver_ty.clone()))
             .or_else(|| resolve_receiver_type(receiver_expr, ctx, index, scope));
 
         let resolved_original = match resolved_semantic {
@@ -216,6 +224,8 @@ impl CompletionProvider for MemberProvider {
             .as_ref()
             .map(|t| t.receiver_ty.clone())
             .unwrap_or_else(|| resolved_original.clone());
+        let resolved_effective =
+            normalize_receiver_owner_for_members(resolved_effective, ctx, index, scope);
 
         let class_internal = resolved_effective.to_internal_with_generics();
         let class_internal_for_substitution =
@@ -445,77 +455,117 @@ fn resolve_receiver_type(
         return r.map(TypeName::from);
     }
 
-    // new Foo() / new Foo(args) -> return Foo's internal name
-    if let Some(class_name) = extract_constructor_class(expr) {
-        return resolve_simple_name_to_internal(class_name, ctx, index, scope).map(TypeName::from);
-    }
-
-    // function call: "getMain2()" / "getMain2(arg1, arg2)"
-    if let Some(internal) = resolve_method_call_receiver(expr, ctx, index, scope) {
-        return Some(internal);
-    }
-
-    // local variable
-    if let Some(lv) = ctx
-        .local_variables
-        .iter()
-        .find(|lv| lv.name.as_ref() == expr)
-    {
-        tracing::debug!(
+    if let Some(type_ctx) = ctx.extension::<SourceTypeCtx>() {
+        let resolver = TypeResolver::new(index);
+        let resolved = expression_typing::resolve_expression_type(
             expr,
-            type_internal = %lv.type_internal,
-            "found in locals"
+            &ctx.local_variables,
+            ctx.enclosing_internal_name.as_ref(),
+            &resolver,
+            type_ctx,
+            index,
         );
-
-        if !lv.type_internal.args.is_empty() {
-            let mut structured = lv.type_internal.clone();
-            if !structured.contains_slash()
-                && let Some(type_ctx) = ctx.extension::<SourceTypeCtx>()
-                && let Some(mut canonical) =
-                    type_ctx.resolve_type_name_strict(structured.erased_internal())
-            {
-                canonical.args = structured.args.clone();
-                canonical.array_dims = structured.array_dims;
-                structured = canonical;
-            }
-            tracing::debug!(
-                internal = %structured.to_internal_with_generics(),
-                "using structured local receiver type"
-            );
-            return Some(structured);
+        if resolved.is_some() {
+            return resolved;
         }
-
-        if let Some(type_ctx) = ctx.extension::<SourceTypeCtx>() {
-            let ty_source = lv.type_internal.erased_internal_with_arrays();
-            if let Some(relaxed) = type_ctx.resolve_type_name_relaxed(&ty_source) {
-                let internal = relaxed.ty.to_internal_with_generics();
-                tracing::debug!(
-                    ty_source,
-                    internal,
-                    quality = ?relaxed.quality,
-                    "resolved local receiver type via SourceTypeCtx relaxed parser"
-                );
-                return Some(relaxed.ty);
-            }
+    } else {
+        if let Some(class_name) = extract_constructor_class(expr) {
+            return resolve_simple_name_to_internal(class_name, ctx, index, scope).map(TypeName::from);
         }
-        if lv.type_internal.contains_slash() {
-            let internal = lv.type_internal.to_internal_with_generics();
-            tracing::debug!(internal, "type contains '/', returning directly");
-            return Some(lv.type_internal.clone());
+        if let Some(internal) = resolve_method_call_receiver(expr, ctx, index, scope) {
+            return Some(internal);
         }
-        let ty = lv.type_internal.erased_internal_with_arrays();
-        if let Some(internal) = resolve_simple_name_to_internal(&ty, ctx, index, scope) {
-            return Some(TypeName::from(internal));
+        if let Some(resolved) =
+            TypeResolver::new(index).resolve(expr, &ctx.local_variables, ctx.enclosing_internal_name.as_ref())
+        {
+            return Some(resolved);
         }
     }
-
-    tracing::debug!(expr, "local var not found");
 
     if let Some(internal_class) = resolve_strict_class_name(expr, ctx, index, scope) {
         return Some(TypeName::from(internal_class));
     }
 
     None
+}
+
+fn normalize_receiver_owner_for_members(
+    receiver: TypeName,
+    ctx: &SemanticContext,
+    index: &IndexView,
+    scope: IndexScope,
+) -> TypeName {
+    if matches!(
+        receiver.base_internal.as_ref(),
+        "+" | "-" | "?" | "*" | "capture"
+    ) {
+        return receiver;
+    }
+
+    if let Some(type_ctx) = ctx.extension::<SourceTypeCtx>() {
+        let source = receiver.erased_internal_with_arrays();
+        if let Some(mut resolved) = type_ctx.resolve_type_name_relaxed(&source).map(|r| r.ty) {
+            if !receiver.args.is_empty() {
+                resolved.args = receiver.args.clone();
+            }
+            resolved.array_dims = receiver.array_dims;
+            if resolved.contains_slash() {
+                return resolved;
+            }
+        }
+    }
+
+    if receiver.contains_slash() {
+        return receiver;
+    }
+
+    if let Some(internal) =
+        resolve_simple_name_to_internal(receiver.erased_internal(), ctx, index, scope)
+    {
+        return TypeName {
+            base_internal: internal,
+            args: receiver.args,
+            array_dims: receiver.array_dims,
+        };
+    }
+
+    receiver
+}
+
+/// Extract "Foo" from "new Foo()" / "new Foo(a, b)".
+fn extract_constructor_class(expr: &str) -> Option<&str> {
+    let rest = expr.trim().strip_prefix("new ")?;
+    let class_part = rest.split('(').next()?.trim();
+    if class_part.is_empty() {
+        None
+    } else {
+        Some(class_part)
+    }
+}
+
+/// Parse receiver expressions of the form "someMethod()" / "someMethod(args)" against enclosing.
+fn resolve_method_call_receiver(
+    expr: &str,
+    ctx: &SemanticContext,
+    index: &IndexView,
+    _scope: IndexScope,
+) -> Option<TypeName> {
+    let paren = expr.find('(')?;
+    if !expr.ends_with(')') {
+        return None;
+    }
+    let method_name = expr[..paren].trim();
+    if method_name.is_empty() || method_name.contains('.') || method_name.contains(' ') {
+        return None;
+    }
+    let args_text = &expr[paren + 1..expr.len() - 1];
+    let arg_count = if args_text.trim().is_empty() {
+        0i32
+    } else {
+        args_text.split(',').count() as i32
+    };
+    let enclosing = ctx.enclosing_internal_name.as_deref()?;
+    TypeResolver::new(index).resolve_method_return(enclosing, method_name, arg_count, &[])
 }
 
 fn resolve_strict_class_name(
@@ -575,48 +625,6 @@ fn resolve_strict_class_name(
     }
 
     None
-}
-
-/// Extract "Foo" from "new Foo()" / "new Foo(a, b)".
-fn extract_constructor_class(expr: &str) -> Option<&str> {
-    let rest = expr.trim().strip_prefix("new ")?;
-    // The part before the '(' is the class name.
-    let class_part = rest.split('(').next()?.trim();
-    if class_part.is_empty() {
-        None
-    } else {
-        Some(class_part)
-    }
-}
-
-/// Parse receiver expressions of the form "someMethod()" / "someMethod(args)"
-/// Find the method in the MRO of the enclosing class and get its return type
-fn resolve_method_call_receiver(
-    expr: &str,
-    ctx: &SemanticContext,
-    index: &IndexView,
-    _scope: IndexScope,
-) -> Option<TypeName> {
-    // Must contain '(' and end with ')'
-    let paren = expr.find('(')?;
-    if !expr.ends_with(')') {
-        return None;
-    }
-    let method_name = expr[..paren].trim();
-    if method_name.is_empty() || method_name.contains('.') || method_name.contains(' ') {
-        return None;
-    }
-    // arg count (simple estimate, no need for precision)
-    let args_text = &expr[paren + 1..expr.len() - 1];
-    let arg_count = if args_text.trim().is_empty() {
-        0i32
-    } else {
-        args_text.split(',').count() as i32
-    };
-
-    let enclosing = ctx.enclosing_internal_name.as_deref()?;
-    let resolver = TypeResolver::new(index);
-    resolver.resolve_method_return(enclosing, method_name, arg_count, &[])
 }
 
 /// Resolves simple class names to internal names

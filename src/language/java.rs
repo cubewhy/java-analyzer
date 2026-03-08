@@ -26,6 +26,7 @@ use tree_sitter::{Node, Parser};
 pub mod class_parser;
 pub mod completion;
 pub mod completion_context;
+pub mod expression_typing;
 pub mod injection;
 pub mod locals;
 pub mod location;
@@ -1030,6 +1031,145 @@ mod tests {
             }
             other => panic!("expected local variable candidate for a, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_functional_direct_chain_member_completion_after_method_ref() {
+        let idx = make_functional_chain_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        class Demo {
+            void f() {
+                Box<String> strBox = new Box<>(" hello ");
+                strBox.map(String::trim).g|
+            }
+        }
+        "#};
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            labels.iter().any(|l| l == "get"),
+            "direct chain receiver should remain Box<String> and expose get, got location={:?} labels={:?}",
+            ctx.location,
+            labels
+        );
+    }
+
+    #[test]
+    fn test_functional_chain_member_completion_parity_var_vs_direct() {
+        let idx = make_functional_chain_index();
+        let view = idx.view(root_scope());
+
+        let src_var = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        class Demo {
+            void f() {
+                Box<String> strBox = new Box<>(" hello ");
+                var a = strBox.map(String::trim);
+                a.g|
+            }
+        }
+        "#};
+        let (_ctx_var, labels_var) = ctx_and_labels_from_marked_source(src_var, &view);
+
+        let src_direct = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        class Demo {
+            void f() {
+                Box<String> strBox = new Box<>(" hello ");
+                strBox.map(String::trim).g|
+            }
+        }
+        "#};
+        let (_ctx_direct, labels_direct) = ctx_and_labels_from_marked_source(src_direct, &view);
+
+        let var_has_get = labels_var.iter().any(|l| l == "get");
+        let direct_has_get = labels_direct.iter().any(|l| l == "get");
+        assert_eq!(
+            direct_has_get, var_has_get,
+            "direct chain completion should match var-materialized chain completion for get()"
+        );
+        assert!(direct_has_get, "expected get() in both parity paths");
+    }
+
+    #[test]
+    fn test_functional_constructor_chain_var_local_materializes_type() {
+        let idx = make_functional_chain_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        class Demo {
+            void f() {
+                Box<String> s = new Box<>("x");
+                var b = s.map(ArrayList::new).get();
+                b|
+            }
+        }
+        "#};
+        let cursor_byte = src.find('|').expect("expected |");
+        let src_no_cursor = src.replacen('|', "", 1);
+        let rope = ropey::Rope::from_str(&src_no_cursor);
+        let cursor_char = rope.byte_to_char(cursor_byte);
+        let line = rope.char_to_line(cursor_char) as u32;
+        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
+        let mut parser = super::make_java_parser();
+        let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
+        let ctx = super::JavaLanguage
+            .parse_completion_context_with_tree(
+                &src_no_cursor,
+                &rope,
+                tree.root_node(),
+                line,
+                col,
+                None,
+                &ParseEnv {
+                    name_table: Some(view.build_name_table()),
+                },
+            )
+            .expect("parse_completion_context_with_tree returned None");
+        let results = CompletionEngine::new().complete(root_scope(), ctx, &JavaLanguage, &view);
+        let b = results
+            .iter()
+            .find(|c| c.label.as_ref() == "b")
+            .expect("expected local candidate b");
+        match &b.kind {
+            crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                assert!(
+                    type_descriptor.as_ref().starts_with("java/util/ArrayList"),
+                    "constructor reference local should materialize b as ArrayList, got {}",
+                    type_descriptor
+                );
+            }
+            other => panic!("expected local variable candidate for b, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_functional_constructor_chain_var_local_continues_members() {
+        let idx = make_functional_chain_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        package org.cubewhy;
+        import java.util.*;
+        class Demo {
+            void f() {
+                Box<String> s = new Box<>("x");
+                var b = s.map(ArrayList::new).get();
+                b.ad|
+            }
+        }
+        "#};
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            labels.iter().any(|l| l == "add"),
+            "constructor reference chain materialized through var should expose ArrayList members, got location={:?} labels={:?}",
+            ctx.location,
+            labels
+        );
     }
 
     #[test]

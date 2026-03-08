@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::completion::parser::parse_chain_from_expr;
 use crate::index::IndexView;
 use crate::index::MethodSummary;
+use crate::language::java::expression_typing;
 use crate::language::java::location::normalize_top_level_generic_base;
 use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::context::{
@@ -15,9 +15,9 @@ use crate::semantic::context::{
 use crate::semantic::types::symbol_resolver::SymbolResolver;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
-    ChainSegment, TypeResolver, parse_single_type_to_internal, singleton_descriptor_to_type,
+    TypeResolver, parse_single_type_to_internal, singleton_descriptor_to_type,
 };
-use crate::semantic::{CursorLocation, LocalVar, SemanticContext};
+use crate::semantic::{CursorLocation, SemanticContext};
 use rust_asm::constants::{ACC_ABSTRACT, ACC_STATIC};
 
 pub struct ContextEnricher<'a> {
@@ -96,7 +96,7 @@ impl<'a> ContextEnricher<'a> {
                 .collect();
 
             for (idx_in_vec, init_expr) in to_resolve {
-                if let Some(resolved) = resolve_var_init_expr(
+                if let Some(resolved) = expression_typing::resolve_var_init_expr(
                     &init_expr,
                     &ctx.local_variables,
                     ctx.enclosing_internal_name.as_ref(),
@@ -132,44 +132,15 @@ impl<'a> ContextEnricher<'a> {
             && !receiver_expr.is_empty()
         {
             let resolver = TypeResolver::new(self.view);
-            let resolved = if looks_like_array_access(receiver_expr) {
-                resolve_array_access_type(
-                    receiver_expr,
-                    &ctx.local_variables,
-                    ctx.enclosing_internal_name.as_ref(),
-                    &resolver,
-                    &type_ctx,
-                    self.view,
-                )
-            } else {
-                let chain = parse_chain_from_expr(receiver_expr);
-                tracing::debug!(?chain, receiver_expr, "enrich_context: parsed chain");
-
-                if chain.is_empty() {
-                    let r = resolver.resolve(
-                        receiver_expr,
-                        &ctx.local_variables,
-                        ctx.enclosing_internal_name.as_ref(),
-                    );
-                    tracing::debug!(
-                        ?r,
-                        receiver_expr,
-                        "enrich_context: chain is empty, resolver.resolve returned"
-                    );
-                    r
-                } else {
-                    let r = evaluate_chain(
-                        &chain,
-                        &ctx.local_variables,
-                        ctx.enclosing_internal_name.as_ref(),
-                        &resolver,
-                        &type_ctx,
-                        self.view,
-                    );
-                    tracing::debug!(?r, "enrich_context: evaluate_chain returned");
-                    r
-                }
-            };
+            let resolved = expression_typing::resolve_expression_type(
+                receiver_expr,
+                &ctx.local_variables,
+                ctx.enclosing_internal_name.as_ref(),
+                &resolver,
+                &type_ctx,
+                self.view,
+            );
+            tracing::debug!(?resolved, receiver_expr, "enrich_context: resolved receiver expression");
 
             tracing::debug!(?resolved, "enrich_context: resolved before final match");
 
@@ -202,34 +173,14 @@ impl<'a> ContextEnricher<'a> {
             && (receiver_expr.contains('(') || receiver_expr.contains("::"))
         {
             let resolver = TypeResolver::new(self.view);
-            let resolved = if looks_like_array_access(receiver_expr) {
-                resolve_array_access_type(
-                    receiver_expr,
-                    &ctx.local_variables,
-                    ctx.enclosing_internal_name.as_ref(),
-                    &resolver,
-                    &type_ctx,
-                    self.view,
-                )
-            } else {
-                let chain = parse_chain_from_expr(receiver_expr);
-                if chain.is_empty() {
-                    resolver.resolve(
-                        receiver_expr,
-                        &ctx.local_variables,
-                        ctx.enclosing_internal_name.as_ref(),
-                    )
-                } else {
-                    evaluate_chain(
-                        &chain,
-                        &ctx.local_variables,
-                        ctx.enclosing_internal_name.as_ref(),
-                        &resolver,
-                        &type_ctx,
-                        self.view,
-                    )
-                }
-            };
+            let resolved = expression_typing::resolve_expression_type(
+                receiver_expr,
+                &ctx.local_variables,
+                ctx.enclosing_internal_name.as_ref(),
+                &resolver,
+                &type_ctx,
+                self.view,
+            );
             if let Some(ty) = canonicalize_receiver_semantic(resolved, &type_ctx) {
                 ctx.typed_chain_receiver = Some(build_typed_chain_receiver(&ty));
                 if receiver_semantic_type.is_none() {
@@ -270,27 +221,6 @@ impl<'a> ContextEnricher<'a> {
 
         enrich_expected_type_context(ctx, self.view, &type_ctx);
     }
-}
-
-fn looks_like_array_access(expr: &str) -> bool {
-    expr.contains('[') && expr.trim_end().ends_with(']')
-}
-
-fn find_matching_angle(s: &str, start: usize) -> Option<usize> {
-    let mut depth = 0i32;
-    for (i, c) in s.char_indices().skip(start) {
-        match c {
-            '<' => depth += 1,
-            '>' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn canonicalize_receiver_semantic(
@@ -420,237 +350,6 @@ fn expand_local_type_strict(
     }
 
     ty.clone()
-}
-
-fn resolve_array_access_type(
-    expr: &str,
-    locals: &[LocalVar],
-    enclosing_internal: Option<&Arc<str>>,
-    resolver: &TypeResolver,
-    type_ctx: &SourceTypeCtx,
-    view: &IndexView,
-) -> Option<TypeName> {
-    let bracket = expr.rfind('[')?;
-    if !expr.trim_end().ends_with(']') {
-        return None;
-    }
-    let array_expr = expr[..bracket].trim();
-    if array_expr.is_empty() {
-        return None;
-    }
-
-    // Route through chain evaluation so nested calls resolve consistently.
-    let chain = parse_chain_from_expr(array_expr);
-    let array_type = if chain.is_empty() {
-        resolver.resolve(array_expr, locals, enclosing_internal)
-    } else {
-        evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view)
-    }?;
-
-    array_type.element_type()
-}
-
-fn resolve_var_init_expr(
-    expr: &str,
-    locals: &[LocalVar],
-    enclosing_internal: Option<&Arc<str>>,
-    resolver: &TypeResolver,
-    type_ctx: &SourceTypeCtx,
-    view: &IndexView,
-) -> Option<TypeName> {
-    let expr = expr.trim();
-    if let Some(rest) = expr.strip_prefix("new ") {
-        // Find the type boundary before constructor args / generics / array suffix.
-        let mut boundary_idx = rest.find(['(', '[', '{']).unwrap_or(rest.len());
-        if let Some(gen_start) = rest.find('<')
-            && gen_start < boundary_idx
-        {
-            if let Some(gen_end) = find_matching_angle(rest, gen_start) {
-                boundary_idx = gen_end + 1;
-            } else {
-                return None;
-            }
-        }
-        let type_name = rest[..boundary_idx].trim();
-
-        // Resolve the base type, with explicit primitive fallback.
-        let resolved_base: TypeName = match type_name {
-            "byte" | "short" | "int" | "long" | "float" | "double" | "boolean" | "char" => {
-                TypeName::new(type_name)
-            }
-            _ => type_ctx.resolve_type_name_strict(type_name)?,
-        };
-
-        let after_type = rest[boundary_idx..].trim_start();
-
-        if after_type.starts_with('[') || after_type.starts_with('{') {
-            let brace_idx = after_type.find('{').unwrap_or(after_type.len());
-            let dimensions = after_type[..brace_idx].matches('[').count();
-            let mut array_ty = resolved_base;
-            for _ in 0..dimensions {
-                array_ty = array_ty.wrap_array();
-            }
-            return Some(array_ty);
-        }
-
-        return Some(resolved_base);
-    }
-
-    let chain = parse_chain_from_expr(expr);
-    if !chain.is_empty() {
-        return evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view);
-    }
-
-    resolve_array_access_type(expr, locals, enclosing_internal, resolver, type_ctx, view)
-}
-
-/// Shared chain type-resolution logic for method calls and field reads.
-fn evaluate_chain(
-    chain: &[ChainSegment],
-    locals: &[LocalVar],
-    enclosing_internal: Option<&Arc<str>>,
-    resolver: &TypeResolver,
-    type_ctx: &SourceTypeCtx,
-    view: &IndexView,
-) -> Option<TypeName> {
-    let mut current: Option<TypeName> = None;
-    let resolve_qualifier = |q: &str| type_ctx.resolve_type_name_strict(q);
-    for (i, seg) in chain.iter().enumerate() {
-        // Split `name[index]` into base segment and trailing index dimensions.
-        let bracket_idx = seg.name.find('[');
-        let base_name = if let Some(idx) = bracket_idx {
-            &seg.name[..idx]
-        } else {
-            &seg.name
-        };
-        let dimensions = seg.name.matches('[').count();
-
-        if i == 0 {
-            if seg.arg_count.is_some() {
-                let recv_internal = enclosing_internal?;
-                let arg_types: Vec<TypeName> = seg
-                    .arg_texts
-                    .iter()
-                    .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
-                    .collect();
-                let arg_types_ref: &[TypeName] = if arg_types.len() == seg.arg_texts.len() {
-                    &arg_types
-                } else {
-                    &[]
-                };
-                current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
-                    recv_internal.as_ref(),
-                    base_name,
-                    seg.arg_count.unwrap_or(-1),
-                    arg_types_ref,
-                    &seg.arg_texts,
-                    locals,
-                    enclosing_internal,
-                    Some(&resolve_qualifier),
-                );
-            } else {
-                current = resolver.resolve(base_name, locals, enclosing_internal);
-                if current.is_none() {
-                    if let Some(enclosing) = enclosing_internal {
-                        let enclosing_simple = enclosing
-                            .rsplit('/')
-                            .next()
-                            .unwrap_or(enclosing)
-                            .rsplit('$')
-                            .next()
-                            .unwrap_or(enclosing);
-
-                        if base_name == enclosing_simple {
-                            current = Some(TypeName::new(enclosing.as_ref()));
-                        }
-                    }
-
-                    if current.is_none() {
-                        current = type_ctx.resolve_type_name_strict(base_name);
-                    }
-                }
-            }
-        } else {
-            let recv = current.as_ref()?;
-
-            // Handle parser output where `[0]` is emitted as a standalone segment.
-            if base_name.is_empty() {
-                current = Some(recv.clone());
-            } else {
-                let recv_full: TypeName = if recv.contains_slash() {
-                    recv.clone()
-                } else {
-                    let mut canonical =
-                        type_ctx.resolve_type_name_strict(recv.erased_internal())?;
-                    if !recv.args.is_empty() {
-                        canonical.args = recv.args.clone();
-                    }
-                    canonical.array_dims = recv.array_dims;
-                    canonical
-                };
-
-                if seg.arg_count.is_some() {
-                    let arg_types: Vec<TypeName> = seg
-                        .arg_texts
-                        .iter()
-                        .filter_map(|t| resolver.resolve(t.trim(), locals, enclosing_internal))
-                        .collect();
-                    let arg_types_ref: &[TypeName] = if arg_types.len() == seg.arg_texts.len() {
-                        &arg_types
-                    } else {
-                        &[]
-                    };
-                    let receiver_internal = recv_full.to_internal_with_generics();
-                    current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
-                        &receiver_internal,
-                        base_name,
-                        seg.arg_count.unwrap_or(-1),
-                        arg_types_ref,
-                        &seg.arg_texts,
-                        locals,
-                        enclosing_internal,
-                        Some(&resolve_qualifier),
-                    );
-                } else {
-                    let (methods, fields) =
-                        view.collect_inherited_members(recv_full.erased_internal());
-
-                    if let Some(f) = fields.iter().find(|f| f.name.as_ref() == base_name) {
-                        if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
-                            current = Some(TypeName::new(ty));
-                        } else {
-                            current = parse_single_type_to_internal(&f.descriptor);
-                        }
-                    } else if methods.iter().any(|m| m.name.as_ref() == base_name) {
-                        current = None;
-                    } else {
-                        current = None;
-                    }
-                }
-            }
-        }
-
-        // handle array access dims on segment
-        if dimensions > 0 {
-            // `take()` lets us mutate the current type while preserving failure semantics.
-            if let Some(mut ty) = current.take() {
-                let mut success = true;
-                for _ in 0..dimensions {
-                    if let Some(el) = ty.element_type() {
-                        ty = el;
-                    } else {
-                        success = false; // Indexing past array depth.
-                        break;
-                    }
-                }
-                // Only commit on successful dimensional reduction; otherwise keep `None`.
-                if success {
-                    current = Some(ty);
-                }
-            }
-        }
-    }
-    current
 }
 
 fn enrich_expected_type_context(
@@ -823,34 +522,14 @@ fn resolve_hint_receiver_type(
     resolver: &TypeResolver,
     expr: &str,
 ) -> Option<TypeName> {
-    let resolved = if looks_like_array_access(expr) {
-        resolve_array_access_type(
-            expr,
-            &ctx.local_variables,
-            ctx.enclosing_internal_name.as_ref(),
-            resolver,
-            type_ctx,
-            view,
-        )
-    } else {
-        let chain = parse_chain_from_expr(expr);
-        if chain.is_empty() {
-            resolver.resolve(
-                expr,
-                &ctx.local_variables,
-                ctx.enclosing_internal_name.as_ref(),
-            )
-        } else {
-            evaluate_chain(
-                &chain,
-                &ctx.local_variables,
-                ctx.enclosing_internal_name.as_ref(),
-                resolver,
-                type_ctx,
-                view,
-            )
-        }
-    };
+    let resolved = expression_typing::resolve_expression_type(
+        expr,
+        &ctx.local_variables,
+        ctx.enclosing_internal_name.as_ref(),
+        resolver,
+        type_ctx,
+        view,
+    );
 
     if let Some(canonical) = canonicalize_receiver_semantic(resolved.clone(), type_ctx) {
         return Some(canonical);
@@ -1420,6 +1099,7 @@ mod tests {
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex,
     };
+    use crate::semantic::LocalVar;
     use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC};
 
     fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
@@ -3794,7 +3474,7 @@ mod tests {
 
         let resolver = TypeResolver::new(&view);
         let single_chain = parse_chain_from_expr("single.get()");
-        let single_eval = evaluate_chain(
+        let single_eval = expression_typing::evaluate_chain(
             &single_chain,
             &locals,
             Some(&Arc::from("org/cubewhy/ClassWithGenerics")),
@@ -4642,7 +4322,7 @@ mod tests {
         let resolve_qualifier = |q: &str| type_ctx.resolve_type_name_strict(q);
         let mut ctx_trim = mk_ctx("strBox.map(String::trim).get()", "sub");
         let trim_chain = parse_chain_from_expr("strBox.map(String::trim).get()");
-        let trim_eval = evaluate_chain(
+        let trim_eval = expression_typing::evaluate_chain(
             &trim_chain,
             &ctx_trim.local_variables,
             ctx_trim.enclosing_internal_name.as_ref(),
@@ -4657,7 +4337,7 @@ mod tests {
         let trim_segments: Vec<String> = (0..trim_chain.len())
             .map(|i| {
                 let part = &trim_chain[..=i];
-                evaluate_chain(
+                expression_typing::evaluate_chain(
                     part,
                     &ctx_trim.local_variables,
                     ctx_trim.enclosing_internal_name.as_ref(),
@@ -4713,7 +4393,7 @@ mod tests {
 
         let mut ctx_ctor = mk_ctx("s.map(ArrayList::new).get()", "ad");
         let ctor_chain = parse_chain_from_expr("s.map(ArrayList::new).get()");
-        let ctor_eval = evaluate_chain(
+        let ctor_eval = expression_typing::evaluate_chain(
             &ctor_chain,
             &ctx_ctor.local_variables,
             ctx_ctor.enclosing_internal_name.as_ref(),
@@ -4728,7 +4408,7 @@ mod tests {
         let ctor_segments: Vec<String> = (0..ctor_chain.len())
             .map(|i| {
                 let part = &ctor_chain[..=i];
-                evaluate_chain(
+                expression_typing::evaluate_chain(
                     part,
                     &ctx_ctor.local_variables,
                     ctx_ctor.enclosing_internal_name.as_ref(),
