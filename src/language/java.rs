@@ -2824,6 +2824,169 @@ mod tests {
     }
 
     #[test]
+    fn test_completion_local_var_inside_method_argument_concatenation() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                int intValue = 1;
+                System.out.println("intValue = " + intVa|);
+            }
+        }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            matches!(&ctx.location, CursorLocation::MethodArgument { prefix } if prefix == "intVa"),
+            "expected MethodArgument{{intVa}}, got {:?}",
+            ctx.location
+        );
+        assert!(
+            labels.iter().any(|l| l == "intValue"),
+            "intValue should be offered inside arg subexpression, labels={labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_completion_local_var_inside_empty_method_argument_expression_hole() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                int testValue = 1;
+                System.out.println("test = " + |);
+            }
+        }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            matches!(&ctx.location, CursorLocation::MethodArgument { prefix } if prefix.is_empty()),
+            "expected MethodArgument with empty prefix, got {:?}",
+            ctx.location
+        );
+        assert!(
+            labels.iter().any(|l| l == "testValue"),
+            "testValue should be offered for empty expression hole in method argument, labels={labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_completion_local_var_inside_plain_method_argument() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void sink(String s) {}
+            void m() {
+                String value = "x";
+                sink(val|);
+            }
+        }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            matches!(&ctx.location, CursorLocation::MethodArgument { prefix } if prefix == "val"),
+            "expected MethodArgument{{val}}, got {:?}",
+            ctx.location
+        );
+        assert!(
+            labels.iter().any(|l| l == "value"),
+            "value should be offered in method-argument completion, labels={labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_completion_local_var_outside_method_argument_regression() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                int intValue = 1;
+                intVa|;
+            }
+        }
+        "#};
+
+        let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            labels.iter().any(|l| l == "intValue"),
+            "intValue should still be offered in ordinary expression completion, labels={labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_completion_local_var_inside_empty_non_argument_expression_hole_regression() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                int testValue = 1;
+                testValue + |;
+            }
+        }
+        "#};
+
+        let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            labels.iter().any(|l| l == "testValue"),
+            "testValue should be offered in non-argument empty expression hole, labels={labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_member_completion_inside_method_argument_regression() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![ClassMetadata {
+            package: Some(Arc::from("java/lang")),
+            name: Arc::from("String"),
+            internal_name: Arc::from("java/lang/String"),
+            super_name: Some(Arc::from("java/lang/Object")),
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![MethodSummary {
+                name: Arc::from("toString"),
+                params: MethodParams::empty(),
+                annotations: vec![],
+                access_flags: ACC_PUBLIC,
+                is_synthetic: false,
+                generic_signature: None,
+                return_type: Some(Arc::from("Ljava/lang/String;")),
+            }],
+            fields: vec![],
+            access_flags: ACC_PUBLIC,
+            inner_class_of: None,
+            generic_signature: None,
+            origin: ClassOrigin::Unknown,
+        }]);
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+        class T {
+            void m() {
+                String value = "x";
+                System.out.println(value.toStr|);
+            }
+        }
+        "#};
+
+        let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
+        assert!(
+            matches!(&ctx.location, CursorLocation::MemberAccess { member_prefix, .. } if member_prefix == "toStr"),
+            "expected MemberAccess{{toStr}}, got {:?}",
+            ctx.location
+        );
+        assert!(
+            labels.iter().any(|l| l == "toString"),
+            "member completion should still work in method arguments, labels={labels:?}"
+        );
+    }
+
+    #[test]
     fn test_direct_call_with_paren_is_member_access() {
         // fun|() — No receiver, should be parsed as an Expression, prefix = "fun"
         let src = indoc::indoc! {r#"

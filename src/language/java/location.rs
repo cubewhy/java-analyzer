@@ -798,8 +798,15 @@ fn find_prefix_in_argument_list(ctx: &JavaContextExtractor, arg_list: Node) -> S
     let mut cursor = arg_list.walk();
     for child in arg_list.named_children(&mut cursor) {
         if child.start_byte() <= ctx.offset && child.end_byte() >= ctx.offset.saturating_sub(1) {
-            let text = cursor_truncated_text(ctx, child);
-            let clean = strip_sentinel(&text);
+            let nested = find_prefix_in_expr_subtree(ctx, child);
+            if !nested.is_empty() {
+                return nested;
+            }
+
+            let clean = strip_sentinel(&cursor_truncated_text(ctx, child));
+            if is_empty_expression_site_after_operator(&clean) {
+                return String::new();
+            }
 
             if child.kind() == "ERROR" {
                 let last_non_ws = clean.chars().rev().find(|c| !c.is_whitespace());
@@ -816,6 +823,72 @@ fn find_prefix_in_argument_list(ctx: &JavaContextExtractor, arg_list: Node) -> S
         }
     }
     String::new()
+}
+
+fn is_empty_expression_site_after_operator(prefix: &str) -> bool {
+    let trimmed = prefix.trim_end();
+    let Some(last) = trimmed.chars().next_back() else {
+        return true;
+    };
+    matches!(
+        last,
+        '+' | '-'
+            | '*'
+            | '/'
+            | '%'
+            | '&'
+            | '|'
+            | '^'
+            | '<'
+            | '>'
+            | '='
+            | '!'
+            | '?'
+            | ':'
+            | '('
+            | '['
+            | '{'
+            | ','
+    )
+}
+
+fn find_prefix_in_expr_subtree(ctx: &JavaContextExtractor, node: Node) -> String {
+    if node.start_byte() > ctx.offset || node.end_byte() < ctx.offset.saturating_sub(1) {
+        return String::new();
+    }
+
+    if matches!(node.kind(), "identifier" | "type_identifier") {
+        return strip_sentinel(&cursor_truncated_text(ctx, node));
+    }
+
+    let mut walker = node.walk();
+    for child in node.named_children(&mut walker) {
+        if child.start_byte() <= ctx.offset && child.end_byte() >= ctx.offset.saturating_sub(1) {
+            let nested = find_prefix_in_expr_subtree(ctx, child);
+            if !nested.is_empty() {
+                return nested;
+            }
+        }
+    }
+
+    extract_identifier_prefix_near_cursor(ctx, node.start_byte())
+}
+
+fn extract_identifier_prefix_near_cursor(ctx: &JavaContextExtractor, lower_bound: usize) -> String {
+    let mut i = ctx.offset.min(ctx.source.len());
+    while i > lower_bound {
+        let ch = ctx.source.as_bytes()[i - 1] as char;
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if i >= ctx.offset {
+        return String::new();
+    }
+    strip_sentinel(&ctx.source[i..ctx.offset])
 }
 
 fn location_has_newline(loc: &CursorLocation) -> bool {
@@ -1454,6 +1527,54 @@ class A {
             loc
         );
         assert_eq!(query, "matr");
+    }
+
+    #[test]
+    fn test_method_argument_concat_uses_identifier_local_prefix() {
+        let src = indoc::indoc! {r#"
+class A {
+    void f(int intValue) {
+        System.out.println("intValue = " + intVa);
+    }
+}
+"#};
+        let marker = "intVa";
+        let offset = src.rfind(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(&loc, CursorLocation::MethodArgument { prefix } if prefix == "intVa"),
+            "Expected MethodArgument{{prefix:\"intVa\"}}, got {:?}",
+            loc
+        );
+        assert_eq!(query, "intVa");
+    }
+
+    #[test]
+    fn test_method_argument_concat_empty_rhs_is_empty_prefix() {
+        let src = indoc::indoc! {r#"
+class A {
+    void f(int testValue) {
+        System.out.println("test = " + );
+    }
+}
+"#};
+        let marker = "\"test = \" + ";
+        let offset = src.rfind(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(&loc, CursorLocation::MethodArgument { prefix } if prefix.is_empty()),
+            "Expected MethodArgument with empty prefix, got {:?}",
+            loc
+        );
+        assert!(query.is_empty(), "query should be empty, got {query:?}");
     }
 
     #[test]
