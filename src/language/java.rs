@@ -478,7 +478,9 @@ mod tests {
             java::{class_parser::parse_java_source, injection::build_injected_source},
             rope_utils::line_col_to_offset,
         },
+        semantic::LocalVar,
         semantic::context::{CurrentClassMember, CursorLocation},
+        semantic::types::type_name::TypeName,
     };
     use rust_asm::constants::ACC_PUBLIC;
     use std::sync::Arc;
@@ -553,10 +555,14 @@ mod tests {
         src_with_cursor: &str,
         view: &IndexView,
     ) -> (SemanticContext, Vec<CompletionCandidate>) {
-        let cursor_byte = src_with_cursor
-            .find('|')
-            .expect("expected | cursor marker in source");
-        let src = src_with_cursor.replacen('|', "", 1);
+        let (src, cursor_byte) = if let Some(idx) = src_with_cursor.find("/*caret*/") {
+            (src_with_cursor.replacen("/*caret*/", "", 1), idx)
+        } else {
+            let idx = src_with_cursor
+                .find('|')
+                .expect("expected | or /*caret*/ cursor marker in source");
+            (src_with_cursor.replacen('|', "", 1), idx)
+        };
         let rope = ropey::Rope::from_str(&src);
         let cursor_char = rope.byte_to_char(cursor_byte);
         let line = rope.char_to_line(cursor_char) as u32;
@@ -774,7 +780,39 @@ mod tests {
                 generic_signature: None,
                 origin: ClassOrigin::Unknown,
             },
-            make_class("java/lang", "String"),
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![
+                    MethodSummary {
+                        name: Arc::from("substring"),
+                        params: MethodParams::from([("I", "beginIndex")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Ljava/lang/String;")),
+                    },
+                    MethodSummary {
+                        name: Arc::from("isEmpty"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("Z")),
+                    },
+                ],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
         ]);
         idx
     }
@@ -896,6 +934,139 @@ mod tests {
         assert!(
             !candidates.iter().any(|c| c.label.as_ref() == "append"),
             "append should not be available outside instanceof true branch"
+        );
+    }
+
+    #[test]
+    fn test_instanceof_and_true_branch_narrows_multiple_symbols() {
+        let src_a = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Object a = new StringBuilder();
+                    Object b = "x";
+                    if (a instanceof StringBuilder && b instanceof String) {
+                        a.appe|
+                    }
+                }
+            }
+        "#};
+        let src_b = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Object a = new StringBuilder();
+                    Object b = "x";
+                    if (a instanceof StringBuilder && b instanceof String) {
+                        b.subs|
+                    }
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+
+        let (_ctx_a, candidates_a) = ctx_and_candidates_from_marked_source(src_a, &view);
+        assert!(
+            candidates_a.iter().any(|c| c.label.as_ref() == "append"),
+            "a should narrow to StringBuilder in && true branch"
+        );
+        let (_ctx_b, candidates_b) = ctx_and_candidates_from_marked_source(src_b, &view);
+        assert!(
+            candidates_b.iter().any(|c| c.label.as_ref() == "substring"),
+            "b should narrow to String in && true branch"
+        );
+    }
+
+    #[test]
+    fn test_instanceof_and_rhs_short_circuit_narrowing() {
+        let src = indoc::indoc! {r#"
+            class T {
+                void m() {
+                    Object a = new StringBuilder();
+                    if (a instanceof StringBuilder && a.appe|) {
+                    }
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        assert!(
+            candidates.iter().any(|c| c.label.as_ref() == "append"),
+            "RHS of && should see lhs true-facts"
+        );
+    }
+
+    #[test]
+    fn test_instanceof_or_rhs_negated_lhs_short_circuit_narrowing() {
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+        let mut flow = std::collections::HashMap::new();
+        flow.insert(Arc::from("x"), TypeName::new("java/lang/String"));
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "subs".to_string(),
+                receiver_expr: "x".to_string(),
+                arguments: None,
+            },
+            "subs",
+            vec![LocalVar {
+                name: Arc::from("x"),
+                type_internal: TypeName::new("java/lang/Object"),
+                init_expr: None,
+            }],
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .with_flow_type_overrides(flow)
+        .with_extension(Arc::new(SourceTypeCtx::new(
+            None,
+            vec![],
+            Some(view.build_name_table()),
+        )));
+        let engine = CompletionEngine::new();
+        let candidates = engine.complete(root_scope(), ctx, &JavaLanguage, &view);
+        assert!(
+            candidates.iter().any(|c| c.label.as_ref() == "substring"),
+            "RHS of || should narrow from false case of !(x instanceof String)"
+        );
+    }
+
+    #[test]
+    fn test_instanceof_or_true_branch_is_not_over_narrowed() {
+        let src_a = indoc::indoc! {r#"
+            class T {
+                void m(Object a, Object b) {
+                    if (a instanceof String || b instanceof StringBuilder) {
+                        a.appe/*caret*/
+                    }
+                }
+            }
+        "#};
+        let src_b = indoc::indoc! {r#"
+            class T {
+                void m(Object a, Object b) {
+                    if (a instanceof String || b instanceof StringBuilder) {
+                        b.appe/*caret*/
+                    }
+                }
+            }
+        "#};
+        let idx = make_instanceof_narrowing_index();
+        let view = idx.view(root_scope());
+
+        let (_ctx_a, candidates_a) = ctx_and_candidates_from_marked_source(src_a, &view);
+        assert!(
+            !candidates_a.iter().any(|c| c.label.as_ref() == "append"),
+            "a should not be narrowed in true branch of general ||"
+        );
+        let (_ctx_b, candidates_b) = ctx_and_candidates_from_marked_source(src_b, &view);
+        assert!(
+            !candidates_b.iter().any(|c| c.label.as_ref() == "append"),
+            "b should not be narrowed in true branch of general ||"
         );
     }
 

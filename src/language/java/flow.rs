@@ -8,27 +8,49 @@ use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::LocalVar;
 use crate::semantic::types::type_name::TypeName;
 
+type NarrowingFacts = HashMap<Arc<str>, TypeName>;
+
+#[derive(Default)]
+struct FlowFacts {
+    when_true: NarrowingFacts,
+    when_false: NarrowingFacts,
+}
+
 pub fn extract_instanceof_true_branch_overrides(
     ctx: &JavaContextExtractor,
     cursor_node: Option<Node>,
     type_ctx: &SourceTypeCtx,
     locals: &[LocalVar],
-) -> HashMap<Arc<str>, TypeName> {
-    let mut out: HashMap<Arc<str>, TypeName> = HashMap::new();
+) -> NarrowingFacts {
+    let mut out: NarrowingFacts = HashMap::new();
     let mut current = cursor_node;
 
     while let Some(node) = current {
         if node.kind() == "if_statement"
-            && let Some(consequence) = node.child_by_field_name("consequence")
+            && let Some(condition) = node.child_by_field_name("condition")
+            && let Some(condition_expr) = unwrap_parenthesized_expression(condition)
         {
-            // Restrict narrowing to the true branch subtree only.
-            if node_contains_offset(consequence, ctx.offset)
-                && let Some(condition) = node.child_by_field_name("condition")
-                && let Some((name, ty)) = parse_instanceof_narrowing(ctx, condition, type_ctx)
-                && locals.iter().any(|lv| lv.name.as_ref() == name.as_ref())
+            // Inside `if (...) { ... }` true branch body: apply condition true-facts.
+            if let Some(consequence) = node.child_by_field_name("consequence")
+                && node_contains_offset(consequence, ctx.offset)
             {
-                // Walk from inner to outer `if`; keep inner-most fact on conflict.
-                out.entry(name).or_insert(ty);
+                merge_facts(
+                    &mut out,
+                    &facts_for_expr(condition_expr, ctx, type_ctx, locals).when_true,
+                );
+            }
+
+            // Inside condition expression itself: apply short-circuit facts available
+            // at cursor position (e.g. RHS of && / RHS of || from false LHS).
+            if node_contains_offset(condition, ctx.offset) {
+                let at_cursor = facts_available_at_expr_position(
+                    condition_expr,
+                    ctx.offset,
+                    ctx,
+                    type_ctx,
+                    locals,
+                );
+                merge_facts(&mut out, &at_cursor);
             }
         }
         current = node.parent();
@@ -37,19 +59,119 @@ pub fn extract_instanceof_true_branch_overrides(
     out
 }
 
-fn node_contains_offset(node: Node, offset: usize) -> bool {
-    node.start_byte() <= offset && offset <= node.end_byte()
+fn facts_for_expr(
+    expr: Node,
+    ctx: &JavaContextExtractor,
+    type_ctx: &SourceTypeCtx,
+    locals: &[LocalVar],
+) -> FlowFacts {
+    let expr = peel_wrappers(expr);
+
+    if let Some((name, ty)) = parse_instanceof_narrowing(ctx, expr, type_ctx, locals) {
+        let mut when_true = HashMap::new();
+        when_true.insert(name, ty);
+        return FlowFacts {
+            when_true,
+            when_false: HashMap::new(),
+        };
+    }
+
+    // !(x instanceof T): false implies x instanceof T.
+    if expr.kind() == "unary_expression"
+        && unary_operator(expr, ctx).as_deref() == Some("!")
+        && let Some(operand) = unary_operand(expr)
+    {
+        let operand_facts = facts_for_expr(operand, ctx, type_ctx, locals);
+        return FlowFacts {
+            when_true: operand_facts.when_false,
+            when_false: operand_facts.when_true,
+        };
+    }
+
+    if expr.kind() == "binary_expression"
+        && let Some(op) = binary_operator(expr)
+        && let (Some(left), Some(right)) = (binary_left(expr), binary_right(expr))
+    {
+        let left_facts = facts_for_expr(left, ctx, type_ctx, locals);
+        let right_facts = facts_for_expr(right, ctx, type_ctx, locals);
+
+        return match op.as_str() {
+            "&&" => {
+                // (A && B) true => A true and B true.
+                // (A && B) false is not used in this scoped implementation.
+                let mut when_true = left_facts.when_true;
+                merge_facts(&mut when_true, &right_facts.when_true);
+                FlowFacts {
+                    when_true,
+                    when_false: HashMap::new(),
+                }
+            }
+            "||" => {
+                // (A || B) false => A false and B false.
+                // We intentionally do not infer whole-branch true facts for ||.
+                let mut when_false = left_facts.when_false;
+                merge_facts(&mut when_false, &right_facts.when_false);
+                FlowFacts {
+                    when_true: HashMap::new(),
+                    when_false,
+                }
+            }
+            _ => FlowFacts::default(),
+        };
+    }
+
+    FlowFacts::default()
+}
+
+fn facts_available_at_expr_position(
+    expr: Node,
+    offset: usize,
+    ctx: &JavaContextExtractor,
+    type_ctx: &SourceTypeCtx,
+    locals: &[LocalVar],
+) -> NarrowingFacts {
+    let expr = peel_wrappers(expr);
+    if !node_contains_offset(expr, offset) {
+        return HashMap::new();
+    }
+
+    if expr.kind() == "binary_expression"
+        && let Some(op) = binary_operator(expr)
+        && let (Some(left), Some(right)) = (binary_left(expr), binary_right(expr))
+    {
+        if node_contains_offset(right, offset) {
+            let mut rhs_facts =
+                facts_available_at_expr_position(right, offset, ctx, type_ctx, locals);
+            let left_facts = facts_for_expr(left, ctx, type_ctx, locals);
+            match op.as_str() {
+                "&&" => merge_facts(&mut rhs_facts, &left_facts.when_true),
+                "||" => merge_facts(&mut rhs_facts, &left_facts.when_false),
+                _ => {}
+            }
+            return rhs_facts;
+        }
+
+        if node_contains_offset(left, offset) {
+            return facts_available_at_expr_position(left, offset, ctx, type_ctx, locals);
+        }
+    }
+
+    if expr.kind() == "unary_expression"
+        && let Some(operand) = unary_operand(expr)
+        && node_contains_offset(operand, offset)
+    {
+        return facts_available_at_expr_position(operand, offset, ctx, type_ctx, locals);
+    }
+
+    HashMap::new()
 }
 
 fn parse_instanceof_narrowing(
     ctx: &JavaContextExtractor,
-    condition: Node,
+    expr: Node,
     type_ctx: &SourceTypeCtx,
+    locals: &[LocalVar],
 ) -> Option<(Arc<str>, TypeName)> {
-    // if_statement.condition is parenthesized_expression; unwrap to payload expression.
-    let expr = condition
-        .child_by_field_name("expression")
-        .or_else(|| first_named_child(condition))?;
     if expr.kind() != "instanceof_expression" {
         return None;
     }
@@ -59,7 +181,7 @@ fn parse_instanceof_narrowing(
         return None;
     }
     let var_name = ctx.node_text(left).trim();
-    if var_name.is_empty() {
+    if var_name.is_empty() || !locals.iter().any(|lv| lv.name.as_ref() == var_name) {
         return None;
     }
 
@@ -73,7 +195,247 @@ fn parse_instanceof_narrowing(
     Some((Arc::from(var_name), narrowed))
 }
 
+fn peel_wrappers(mut node: Node) -> Node {
+    loop {
+        if node.kind() == "parenthesized_expression"
+            && let Some(inner) = unwrap_parenthesized_expression(node)
+        {
+            node = inner;
+            continue;
+        }
+        if node.kind() == "expression_statement"
+            && let Some(inner) = first_named_child(node)
+        {
+            node = inner;
+            continue;
+        }
+        break node;
+    }
+}
+
+fn unwrap_parenthesized_expression(node: Node) -> Option<Node> {
+    if node.kind() == "parenthesized_expression" {
+        node.child_by_field_name("expression")
+            .or_else(|| first_named_child(node))
+    } else {
+        Some(node)
+    }
+}
+
+fn unary_operator(node: Node, ctx: &JavaContextExtractor) -> Option<String> {
+    if let Some(op) = node.child_by_field_name("operator") {
+        return Some(ctx.node_text(op).trim().to_string());
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if matches!(child.kind(), "!" | "~" | "+" | "-") {
+            return Some(child.kind().to_string());
+        }
+    }
+    None
+}
+
+fn unary_operand(node: Node) -> Option<Node> {
+    node.child_by_field_name("operand").or_else(|| {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).next()
+    })
+}
+
+fn binary_operator(node: Node) -> Option<String> {
+    if let Some(op) = node.child_by_field_name("operator") {
+        match op.kind() {
+            "&&" => return Some("&&".to_string()),
+            "||" => return Some("||".to_string()),
+            _ => {}
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        match child.kind() {
+            "&&" => return Some("&&".to_string()),
+            "||" => return Some("||".to_string()),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn binary_left(node: Node) -> Option<Node> {
+    node.child_by_field_name("left").or_else(|| {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).next()
+    })
+}
+
+fn binary_right(node: Node) -> Option<Node> {
+    node.child_by_field_name("right").or_else(|| {
+        let mut cursor = node.walk();
+        node.named_children(&mut cursor).nth(1)
+    })
+}
+
+fn merge_facts(dst: &mut NarrowingFacts, src: &NarrowingFacts) {
+    for (name, ty) in src {
+        if let Some(existing) = dst.get(name) {
+            if existing.erased_internal() != ty.erased_internal() {
+                // Conflicting facts are dropped for soundness.
+                dst.remove(name);
+            }
+            continue;
+        }
+        dst.insert(name.clone(), ty.clone());
+    }
+}
+
+fn node_contains_offset(node: Node, offset: usize) -> bool {
+    node.start_byte() <= offset && offset <= node.end_byte()
+}
+
 fn first_named_child(node: Node) -> Option<Node> {
     let mut cursor = node.walk();
     node.named_children(&mut cursor).next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::NameTable;
+    use crate::language::java::make_java_parser;
+
+    fn setup(src_with_cursor: &str) -> (JavaContextExtractor, tree_sitter::Tree, usize) {
+        let (src, cursor_offset) = if let Some(idx) = src_with_cursor.find("/*caret*/") {
+            (src_with_cursor.replacen("/*caret*/", "", 1), idx)
+        } else {
+            let idx = src_with_cursor
+                .find('|')
+                .expect("expected | or /*caret*/ cursor marker");
+            (src_with_cursor.replacen('|', "", 1), idx)
+        };
+        let mut parser = make_java_parser();
+        let tree = parser.parse(&src, None).expect("parse java");
+        (
+            JavaContextExtractor::new(src, cursor_offset, None),
+            tree,
+            cursor_offset,
+        )
+    }
+
+    fn cursor_node(root: Node, offset: usize) -> Option<Node> {
+        root.named_descendant_for_byte_range(offset.saturating_sub(1), offset)
+            .or_else(|| root.named_descendant_for_byte_range(offset, offset + 1))
+    }
+
+    fn type_ctx() -> SourceTypeCtx {
+        SourceTypeCtx::new(
+            None,
+            vec![],
+            Some(NameTable::from_names(vec![
+                Arc::from("java/lang/String"),
+                Arc::from("java/lang/StringBuilder"),
+                Arc::from("java/lang/Object"),
+            ])),
+        )
+    }
+
+    #[test]
+    fn test_and_rhs_gets_lhs_true_instanceof_fact() {
+        let src = r#"
+            class T {
+                void m(Object a) {
+                    if (a instanceof StringBuilder && a.appe|) {
+                    }
+                }
+            }
+        "#;
+        let (extractor, tree, offset) = setup(src);
+        let root = tree.root_node();
+        let locals = vec![LocalVar {
+            name: Arc::from("a"),
+            type_internal: TypeName::new("java/lang/Object"),
+            init_expr: None,
+        }];
+        let facts = extract_instanceof_true_branch_overrides(
+            &extractor,
+            cursor_node(root, offset),
+            &type_ctx(),
+            &locals,
+        );
+        assert_eq!(
+            facts.get("a").map(TypeName::erased_internal),
+            Some("java/lang/StringBuilder")
+        );
+    }
+
+    #[test]
+    fn test_or_rhs_gets_false_lhs_fact_from_negated_instanceof() {
+        let src = r#"
+            class T {
+                void m(Object x) {
+                    if (!(x instanceof String) || x.subs/*caret*/cript(0)) {
+                    }
+                }
+            }
+        "#;
+        let (extractor, tree, offset) = setup(src);
+        let root = tree.root_node();
+        let cursor = cursor_node(root, offset).expect("cursor node");
+        let locals = vec![LocalVar {
+            name: Arc::from("x"),
+            type_internal: TypeName::new("java/lang/Object"),
+            init_expr: None,
+        }];
+        let facts = extract_instanceof_true_branch_overrides(
+            &extractor,
+            Some(cursor),
+            &type_ctx(),
+            &locals,
+        );
+        assert_eq!(
+            facts.get("x").map(TypeName::erased_internal),
+            Some("java/lang/String")
+        );
+    }
+
+    #[test]
+    fn test_or_true_branch_does_not_collect_disjunctive_true_facts() {
+        let src = r#"
+            class T {
+                void m(Object a, Object b) {
+                    if (a instanceof String || b instanceof StringBuilder) {
+                        a.appe/*caret*/
+                    }
+                }
+            }
+        "#;
+        let (extractor, tree, offset) = setup(src);
+        let root = tree.root_node();
+        let locals = vec![
+            LocalVar {
+                name: Arc::from("a"),
+                type_internal: TypeName::new("java/lang/Object"),
+                init_expr: None,
+            },
+            LocalVar {
+                name: Arc::from("b"),
+                type_internal: TypeName::new("java/lang/Object"),
+                init_expr: None,
+            },
+        ];
+        let facts = extract_instanceof_true_branch_overrides(
+            &extractor,
+            cursor_node(root, offset),
+            &type_ctx(),
+            &locals,
+        );
+        assert!(
+            facts.is_empty(),
+            "general || true-branch should not be over-narrowed, got: {:?}",
+            facts
+                .iter()
+                .map(|(k, v)| format!("{k}:{}", v.erased_internal()))
+                .collect::<Vec<_>>()
+        );
+    }
 }
