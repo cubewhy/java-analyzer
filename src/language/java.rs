@@ -707,6 +707,7 @@ mod tests {
                 origin: ClassOrigin::Unknown,
             },
             make_class("java/lang", "Class"),
+            make_class("java/lang", "Integer"),
             ClassMetadata {
                 package: Some(Arc::from("java/lang")),
                 name: Arc::from("String"),
@@ -4490,7 +4491,10 @@ mod tests {
         let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
         assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
         assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
-        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label == "substring"),
+            "{labels:?}"
+        );
         assert!(!labels.iter().any(|label| label == "charAt"), "{labels:?}");
         assert!(!labels.iter().any(|label| label == "isBlank"), "{labels:?}");
         assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
@@ -4512,7 +4516,10 @@ mod tests {
         let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
         assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
         assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
-        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label == "substring"),
+            "{labels:?}"
+        );
         assert!(!labels.iter().any(|label| label == "size"), "{labels:?}");
         assert!(!labels.iter().any(|label| label == "isEmpty"), "{labels:?}");
         assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
@@ -4534,8 +4541,164 @@ mod tests {
         let (_ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
         assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
         assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
-        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label == "substring"),
+            "{labels:?}"
+        );
         assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_array_get_class_var_inference_materializes_reference_array_class_type() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f(Integer[] s) {
+                var a = s.getClass();
+                a|
+              }
+            }
+        "#};
+
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let a = candidates
+            .iter()
+            .find(|candidate| candidate.label.as_ref() == "a")
+            .expect("expected local variable completion for a");
+
+        match &a.kind {
+            crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                assert_eq!(
+                    type_descriptor.as_ref(),
+                    TypeName::with_args(
+                        "java/lang/Class",
+                        vec![TypeName::new("java/lang/Integer").with_array_dims(1)],
+                    )
+                    .to_internal_with_generics()
+                );
+            }
+            other => panic!("expected local variable candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_array_get_class_var_inference_materializes_multidimensional_array_class_type() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f(String[][] s) {
+                var a = s.getClass();
+                a|
+              }
+            }
+        "#};
+
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let a = candidates
+            .iter()
+            .find(|candidate| candidate.label.as_ref() == "a")
+            .expect("expected local variable completion for a");
+
+        match &a.kind {
+            crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                assert_eq!(
+                    type_descriptor.as_ref(),
+                    TypeName::with_args(
+                        "java/lang/Class",
+                        vec![TypeName::new("java/lang/String").with_array_dims(2)],
+                    )
+                    .to_internal_with_generics()
+                );
+            }
+            other => panic!("expected local variable candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_array_get_class_var_inference_materializes_primitive_array_class_type() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f(int[] s) {
+                var a = s.getClass();
+                a|
+              }
+            }
+        "#};
+
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        let a = candidates
+            .iter()
+            .find(|candidate| candidate.label.as_ref() == "a")
+            .expect("expected local variable completion for a");
+
+        match &a.kind {
+            crate::completion::CandidateKind::LocalVariable { type_descriptor } => {
+                assert_ne!(type_descriptor.as_ref(), "unknown");
+                assert_eq!(
+                    type_descriptor.as_ref(),
+                    TypeName::with_args(
+                        "java/lang/Class",
+                        vec![TypeName::new("int").with_array_dims(1)],
+                    )
+                    .to_internal_with_generics()
+                );
+            }
+            other => panic!("expected local variable candidate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_snapshot_array_get_class_var_inference_provenance() {
+        let idx = make_array_completion_index();
+        let view = idx.view(root_scope());
+        let src = indoc::indoc! {r#"
+            class T {
+              void f(Integer[] s) {
+                var a = s.getClass();
+                a|
+              }
+            }
+        "#};
+
+        let (mut ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
+        let mut locals: Vec<String> = ctx
+            .local_variables
+            .iter()
+            .map(|lv| {
+                format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                )
+            })
+            .collect();
+        locals.sort();
+
+        let mut local_candidates: Vec<String> = candidates
+            .iter()
+            .filter_map(|candidate| match &candidate.kind {
+                crate::completion::CandidateKind::LocalVariable { type_descriptor } => Some(
+                    format!("{}|descriptor={}", candidate.label, type_descriptor),
+                ),
+                _ => None,
+            })
+            .collect();
+        local_candidates.sort();
+
+        insta::assert_snapshot!(
+            "array_get_class_var_inference_provenance",
+            format!(
+                "location={:?}\nlocals=\n{}\nlocal_candidates=\n{}",
+                ctx.location,
+                locals.join("\n"),
+                local_candidates.join("\n"),
+            )
+        );
     }
 
     #[test]
@@ -4556,7 +4719,10 @@ mod tests {
         let mut rows: Vec<String> = candidates
             .into_iter()
             .filter(|candidate| {
-                matches!(candidate.label.as_ref(), "length" | "getClass" | "substring")
+                matches!(
+                    candidate.label.as_ref(),
+                    "length" | "getClass" | "substring"
+                )
             })
             .map(|candidate| {
                 format!(

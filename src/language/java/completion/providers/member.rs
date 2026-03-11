@@ -1781,7 +1781,10 @@ mod tests {
         assert!(labels.iter().any(|label| label == "length"), "{labels:?}");
         assert!(labels.iter().any(|label| label == "getClass"), "{labels:?}");
         assert!(labels.iter().any(|label| label == "hashCode"), "{labels:?}");
-        assert!(!labels.iter().any(|label| label == "substring"), "{labels:?}");
+        assert!(
+            !labels.iter().any(|label| label == "substring"),
+            "{labels:?}"
+        );
         assert!(!labels.iter().any(|label| label == "charAt"), "{labels:?}");
         assert!(!labels.iter().any(|label| label == "isBlank"), "{labels:?}");
         assert!(!labels.iter().any(|label| label == "stream"), "{labels:?}");

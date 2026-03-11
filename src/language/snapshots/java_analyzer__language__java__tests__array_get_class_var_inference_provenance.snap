@@ -1,0 +1,10 @@
+---
+source: src/language/java.rs
+expression: "format!(\"location={:?}\\nlocals=\\n{}\\nlocal_candidates=\\n{}\", ctx.location,\nlocals.join(\"\\n\"), local_candidates.join(\"\\n\"),)"
+---
+location=Expression { prefix: "a" }
+locals=
+a:java/lang/Class<[Ljava/lang/Integer;>
+s:java/lang/Integer[]
+local_candidates=
+a|descriptor=java/lang/Class<[Ljava/lang/Integer;>

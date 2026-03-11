@@ -380,6 +380,20 @@ fn resolve_expression_via_existing_resolver(
     evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view)
 }
 
+fn intrinsic_method_return_type(
+    receiver: &TypeName,
+    method_name: &str,
+    arg_count: i32,
+) -> Option<TypeName> {
+    if receiver.is_array() && method_name == "getClass" && arg_count == 0 {
+        return Some(TypeName::with_args(
+            "java/lang/Class",
+            vec![receiver.clone()],
+        ));
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_unary_expression_type(
     node: Node,
@@ -976,7 +990,7 @@ pub(crate) fn evaluate_chain(
             if base_name.is_empty() {
                 current = Some(recv.clone());
             } else {
-                let recv_full: TypeName = if recv.contains_slash() {
+                let recv_full: TypeName = if recv.contains_slash() || recv.is_primitive() {
                     recv.clone()
                 } else {
                     let mut canonical =
@@ -989,6 +1003,14 @@ pub(crate) fn evaluate_chain(
                 };
 
                 if seg.arg_count.is_some() {
+                    if let Some(intrinsic) = intrinsic_method_return_type(
+                        &recv_full,
+                        base_name,
+                        seg.arg_count.unwrap_or(-1),
+                    ) {
+                        current = Some(intrinsic);
+                        continue;
+                    }
                     let arg_types: Vec<TypeName> = seg
                         .arg_texts
                         .iter()
@@ -1512,6 +1534,99 @@ mod tests {
         .expect("array length type");
 
         assert_eq!(ty, TypeName::new("int"));
+    }
+
+    #[test]
+    fn test_array_get_class_expression_type_preserves_reference_array_identity() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("s"),
+            type_internal: TypeName::new("java/lang/Integer").with_array_dims(1),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "s.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("array getClass type");
+
+        assert_eq!(
+            ty,
+            TypeName::with_args(
+                "java/lang/Class",
+                vec![TypeName::new("java/lang/Integer").with_array_dims(1)],
+            )
+        );
+    }
+
+    #[test]
+    fn test_array_get_class_expression_type_preserves_multidimensional_array_identity() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("s"),
+            type_internal: TypeName::new("java/lang/String").with_array_dims(2),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "s.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("multidimensional array getClass type");
+
+        assert_eq!(
+            ty,
+            TypeName::with_args(
+                "java/lang/Class",
+                vec![TypeName::new("java/lang/String").with_array_dims(2)],
+            )
+        );
+    }
+
+    #[test]
+    fn test_array_get_class_expression_type_preserves_primitive_array_identity() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = make_type_ctx(&view);
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![LocalVar {
+            name: Arc::from("s"),
+            type_internal: TypeName::new("int").with_array_dims(1),
+            init_expr: None,
+        }];
+
+        let ty = resolve_expression_type(
+            "s.getClass()",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("primitive array getClass type");
+
+        assert_eq!(
+            ty,
+            TypeName::with_args(
+                "java/lang/Class",
+                vec![TypeName::new("int").with_array_dims(1)],
+            )
+        );
     }
 
     #[test]
