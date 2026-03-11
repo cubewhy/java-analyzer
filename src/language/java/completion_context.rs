@@ -12,6 +12,9 @@ use crate::semantic::context::{
     SamSignature, TypedChainConfidence, TypedChainReceiver, TypedChainReceiverMode,
     TypedExpressionContext,
 };
+use crate::semantic::types::generics::{
+    JvmType, parse_class_type_parameters, parse_method_signature_types,
+};
 use crate::semantic::types::symbol_resolver::SymbolResolver;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
@@ -19,7 +22,6 @@ use crate::semantic::types::{
     singleton_descriptor_to_type,
 };
 use crate::semantic::{CursorLocation, SemanticContext};
-use crate::semantic::types::generics::{JvmType, parse_class_type_parameters, parse_method_signature_types};
 use rust_asm::constants::{ACC_ABSTRACT, ACC_STATIC, ACC_VARARGS};
 
 pub struct ContextEnricher<'a> {
@@ -533,7 +535,11 @@ fn bind_active_lambda_param_types(ctx: &mut SemanticContext) {
         return;
     }
 
-    for (name, ty) in ctx.active_lambda_param_names.iter().zip(sam.param_types.iter()) {
+    for (name, ty) in ctx
+        .active_lambda_param_names
+        .iter()
+        .zip(sam.param_types.iter())
+    {
         if !is_concrete_type_name(ty) {
             continue;
         }
@@ -626,7 +632,7 @@ fn resolve_expected_type_from_method_argument(
                 type_ctx,
                 view,
             )
-                .unwrap_or_else(|| TypeName::new("unknown"))
+            .unwrap_or_else(|| TypeName::new("unknown"))
         })
         .collect();
     let mut arg_types_for_selection = arg_types.clone();
@@ -665,22 +671,22 @@ fn resolve_expected_type_from_method_argument(
         })
         .or_else(|| {
             resolver
-        .resolve_selected_param_type_from_generic_signature(
-            &receiver_internal,
-            selected.method,
-            hint.arg_index,
-            selected.mode,
-        )
-        .map(|(ty, exact)| {
-            (
-                ty,
-                if exact {
-                    ExpectedTypeConfidence::Exact
-                } else {
-                    ExpectedTypeConfidence::Partial
-                },
-            )
-        })
+                .resolve_selected_param_type_from_generic_signature(
+                    &receiver_internal,
+                    selected.method,
+                    hint.arg_index,
+                    selected.mode,
+                )
+                .map(|(ty, exact)| {
+                    (
+                        ty,
+                        if exact {
+                            ExpectedTypeConfidence::Exact
+                        } else {
+                            ExpectedTypeConfidence::Partial
+                        },
+                    )
+                })
         })
         .or_else(|| {
             resolve_selected_param_descriptor_for_call(
@@ -959,6 +965,7 @@ fn evaluate_functional_compatibility(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_method_reference_compatibility(
     ctx: &SemanticContext,
     view: &IndexView,
@@ -1380,17 +1387,14 @@ fn descriptor_to_type_name(desc: &str) -> Option<TypeName> {
 
 fn jvm_type_to_type_name(ty: &JvmType) -> Option<TypeName> {
     let sig = ty.to_signature_string();
-    parse_single_type_to_internal(&sig).or_else(|| singleton_descriptor_to_type(&sig).map(TypeName::new))
+    parse_single_type_to_internal(&sig)
+        .or_else(|| singleton_descriptor_to_type(&sig).map(TypeName::new))
 }
 
 fn type_name_to_jvm_type(ty: &TypeName) -> Option<JvmType> {
     let sig = ty.to_jvm_signature();
     let (parsed, rest) = JvmType::parse(&sig)?;
-    if rest.is_empty() {
-        Some(parsed)
-    } else {
-        None
-    }
+    if rest.is_empty() { Some(parsed) } else { None }
 }
 
 fn is_object_method(name: &str, desc: &str) -> bool {

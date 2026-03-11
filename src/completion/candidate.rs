@@ -29,6 +29,7 @@ pub enum CandidateKind {
         descriptor: Arc<str>,
         defining_class: Arc<str>,
     },
+    StatementLabel,
     Keyword,
     Annotation,
     NameSuggestion,

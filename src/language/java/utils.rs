@@ -1,5 +1,5 @@
 use crate::language::java::SENTINEL;
-use crate::semantic::context::CursorLocation;
+use crate::semantic::context::{CursorLocation, StatementLabelTargetKind};
 use ropey::Rope;
 use rust_asm::constants::{
     ACC_ABSTRACT, ACC_FINAL, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC,
@@ -167,6 +167,10 @@ pub(crate) fn strip_sentinel_from_location(loc: CursorLocation) -> CursorLocatio
         CursorLocation::StringLiteral { prefix } => CursorLocation::StringLiteral {
             prefix: strip_sentinel(&prefix),
         },
+        CursorLocation::StatementLabel { kind, prefix } => CursorLocation::StatementLabel {
+            kind,
+            prefix: strip_sentinel(&prefix),
+        },
         CursorLocation::VariableName { type_name } => CursorLocation::VariableName { type_name },
         CursorLocation::Import { prefix } => CursorLocation::Import {
             prefix: strip_sentinel(&prefix),
@@ -275,6 +279,33 @@ pub(crate) fn find_enclosing_method_in_error(root: Node, offset: usize) -> Optio
     let mut result = None;
     dfs(root, offset, &mut result);
     result
+}
+
+pub(crate) fn statement_label_target_kind(node: Node) -> StatementLabelTargetKind {
+    let target = unwrap_labeled_statement_target(node);
+    match target.kind() {
+        "block" => StatementLabelTargetKind::Block,
+        "while_statement" => StatementLabelTargetKind::While,
+        "do_statement" => StatementLabelTargetKind::DoWhile,
+        "for_statement" => StatementLabelTargetKind::For,
+        "enhanced_for_statement" => StatementLabelTargetKind::EnhancedFor,
+        "switch_expression" | "switch_statement" => StatementLabelTargetKind::Switch,
+        _ => StatementLabelTargetKind::Other,
+    }
+}
+
+pub(crate) fn unwrap_labeled_statement_target(mut node: Node) -> Node {
+    while node.kind() == "labeled_statement" {
+        let mut cursor = node.walk();
+        let Some(child) = node
+            .named_children(&mut cursor)
+            .find(|child| child.kind() != "identifier")
+        else {
+            break;
+        };
+        node = child;
+    }
+    node
 }
 
 pub fn infer_type_from_initializer(type_node: Node, bytes: &[u8]) -> Option<String> {

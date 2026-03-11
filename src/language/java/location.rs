@@ -10,7 +10,7 @@ use crate::{
     semantic::CursorLocation,
     semantic::context::{
         ExpectedTypeSource, FunctionalExprShape, FunctionalMethodCallHint, FunctionalTargetHint,
-        MethodRefQualifierKind,
+        MethodRefQualifierKind, StatementLabelCompletionKind,
     },
 };
 
@@ -153,6 +153,9 @@ fn determine_location_impl(
         Some(n) => n,
         None => return (CursorLocation::Unknown, String::new()),
     };
+    if let Some((location, query)) = detect_statement_label_location(ctx, node) {
+        return (location, query);
+    }
     let mut current = node;
     if let Some(str_node) = find_string_ancestor(node) {
         let prefix = extract_string_prefix(ctx, str_node);
@@ -208,6 +211,148 @@ fn determine_location_impl(
         }
     }
     (CursorLocation::Unknown, String::new())
+}
+
+fn detect_statement_label_location(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<(CursorLocation, String)> {
+    if let Some(statement) = find_jump_statement_ancestor(node) {
+        return jump_statement_location(ctx, statement);
+    }
+    detect_partial_jump_label_location(ctx, node)
+}
+
+fn find_jump_statement_ancestor(node: Node) -> Option<Node> {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        if matches!(candidate.kind(), "break_statement" | "continue_statement") {
+            return Some(candidate);
+        }
+        current = candidate.parent();
+    }
+    None
+}
+
+fn jump_statement_location(
+    ctx: &JavaContextExtractor,
+    stmt: Node,
+) -> Option<(CursorLocation, String)> {
+    let kind = match stmt.kind() {
+        "break_statement" => StatementLabelCompletionKind::Break,
+        "continue_statement" => StatementLabelCompletionKind::Continue,
+        _ => return None,
+    };
+
+    let prefix = stmt
+        .named_children(&mut stmt.walk())
+        .find(|child| child.kind() == "identifier")
+        .map(|ident| cursor_truncated_text(ctx, ident))
+        .unwrap_or_else(|| extract_jump_label_prefix_from_text(ctx, stmt.start_byte()));
+    let prefix = strip_sentinel(&prefix);
+
+    Some((
+        CursorLocation::StatementLabel {
+            kind,
+            prefix: prefix.clone(),
+        },
+        prefix,
+    ))
+}
+
+fn detect_partial_jump_label_location(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> Option<(CursorLocation, String)> {
+    let lower_bound = partial_jump_scan_lower_bound(node);
+    let before = strip_sentinel(ctx.byte_slice(lower_bound, ctx.offset));
+    let trimmed = before.trim_end();
+    let (kind, prefix) = if let Some(rest) = trimmed.strip_suffix("break") {
+        if rest
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+        (StatementLabelCompletionKind::Break, String::new())
+    } else if let Some(rest) = trimmed.strip_suffix("continue") {
+        if rest
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return None;
+        }
+        (StatementLabelCompletionKind::Continue, String::new())
+    } else {
+        let prefix = extract_identifier_prefix_near_cursor(ctx, lower_bound);
+        if prefix.is_empty() {
+            return None;
+        }
+        let ident_start = ctx.offset.saturating_sub(prefix.len());
+        let head = strip_sentinel(ctx.byte_slice(lower_bound, ident_start));
+        let trimmed_head = head.trim_end();
+        if let Some(rest) = trimmed_head.strip_suffix("break") {
+            if rest
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return None;
+            }
+            (StatementLabelCompletionKind::Break, prefix)
+        } else if let Some(rest) = trimmed_head.strip_suffix("continue") {
+            if rest
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return None;
+            }
+            (StatementLabelCompletionKind::Continue, prefix)
+        } else {
+            return None;
+        }
+    };
+
+    Some((
+        CursorLocation::StatementLabel {
+            kind,
+            prefix: prefix.clone(),
+        },
+        prefix,
+    ))
+}
+
+fn partial_jump_scan_lower_bound(node: Node) -> usize {
+    let mut current = Some(node);
+    while let Some(candidate) = current {
+        match candidate.kind() {
+            "block"
+            | "switch_block_statement_group"
+            | "switch_rule"
+            | "program"
+            | "method_declaration"
+            | "constructor_declaration"
+            | "lambda_expression"
+            | "class_body" => return candidate.start_byte(),
+            _ => current = candidate.parent(),
+        }
+    }
+    0
+}
+
+fn extract_jump_label_prefix_from_text(ctx: &JavaContextExtractor, stmt_start: usize) -> String {
+    let raw = strip_sentinel(ctx.byte_slice(stmt_start, ctx.offset));
+    let trimmed = raw.trim_end();
+    if let Some(rest) = trimmed.strip_prefix("break") {
+        return rest.trim().to_string();
+    }
+    if let Some(rest) = trimmed.strip_prefix("continue") {
+        return rest.trim().to_string();
+    }
+    String::new()
 }
 
 fn infer_annotation_target(node: Node) -> Option<Arc<str>> {
@@ -1223,7 +1368,7 @@ mod tests {
             location::{count_top_level_commas, determine_location, split_top_level_args},
         },
         semantic::CursorLocation,
-        semantic::context::FunctionalTargetHint,
+        semantic::context::{FunctionalTargetHint, StatementLabelCompletionKind},
     };
 
     fn setup_with(source: &str, offset: usize) -> (JavaContextExtractor, tree_sitter::Tree) {
@@ -1264,6 +1409,72 @@ mod tests {
             loc
         );
         assert_eq!(query, "str");
+    }
+
+    #[test]
+    fn test_break_routes_to_statement_label_location() {
+        let src = indoc::indoc! {r#"
+class A {
+    void f() {
+        outer: {
+            break 
+        }
+    }
+}
+"#};
+        let marker = "break ";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+        assert!(
+            matches!(
+                loc,
+                CursorLocation::StatementLabel {
+                    kind: StatementLabelCompletionKind::Break,
+                    ref prefix
+                } if prefix.is_empty()
+            ),
+            "Expected StatementLabel(Break), got {:?}",
+            loc
+        );
+        assert!(
+            query.is_empty(),
+            "expected empty break label query, got {query:?}"
+        );
+    }
+
+    #[test]
+    fn test_continue_partial_prefix_routes_to_statement_label_location() {
+        let src = indoc::indoc! {r#"
+class A {
+    void f() {
+        outer:
+        while (true) {
+            continue out
+        }
+    }
+}
+"#};
+        let marker = "continue out";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+        assert!(
+            matches!(
+                loc,
+                CursorLocation::StatementLabel {
+                    kind: StatementLabelCompletionKind::Continue,
+                    ref prefix
+                } if prefix == "out"
+            ),
+            "Expected StatementLabel(Continue, \"out\"), got {:?}",
+            loc
+        );
+        assert_eq!(query, "out");
     }
 
     #[test]

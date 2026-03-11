@@ -148,6 +148,7 @@ impl<'idx> Scorer<'idx> {
             StaticField { .. } => 10.0,
             ClassName => 8.0,
             Package => 6.0,
+            StatementLabel => 5.5,
             Keyword => 5.0,
             Annotation => 3.0,
             Snippet => 2.0,
@@ -192,6 +193,7 @@ fn candidate_value_type(candidate: &super::candidate::CompletionCandidate) -> Op
         }
         CandidateKind::ClassName
         | CandidateKind::Package
+        | CandidateKind::StatementLabel
         | CandidateKind::Snippet
         | CandidateKind::Keyword
         | CandidateKind::Annotation

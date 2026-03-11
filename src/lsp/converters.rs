@@ -126,6 +126,7 @@ fn map_kind(kind: &CandidateKind) -> CompletionItemKind {
         CandidateKind::StaticField { .. } => CompletionItemKind::CONSTANT,
         CandidateKind::LocalVariable { .. } => CompletionItemKind::VARIABLE,
         CandidateKind::Constructor { .. } => CompletionItemKind::CONSTRUCTOR,
+        CandidateKind::StatementLabel => CompletionItemKind::REFERENCE,
         CandidateKind::Keyword => CompletionItemKind::KEYWORD,
         CandidateKind::Annotation => CompletionItemKind::EVENT,
         CandidateKind::NameSuggestion => CompletionItemKind::VARIABLE,

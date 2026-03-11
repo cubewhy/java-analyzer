@@ -8,7 +8,7 @@ use crate::language::java::completion::providers::{
     expression::ExpressionProvider, import::ImportProvider, import_static::ImportStaticProvider,
     keyword::KeywordProvider, local_var::LocalVarProvider, member::MemberProvider,
     name_suggestion::NameSuggestionProvider, override_member::OverrideProvider,
-    package::PackageProvider, snippet::SnippetProvider,
+    package::PackageProvider, snippet::SnippetProvider, statement_label::StatementLabelProvider,
     static_import_member::StaticImportMemberProvider, static_member::StaticMemberProvider,
     this_member::ThisMemberProvider,
 };
@@ -40,8 +40,9 @@ pub mod utils;
 
 const SENTINEL: &str = "__KIRO__";
 
-static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 15] = [
+static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 16] = [
     &LocalVarProvider,
+    &StatementLabelProvider,
     &ThisMemberProvider,
     &MemberProvider,
     &StaticMemberProvider,
@@ -371,10 +372,10 @@ impl JavaContextExtractor {
         let functional_target_hint =
             location::infer_functional_target_hint(semantic_extractor, semantic_cursor_node);
 
-        let enclosing_class = scope::extract_enclosing_class(semantic_extractor, semantic_cursor_node)
-            .or_else(|| {
-                scope::extract_enclosing_class_by_offset(semantic_extractor, semantic_root)
-            });
+        let enclosing_class =
+            scope::extract_enclosing_class(semantic_extractor, semantic_cursor_node).or_else(
+                || scope::extract_enclosing_class_by_offset(semantic_extractor, semantic_root),
+            );
         let enclosing_package = scope::extract_package(semantic_extractor, semantic_root);
         let enclosing_internal_name = scope::extract_enclosing_internal_name(
             semantic_extractor,
@@ -396,6 +397,8 @@ impl JavaContextExtractor {
         );
         let active_lambda_param_names =
             locals::extract_active_lambda_param_names(semantic_extractor, semantic_cursor_node);
+        let statement_labels =
+            scope::extract_enclosing_statement_labels(semantic_extractor, semantic_cursor_node);
         let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
             semantic_extractor,
             semantic_cursor_node,
@@ -450,6 +453,7 @@ impl JavaContextExtractor {
             enclosing_package,
             existing_imports,
         )
+        .with_statement_labels(statement_labels)
         .with_active_lambda_param_names(active_lambda_param_names)
         .with_functional_target_hint(functional_target_hint)
         .with_flow_type_overrides(flow_type_overrides)
@@ -552,7 +556,10 @@ mod tests {
             rope_utils::line_col_to_offset,
         },
         semantic::LocalVar,
-        semantic::context::{CurrentClassMember, CursorLocation},
+        semantic::context::{
+            CurrentClassMember, CursorLocation, StatementLabelCompletionKind,
+            StatementLabelTargetKind,
+        },
         semantic::types::type_name::TypeName,
     };
     use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC};
@@ -659,6 +666,13 @@ mod tests {
         let engine = CompletionEngine::new();
         let candidates = engine.complete(root_scope(), ctx.clone(), &JavaLanguage, view);
         (ctx, candidates)
+    }
+
+    fn statement_labels(ctx: &SemanticContext) -> Vec<(String, StatementLabelTargetKind)> {
+        ctx.statement_labels
+            .iter()
+            .map(|label| (label.name.to_string(), label.target_kind))
+            .collect()
     }
 
     fn make_functional_chain_index() -> WorkspaceIndex {
@@ -804,6 +818,263 @@ mod tests {
             },
         ]);
         idx
+    }
+
+    #[test]
+    fn test_statement_labels_recognize_labeled_block() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer: {
+                        break /*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        assert_eq!(
+            statement_labels(&ctx),
+            vec![("outer".to_string(), StatementLabelTargetKind::Block)]
+        );
+    }
+
+    #[test]
+    fn test_statement_labels_recognize_labeled_loop() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer:
+                    while (true) {
+                        break /*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        assert_eq!(
+            statement_labels(&ctx),
+            vec![("outer".to_string(), StatementLabelTargetKind::While)]
+        );
+    }
+
+    #[test]
+    fn test_statement_labels_recognize_nested_labels_in_enclosing_order() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer:
+                    while (true) {
+                        inner:
+                        for (;;) {
+                            break /*caret*/
+                        }
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        assert_eq!(
+            statement_labels(&ctx),
+            vec![
+                ("inner".to_string(), StatementLabelTargetKind::For),
+                ("outer".to_string(), StatementLabelTargetKind::While),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_statement_labels_survive_incomplete_jump_statement() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (ctx, _) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer: {
+                        break out/*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        assert_eq!(
+            statement_labels(&ctx),
+            vec![("outer".to_string(), StatementLabelTargetKind::Block)]
+        );
+        assert!(
+            matches!(
+                ctx.location,
+                CursorLocation::StatementLabel {
+                    kind: StatementLabelCompletionKind::Break,
+                    ref prefix
+                } if prefix == "out"
+            ),
+            "expected incomplete break to route through statement-label location, got {:?}",
+            ctx.location
+        );
+    }
+
+    #[test]
+    fn test_break_label_completion_offers_enclosing_labels() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer: {
+                        break /*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"outer"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_continue_label_completion_only_offers_loop_labels() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer: {
+                        loop: while (true) {
+                            continue /*caret*/
+                        }
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"loop"), "{labels:?}");
+        assert!(!labels.contains(&"outer"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_break_label_completion_prefix_filter() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outerLabel: {
+                        break out/*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"outerLabel"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_continue_label_completion_prefix_filter() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outerLoop: while (true) {
+                        continue out/*caret*/
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_ref()).collect();
+        assert!(labels.contains(&"outerLoop"), "{labels:?}");
+    }
+
+    #[test]
+    fn test_statement_label_completion_keeps_nested_enclosing_order() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    outer: while (true) {
+                        inner: for (;;) {
+                            break /*caret*/
+                        }
+                    }
+                }
+            }
+            "#},
+            &view,
+        );
+
+        let labels: Vec<&str> = candidates
+            .iter()
+            .filter(|c| matches!(c.kind, CandidateKind::StatementLabel))
+            .map(|c| c.label.as_ref())
+            .collect();
+        assert_eq!(labels, vec!["inner", "outer"], "{labels:?}");
+    }
+
+    #[test]
+    fn test_statement_label_completion_does_not_regress_normal_completion() {
+        let idx = WorkspaceIndex::new();
+        let view = idx.view(root_scope());
+        let (_ctx, candidates) = ctx_and_candidates_from_marked_source(
+            indoc::indoc! {r#"
+            class T {
+                void m() {
+                    int localValue = 1;
+                    loc/*caret*/
+                }
+            }
+            "#},
+            &view,
+        );
+
+        assert!(
+            candidates.iter().any(|c| c.label.as_ref() == "localValue"),
+            "{:?}",
+            candidates
+                .iter()
+                .map(|c| c.label.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|c| !matches!(c.kind, CandidateKind::StatementLabel)),
+            "statement-label candidates must not leak into ordinary completion"
+        );
     }
 
     fn make_instanceof_narrowing_index() -> WorkspaceIndex {
@@ -1148,7 +1419,9 @@ mod tests {
         let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
 
         assert!(
-            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "left"),
+            ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "left"),
             "expected left in local scope: {:?}",
             ctx.local_variables
                 .iter()
@@ -1222,7 +1495,11 @@ mod tests {
                     .collect::<Vec<_>>()),
                 ctx.local_variables
                     .iter()
-                    .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                    .map(|lv| format!(
+                        "{}:{}",
+                        lv.name,
+                        lv.type_internal.to_internal_with_generics()
+                    ))
                     .collect::<Vec<_>>(),
                 labels
             );
@@ -1286,7 +1563,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "sb")
             .expect("expected lambda param sb");
-        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            sb.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
     }
 
@@ -1348,7 +1628,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "sb")
             .expect("expected lambda param sb");
-        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            sb.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert!(labels_sb.iter().any(|l| l == "append"), "{labels_sb:?}");
 
         let (mut ctx_s, labels_s) = ctx_and_labels_from_marked_source(src_s, &view);
@@ -1392,9 +1675,11 @@ mod tests {
             Some("java/util/function/Function")
         );
         assert_eq!(
-            ctx.expected_sam
-                .as_ref()
-                .map(|sam| sam.param_types.iter().map(|t| t.erased_internal()).collect::<Vec<_>>()),
+            ctx.expected_sam.as_ref().map(|sam| sam
+                .param_types
+                .iter()
+                .map(|t| t.erased_internal())
+                .collect::<Vec<_>>()),
             Some(vec!["java/lang/String"])
         );
         assert_eq!(
@@ -1456,7 +1741,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "sb")
             .expect("expected lambda param sb");
-        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            sb.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
     }
 
@@ -1485,15 +1773,25 @@ mod tests {
             "lambda param should stay visible: {:?}",
             ctx.local_variables
                 .iter()
-                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .map(|lv| format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                ))
                 .collect::<Vec<_>>()
         );
         assert!(
-            !ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s1"),
+            !ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "s1"),
             "inner-block local must not leak after block: {:?}",
             ctx.local_variables
                 .iter()
-                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .map(|lv| format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                ))
                 .collect::<Vec<_>>()
         );
         assert!(!labels.iter().any(|l| l == "s1"), "{labels:?}");
@@ -1555,7 +1853,9 @@ mod tests {
             "expected lambda param s to remain visible"
         );
         assert!(
-            !ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s1"),
+            !ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "s1"),
             "expired inner-block local must not remain visible"
         );
         assert!(labels.iter().any(|l| l == "substring"), "{labels:?}");
@@ -1640,19 +1940,29 @@ mod tests {
         let (mut ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
         crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
         assert!(
-            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "prefix"),
+            ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "prefix"),
             "outer local should remain visible: {:?}",
             ctx.local_variables
                 .iter()
-                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .map(|lv| format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                ))
                 .collect::<Vec<_>>()
         );
         assert!(
-            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "left"),
+            ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "left"),
             "left lambda param should remain visible"
         );
         assert!(
-            ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "right"),
+            ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "right"),
             "right lambda param should remain visible"
         );
         let prefix = ctx
@@ -1681,11 +1991,17 @@ mod tests {
 
         let (ctx, labels) = ctx_and_labels_from_marked_source(src, &view);
         assert!(
-            !ctx.local_variables.iter().any(|lv| lv.name.as_ref() == "s1"),
+            !ctx.local_variables
+                .iter()
+                .any(|lv| lv.name.as_ref() == "s1"),
             "method inner-block local must not leak: {:?}",
             ctx.local_variables
                 .iter()
-                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .map(|lv| format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                ))
                 .collect::<Vec<_>>()
         );
         assert!(!labels.iter().any(|l| l == "s1"), "{labels:?}");
@@ -1804,7 +2120,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "value")
             .expect("expected recovered value binding");
-        assert_eq!(value.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            value.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert_eq!(
             ctx.location
                 .member_access_receiver_semantic_type()
@@ -1837,7 +2156,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "value")
             .expect("expected recovered inner block value binding");
-        assert_eq!(value.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            value.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert_eq!(
             ctx.location
                 .member_access_receiver_semantic_type()
@@ -1901,7 +2223,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "sb")
             .expect("expected inferred lambda param sb");
-        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            sb.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert!(labels.iter().any(|l| l == "append"), "{labels:?}");
     }
 
@@ -1937,7 +2262,10 @@ mod tests {
             .expect("expected inferred lambda param i");
         assert_eq!(s.type_internal.erased_internal(), "java/lang/String");
         assert!(
-            matches!(i.type_internal.erased_internal(), "int" | "java/lang/Integer"),
+            matches!(
+                i.type_internal.erased_internal(),
+                "int" | "java/lang/Integer"
+            ),
             "unexpected inferred numeric type: {}",
             i.type_internal.erased_internal()
         );
@@ -2039,7 +2367,11 @@ mod tests {
             "locals={:?}",
             ctx.local_variables
                 .iter()
-                .map(|lv| format!("{}:{}", lv.name, lv.type_internal.to_internal_with_generics()))
+                .map(|lv| format!(
+                    "{}:{}",
+                    lv.name,
+                    lv.type_internal.to_internal_with_generics()
+                ))
                 .collect::<Vec<_>>()
         );
         assert!(labels.iter().any(|l| l == "n"), "{labels:?}");
@@ -2071,7 +2403,10 @@ mod tests {
             .iter()
             .find(|lv| lv.name.as_ref() == "sb")
             .expect("expected local sb");
-        assert_eq!(sb.type_internal.erased_internal(), "java/lang/StringBuilder");
+        assert_eq!(
+            sb.type_internal.erased_internal(),
+            "java/lang/StringBuilder"
+        );
         assert!(labels.iter().any(|l| l == "sb"), "{labels:?}");
     }
 

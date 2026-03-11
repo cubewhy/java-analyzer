@@ -4,9 +4,12 @@ use tree_sitter::{Node, Query};
 
 use crate::language::{
     java::JavaContextExtractor,
-    java::utils::is_in_name_position,
+    java::utils::{
+        is_in_name_position, statement_label_target_kind, unwrap_labeled_statement_target,
+    },
     ts_utils::{capture_text, run_query},
 };
+use crate::semantic::context::StatementLabel;
 
 pub fn extract_package(ctx: &JavaContextExtractor, root: Node) -> Option<Arc<str>> {
     let q = Query::new(
@@ -209,6 +212,52 @@ pub(crate) fn is_cursor_in_class_member_position(cursor_node: Option<Node>) -> b
     }
 
     true
+}
+
+pub(crate) fn extract_enclosing_statement_labels(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+) -> Vec<StatementLabel> {
+    let Some(mut current) = cursor_node else {
+        return vec![];
+    };
+
+    let mut labels = Vec::new();
+    loop {
+        if current.kind() == "labeled_statement" {
+            let mut cursor = current.walk();
+            let mut children = current.named_children(&mut cursor);
+            let Some(name_node) = children.find(|child| child.kind() == "identifier") else {
+                if let Some(parent) = current.parent() {
+                    current = parent;
+                    continue;
+                }
+                break;
+            };
+
+            let target_kind = current
+                .named_children(&mut current.walk())
+                .find(|child| child.kind() != "identifier")
+                .map(unwrap_labeled_statement_target)
+                .map(statement_label_target_kind)
+                .unwrap_or_else(|| statement_label_target_kind(current));
+
+            let name = ctx.node_text(name_node).trim();
+            if !name.is_empty() {
+                labels.push(StatementLabel {
+                    name: Arc::from(name),
+                    target_kind,
+                });
+            }
+        }
+
+        match current.parent() {
+            Some(parent) => current = parent,
+            None => break,
+        }
+    }
+
+    labels
 }
 
 fn is_member_declaration_name_context(cursor: Node, decl: Node, type_body: Node) -> bool {

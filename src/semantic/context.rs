@@ -121,6 +121,10 @@ pub enum CursorLocation {
     StringLiteral {
         prefix: String,
     },
+    StatementLabel {
+        kind: StatementLabelCompletionKind,
+        prefix: String,
+    },
     /// Unrecognized location
     Unknown,
 }
@@ -170,6 +174,50 @@ impl CursorLocation {
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementLabelCompletionKind {
+    Break,
+    Continue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementLabelTargetKind {
+    Block,
+    While,
+    DoWhile,
+    For,
+    EnhancedFor,
+    Switch,
+    Other,
+}
+
+impl StatementLabelTargetKind {
+    pub fn is_break_target(self) -> bool {
+        matches!(
+            self,
+            Self::Block
+                | Self::While
+                | Self::DoWhile
+                | Self::For
+                | Self::EnhancedFor
+                | Self::Switch
+        )
+    }
+
+    pub fn is_continue_target(self) -> bool {
+        matches!(
+            self,
+            Self::While | Self::DoWhile | Self::For | Self::EnhancedFor
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementLabel {
+    pub name: Arc<str>,
+    pub target_kind: StatementLabelTargetKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +330,7 @@ pub struct TypedChainReceiver {
 pub struct SemanticContext {
     pub location: CursorLocation,
     pub local_variables: Vec<LocalVar>,
+    pub statement_labels: Vec<StatementLabel>,
     pub active_lambda_param_names: Vec<Arc<str>>,
     pub enclosing_class: Option<Arc<str>>,
     pub enclosing_internal_name: Option<Arc<str>>,
@@ -335,6 +384,7 @@ impl SemanticContext {
         Self {
             location,
             local_variables,
+            statement_labels: vec![],
             active_lambda_param_names: vec![],
             enclosing_class,
             enclosing_internal_name,
@@ -366,6 +416,11 @@ impl SemanticContext {
 
     pub fn with_active_lambda_param_names(mut self, names: Vec<Arc<str>>) -> Self {
         self.active_lambda_param_names = names;
+        self
+    }
+
+    pub fn with_statement_labels(mut self, labels: Vec<StatementLabel>) -> Self {
+        self.statement_labels = labels;
         self
     }
 
@@ -452,6 +507,10 @@ impl SemanticContext {
 
     pub fn flow_override_for_local(&self, name: &str) -> Option<&TypeName> {
         self.flow_type_overrides.get(name)
+    }
+
+    pub fn visible_statement_labels(&self) -> &[StatementLabel] {
+        &self.statement_labels
     }
 
     /// The cursor is immediately followed by '(', and method completion does not require additional parentheses.
