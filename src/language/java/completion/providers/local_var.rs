@@ -1,7 +1,9 @@
 use crate::{
     completion::{CandidateKind, CompletionCandidate, fuzzy, provider::CompletionProvider},
     index::{IndexScope, IndexView},
+    language::java::render,
     semantic::context::{CursorLocation, SemanticContext},
+    semantic::types::ContextualResolver,
 };
 use std::sync::Arc;
 
@@ -16,7 +18,7 @@ impl CompletionProvider for LocalVarProvider {
         &self,
         _scope: IndexScope,
         ctx: &SemanticContext,
-        _index: &IndexView,
+        index: &IndexView,
     ) -> Vec<CompletionCandidate> {
         let prefix = match &ctx.location {
             CursorLocation::Expression { prefix } => prefix.as_str(),
@@ -24,6 +26,7 @@ impl CompletionProvider for LocalVarProvider {
             CursorLocation::TypeAnnotation { prefix } => prefix.as_str(),
             _ => return vec![],
         };
+        let resolver = ContextualResolver::new(index, ctx);
 
         let scored =
             fuzzy::fuzzy_filter_sort(prefix, ctx.local_variables.iter(), |lv| lv.name.clone());
@@ -31,14 +34,6 @@ impl CompletionProvider for LocalVarProvider {
         scored
             .into_iter()
             .map(|(lv, score)| {
-                let type_simple = {
-                    let internal_with_arrays = lv.type_internal.erased_internal_with_arrays();
-                    internal_with_arrays
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(internal_with_arrays.as_str())
-                        .to_string()
-                };
                 CompletionCandidate::new(
                     Arc::clone(&lv.name),
                     lv.name.to_string(),
@@ -47,7 +42,11 @@ impl CompletionProvider for LocalVarProvider {
                     },
                     self.name(),
                 )
-                .with_detail(format!("{} : {}", lv.name, type_simple))
+                .with_detail(render::local_variable_detail(
+                    lv.name.as_ref(),
+                    &lv.type_internal,
+                    &resolver,
+                ))
                 .with_score(50.0 + score as f32 * 0.1)
             })
             .collect()

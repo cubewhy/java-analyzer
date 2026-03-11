@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-fn type_name_to_source_style(ty: &TypeName, provider: &impl SymbolProvider) -> String {
+pub(crate) fn type_name_to_source_style(ty: &TypeName, provider: &impl SymbolProvider) -> String {
     let base = match ty.base_internal.as_ref() {
         "byte" | "char" | "double" | "float" | "int" | "long" | "short" | "boolean" | "void" => {
             ty.base_internal.to_string()
@@ -55,6 +55,18 @@ fn type_name_to_source_style(ty: &TypeName, provider: &impl SymbolProvider) -> S
         rendered.push_str(&"[]".repeat(ty.array_dims));
     }
     rendered
+}
+
+pub fn local_variable_detail(
+    local_name: &str,
+    local_type: &TypeName,
+    provider: &impl SymbolProvider,
+) -> String {
+    format!(
+        "{} : {}",
+        local_name,
+        type_name_to_source_style(local_type, provider)
+    )
 }
 
 fn render_param_type_for_detail(method: &MethodSummary, idx: usize, rendered: String) -> String {
