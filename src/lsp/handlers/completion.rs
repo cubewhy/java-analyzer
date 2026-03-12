@@ -46,9 +46,31 @@ pub async fn handle_completion(
         }
     })?;
 
-    let scope = workspace.scope_for_uri(uri);
+    let analysis = workspace.analysis_context_for_uri(uri);
+    let scope = analysis.scope();
     let index = workspace.index.read().await;
-    let view = index.view(scope);
+    let view =
+        index.view_for_analysis_context(scope.module, analysis.classpath, analysis.source_root);
+    let visible_classpath = index.module_classpath_jars(scope.module, analysis.classpath);
+    tracing::debug!(
+        uri = %uri,
+        module = scope.module.0,
+        classpath = ?analysis.classpath,
+        source_root = ?analysis.source_root.map(|id| id.0),
+        root_kind = ?analysis.root_kind,
+        visible_classpath_len = visible_classpath.len(),
+        "completion using analysis context"
+    );
+    tracing::info!(
+        uri = %uri,
+        module = scope.module.0,
+        classpath = ?analysis.classpath,
+        visible_classpath = ?visible_classpath
+            .iter()
+            .map(|jar| jar.as_ref().to_string())
+            .collect::<Vec<_>>(),
+        "completion analysis classpath dump"
+    );
 
     let env = ParseEnv {
         name_table: Some(view.build_name_table()),

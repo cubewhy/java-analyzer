@@ -1,0 +1,153 @@
+import groovy.json.JsonOutput
+
+def isDebugEnabled() {
+    return System.getProperty('JAVA_ANALYZER_GRADLE_DEBUG') == '1' || System.getenv('JAVA_ANALYZER_GRADLE_DEBUG') == '1'
+}
+
+def debugLog(String message) {
+    if (isDebugEnabled()) {
+        System.err.println("JAVA_ANALYZER_GRADLE_DEBUG: ${message}")
+    }
+}
+
+def normalizePath(def file) {
+    if (file == null) return null
+    try {
+        return file.absoluteFile.path.replace(File.separatorChar, '/' as char)
+    } catch (Throwable ignored) {
+        return null
+    }
+}
+
+def extractLegacyClasspath(def project, String configName) {
+    def config = project.configurations.findByName(configName)
+    if (config == null) {
+        debugLog("    [WARN] Configuration '${configName}' not found.")
+        return []
+    }
+
+    try {
+        if (config.canBeResolved) {
+            def files = config.resolvedConfiguration.lenientConfiguration.files
+            def paths = files.collect { normalizePath(it) }.findAll { it != null }.unique()
+            debugLog("    [SUCCESS] Resolved '${configName}' directly: ${paths.size()} files")
+            return paths
+        } else {
+            debugLog("    [INFO] '${configName}' cannot be resolved directly. Creating detached copy...")
+            def deps = config.allDependencies.toArray(new org.gradle.api.artifacts.Dependency[0])
+            def detached = project.configurations.detachedConfiguration(deps)
+            def files = detached.resolvedConfiguration.lenientConfiguration.files
+            def paths = files.collect { normalizePath(it) }.findAll { it != null }.unique()
+            debugLog("    [SUCCESS] Resolved '${configName}' via detached configuration: ${paths.size()} files")
+            return paths
+        }
+    } catch (Throwable t) {
+        debugLog("    [ERROR] Failed to resolve '${configName}': ${t.message}")
+        return []
+    }
+}
+
+def getLegacySourceSets(def project) {
+    try {
+        def convention = project.convention.findPlugin(org.gradle.api.plugins.JavaPluginConvention)
+        return convention?.sourceSets
+    } catch (Throwable ignored) {
+        return null
+    }
+}
+
+gradle.projectsEvaluated {
+    def taskName = 'javaAnalyzerExportModel'
+    def task = rootProject.tasks.findByName(taskName)
+    if (task == null) {
+        task = rootProject.tasks.create(taskName)
+        task.group = 'java-analyzer'
+    }
+
+    task.doLast {
+        def model = [
+            workspace_name: rootProject.name,
+            projects: rootProject.allprojects.collect { project ->
+                debugLog(">>> Analyzing project: ${project.path}")
+
+                def sourceSets = getLegacySourceSets(project)
+                def mainSet = null
+                def testSet = null
+                try {
+                    mainSet = sourceSets?.findByName('main')
+                    testSet = sourceSets?.findByName('test')
+                } catch (Throwable ignored) {}
+
+                def mainSource = []
+                try { mainSource = mainSet?.java?.srcDirs?.collect { normalizePath(it) } ?: [] } catch (Throwable ignored) {}
+                
+                def testSource = []
+                try { testSource = testSet?.java?.srcDirs?.collect { normalizePath(it) } ?: [] } catch (Throwable ignored) {}
+                
+                def resourcesSource = []
+                try {
+                    def mainRes = mainSet?.resources?.srcDirs?.collect { normalizePath(it) } ?: []
+                    def testRes = testSet?.resources?.srcDirs?.collect { normalizePath(it) } ?: []
+                    resourcesSource = (mainRes + testRes).unique()
+                } catch (Throwable ignored) {}
+
+                def compileCp = extractLegacyClasspath(project, 'compileClasspath')
+                if (compileCp.isEmpty()) {
+                    compileCp = extractLegacyClasspath(project, 'compile')
+                }
+
+                def testCp = extractLegacyClasspath(project, 'testCompileClasspath')
+                if (testCp.isEmpty()) {
+                    testCp = extractLegacyClasspath(project, 'testCompile')
+                }
+
+                def allGenerated = []
+                try {
+                    sourceSets?.each { ss ->
+                        ss.allSource.srcDirs.each { dir ->
+                            def path = normalizePath(dir)
+                            if (path && (path.contains('/generated/') || path.contains('build/generated'))) {
+                                allGenerated << path
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {}
+
+                def moduleDeps = []
+                try {
+                    def config = project.configurations.findByName('compileClasspath') ?: project.configurations.findByName('compile')
+                    if (config) {
+                        moduleDeps = config.allDependencies
+                            .findAll { it instanceof org.gradle.api.artifacts.ProjectDependency }
+                            .collect { it.dependencyProject.path }
+                    }
+                } catch (Throwable ignored) {}
+
+                def javaLangVersion = null
+                try {
+                    if (project.hasProperty('sourceCompatibility')) {
+                        javaLangVersion = project.sourceCompatibility.toString()
+                    }
+                } catch (Throwable ignored) {}
+
+                return [
+                    path: project.path,
+                    name: project.name,
+                    project_dir: normalizePath(project.projectDir),
+                    source_roots: mainSource,
+                    test_roots: testSource,
+                    resource_roots: resourcesSource,
+                    generated_roots: allGenerated.unique(),
+                    compile_classpath: compileCp,
+                    test_classpath: testCp,
+                    module_dependencies: moduleDeps.unique(),
+                    java_language_version: javaLangVersion
+                ]
+            }
+        ]
+
+        println('JAVA_ANALYZER_MODEL_BEGIN')
+        println(JsonOutput.toJson(model))
+        println('JAVA_ANALYZER_MODEL_END')
+    }
+}

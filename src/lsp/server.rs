@@ -7,11 +7,12 @@ use tree_sitter::{InputEdit, Point};
 
 use super::capabilities::server_capabilities;
 use super::handlers::completion::handle_completion;
+use crate::build_integration::{BuildIntegrationService, ReloadReason};
 use crate::completion::engine::CompletionEngine;
 use crate::decompiler::cache::DecompilerCache;
-use crate::index::codebase::{index_codebase, index_source_text};
+use crate::index::ClassOrigin;
+use crate::index::codebase::index_source_text;
 use crate::index::jdk::JdkIndexer;
-use crate::index::{ClassOrigin, IndexScope, ModuleId};
 use crate::language::LanguageRegistry;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::lsp::config::JavaAnalyzerConfig;
@@ -27,6 +28,7 @@ pub struct Backend {
     pub registry: Arc<LanguageRegistry>,
     pub config: tokio::sync::RwLock<JavaAnalyzerConfig>,
     pub decompiler_cache: crate::decompiler::cache::DecompilerCache,
+    build_services: tokio::sync::RwLock<Vec<BuildIntegrationService>>,
 }
 
 impl Backend {
@@ -43,11 +45,11 @@ impl Backend {
             registry: Arc::new(LanguageRegistry::new()),
             config: tokio::sync::RwLock::new(JavaAnalyzerConfig::default()),
             decompiler_cache: DecompilerCache::new(cache_dir),
+            build_services: tokio::sync::RwLock::new(Vec::new()),
         }
     }
 
-    /// Trigger background indexing (without blocking the response)
-    async fn spawn_index_workspace(&self, root: std::path::PathBuf) {
+    async fn configure_workspace_root(&self, root: std::path::PathBuf) {
         let workspace = Arc::clone(&self.workspace);
         let client = self.client.clone();
 
@@ -69,9 +71,8 @@ impl Backend {
                     match jdk_classes {
                         Ok(classes) if !classes.is_empty() => {
                             let msg = format!("✓ JDK: {} classes", classes.len());
-                            workspace.index.write().await.add_jdk_classes(classes);
+                            workspace.set_jdk_classes(classes).await;
                             client.log_message(MessageType::INFO, msg).await;
-                            client.semantic_tokens_refresh().await.ok();
                         }
                         Ok(_) => {
                             client
@@ -87,71 +88,12 @@ impl Backend {
             )
             .await;
         }
+        drop(config);
 
-        // JARs
-        // TODO: receive classpath from build tools
-        with_progress(
-            &client,
-            "java-analyzer/index/jars",
-            "Indexing JARs",
-            || async {
-                for jar_dir in find_jar_dirs(&root) {
-                    workspace.load_jars_from_dir(jar_dir).await;
-                }
-            },
-        )
-        .await;
-
-        let root_scope = IndexScope {
-            module: ModuleId::ROOT,
-        };
-        let name_table = workspace.index.read().await.build_name_table(root_scope);
-
-        // Codebase
-        with_progress(
-            &client,
-            "java-analyzer/index/codebase",
-            "Indexing workspace",
-            || async {
-                let codebase = tokio::task::spawn_blocking({
-                    let root = root.clone();
-                    move || index_codebase(&root, Some(name_table))
-                })
-                .await;
-                match codebase {
-                    Ok(result) => {
-                        let msg = format!(
-                            "✓ Codebase: {} files, {} classes",
-                            result.file_count,
-                            result.classes.len()
-                        );
-                        let scope = IndexScope {
-                            module: ModuleId::ROOT,
-                        };
-                        let index_guard = workspace.index.write().await;
-                        let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
-                            std::collections::HashMap::new();
-                        for class in result.classes {
-                            by_origin
-                                .entry(class.origin.clone())
-                                .or_default()
-                                .push(class);
-                        }
-                        for (origin, classes) in by_origin {
-                            index_guard.update_source(scope, origin, classes);
-                        }
-                        client.log_message(MessageType::INFO, msg).await;
-                        client.semantic_tokens_refresh().await.ok();
-                    }
-                    Err(e) => error!(error = %e, "codebase indexing panicked"),
-                }
-            },
-        )
-        .await;
-
-        client
-            .log_message(MessageType::INFO, "✓ Indexing complete")
-            .await;
+        // build tools
+        let service = BuildIntegrationService::new(root, Arc::clone(&workspace), client.clone());
+        service.schedule_reload(ReloadReason::Initialize);
+        self.build_services.write().await.push(service);
     }
 
     pub async fn update_config(&self, params: serde_json::Value) {
@@ -168,23 +110,38 @@ impl Backend {
             }
         }
     }
-}
+    async fn notify_build_file_change(&self, uri: &Url) {
+        if let Ok(path) = uri.to_file_path() {
+            let services = self.build_services.read().await.clone();
+            for service in services {
+                service.notify_paths_changed([path.clone()]).await;
+            }
+        }
+    }
 
-/// Locate common JAR directories within the workspace
-fn find_jar_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let candidates = [
-        ".gradle/caches",
-        ".m2/repository",
-        "build/libs",
-        "out/artifacts",
-        "libs",
-        "lib",
-    ];
-    candidates
-        .iter()
-        .map(|rel| root.join(rel))
-        .filter(|p| p.exists())
-        .collect()
+    async fn register_build_watchers(&self) {
+        let options = serde_json::json!({
+            "watchers": [
+                { "globPattern": "**/build.gradle" },
+                { "globPattern": "**/build.gradle.kts" },
+                { "globPattern": "**/settings.gradle" },
+                { "globPattern": "**/settings.gradle.kts" },
+                { "globPattern": "**/gradle.properties" },
+                { "globPattern": "**/gradle/libs.versions.toml" }
+            ]
+        });
+
+        self.client
+            .send_request::<tower_lsp::lsp_types::request::RegisterCapability>(RegistrationParams {
+                registrations: vec![Registration {
+                    id: "java-analyzer-build-watchers".into(),
+                    method: "workspace/didChangeWatchedFiles".into(),
+                    register_options: Some(options),
+                }],
+            })
+            .await
+            .ok();
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -198,13 +155,23 @@ impl LanguageServer for Backend {
 
         // Trigger workspace index
         if let Some(root) = params.root_uri.as_ref().and_then(|u| u.to_file_path().ok()) {
-            self.spawn_index_workspace(root).await;
-        } else if let Some(folders) = params.workspace_folders {
-            for folder in folders {
-                if let Ok(root) = folder.uri.to_file_path() {
-                    self.spawn_index_workspace(root).await;
-                }
-            }
+            self.configure_workspace_root(root).await;
+        } else if let Some(root) = params
+            .workspace_folders
+            .as_ref()
+            .and_then(|folders| folders.first())
+            .and_then(|folder| folder.uri.to_file_path().ok())
+        {
+            self.configure_workspace_root(root).await;
+        } else if let Some(folders) = params.workspace_folders
+            && folders.len() > 1
+        {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    "java-analyzer build import currently uses the first workspace folder only",
+                )
+                .await;
         }
 
         Ok(InitializeResult {
@@ -218,6 +185,7 @@ impl LanguageServer for Backend {
 
     async fn initialized(&self, _: InitializedParams) {
         info!("LSP initialized");
+        self.register_build_watchers().await;
         self.client
             .log_message(MessageType::INFO, "java-analyzer ready")
             .await;
@@ -264,19 +232,43 @@ impl LanguageServer for Backend {
             doc.tree = tree;
         });
 
-        // 增量更新索引（保持你原逻辑不变）
         let uri_str = td.uri.to_string();
-        let scope = self.workspace.scope_for_uri(&td.uri);
-        let name_table = self.workspace.index.read().await.build_name_table(scope);
+        let analysis = self.workspace.analysis_context_for_uri(&td.uri);
+        let name_table = self
+            .workspace
+            .index
+            .read()
+            .await
+            .build_name_table_for_analysis_context(
+                analysis.module,
+                analysis.classpath,
+                analysis.source_root,
+            );
+        let visible_classpath = self
+            .workspace
+            .index
+            .read()
+            .await
+            .module_classpath_jars(analysis.module, analysis.classpath);
         let classes = index_source_text(&uri_str, &td.text, &td.language_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
-        self.workspace
-            .index
-            .write()
-            .await
-            .update_source(scope, origin, classes);
+        tracing::debug!(
+            uri = %td.uri,
+            module = analysis.module.0,
+            classpath = ?analysis.classpath,
+            source_root = ?analysis.source_root.map(|id| id.0),
+            visible_classpath_len = visible_classpath.len(),
+            "did_open indexing with analysis context"
+        );
+        self.workspace.index.write().await.update_source_in_context(
+            analysis.module,
+            analysis.source_root,
+            origin,
+            classes,
+        );
 
         self.client.semantic_tokens_refresh().await.ok();
+        self.notify_build_file_change(&td.uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -402,23 +394,47 @@ impl LanguageServer for Backend {
         };
 
         let uri_str = uri.to_string();
-        let scope = self.workspace.scope_for_uri(uri);
-        let name_table = self.workspace.index.read().await.build_name_table(scope);
+        let analysis = self.workspace.analysis_context_for_uri(uri);
+        let name_table = self
+            .workspace
+            .index
+            .read()
+            .await
+            .build_name_table_for_analysis_context(
+                analysis.module,
+                analysis.classpath,
+                analysis.source_root,
+            );
+        let visible_classpath = self
+            .workspace
+            .index
+            .read()
+            .await
+            .module_classpath_jars(analysis.module, analysis.classpath);
         let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
-        self.workspace
-            .index
-            .write()
-            .await
-            .update_source(scope, origin, classes);
+        tracing::debug!(
+            uri = %uri,
+            module = analysis.module.0,
+            classpath = ?analysis.classpath,
+            source_root = ?analysis.source_root.map(|id| id.0),
+            visible_classpath_len = visible_classpath.len(),
+            "did_change indexing with analysis context"
+        );
+        self.workspace.index.write().await.update_source_in_context(
+            analysis.module,
+            analysis.source_root,
+            origin,
+            classes,
+        );
 
         self.client.semantic_tokens_refresh().await.ok();
+        self.notify_build_file_change(uri).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = &params.text_document.uri;
 
-        // 只处理已打开文档
         let Some(lang_id) = self
             .workspace
             .documents
@@ -456,24 +472,62 @@ impl LanguageServer for Backend {
 
         // 重新索引（你原有逻辑）
         let uri_str = uri.to_string();
-        let scope = self.workspace.scope_for_uri(uri);
-        let name_table = self.workspace.index.read().await.build_name_table(scope);
+        let analysis = self.workspace.analysis_context_for_uri(uri);
+        let name_table = self
+            .workspace
+            .index
+            .read()
+            .await
+            .build_name_table_for_analysis_context(
+                analysis.module,
+                analysis.classpath,
+                analysis.source_root,
+            );
+        let visible_classpath = self
+            .workspace
+            .index
+            .read()
+            .await
+            .module_classpath_jars(analysis.module, analysis.classpath);
         let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
-        self.workspace
-            .index
-            .write()
-            .await
-            .update_source(scope, origin, classes);
+        tracing::debug!(
+            uri = %uri,
+            module = analysis.module.0,
+            classpath = ?analysis.classpath,
+            source_root = ?analysis.source_root.map(|id| id.0),
+            visible_classpath_len = visible_classpath.len(),
+            asm_visible = visible_classpath.iter().any(|jar| jar.contains("asm-")),
+            "did_save indexing with analysis context"
+        );
+        self.workspace.index.write().await.update_source_in_context(
+            analysis.module,
+            analysis.source_root,
+            origin,
+            classes,
+        );
 
         // 刷新语义高亮
         self.client.semantic_tokens_refresh().await.ok();
+        self.notify_build_file_change(uri).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = &params.text_document.uri;
         info!(uri = %uri, "did_close");
         self.workspace.documents.close(uri);
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        let paths = params
+            .changes
+            .into_iter()
+            .filter_map(|event| event.uri.to_file_path().ok())
+            .collect::<Vec<_>>();
+        let services = self.build_services.read().await.clone();
+        for service in services {
+            service.notify_paths_changed(paths.clone()).await;
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {

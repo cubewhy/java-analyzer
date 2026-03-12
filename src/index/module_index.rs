@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use crate::build_integration::SourceRootId;
 use crate::index::scope::{ClasspathId, ModuleId};
 use crate::index::{BucketIndex, ClassMetadata, ClassOrigin};
 
@@ -39,10 +40,16 @@ impl ModuleQueryCache {
     }
 }
 
+struct SourceRootIndex {
+    classpath: ClasspathId,
+    bucket: Arc<BucketIndex>,
+}
+
 struct ModuleState {
     classpaths: HashMap<ClasspathId, ClasspathIndex>,
     active_classpath: ClasspathId,
     deps: Vec<ModuleId>,
+    source_roots: HashMap<SourceRootId, SourceRootIndex>,
 }
 
 pub struct ModuleIndex {
@@ -59,6 +66,7 @@ impl ModuleIndex {
             classpaths: HashMap::new(),
             active_classpath: ClasspathId::Main,
             deps: Vec::new(),
+            source_roots: HashMap::new(),
         };
         Self {
             id,
@@ -71,6 +79,55 @@ impl ModuleIndex {
 
     pub fn update_source(&self, origin: ClassOrigin, classes: Vec<ClassMetadata>) {
         self.source.update_source(origin, classes);
+    }
+
+    pub fn set_source_roots(&self, roots: Vec<(SourceRootId, ClasspathId)>) {
+        let mut state = self.state.write();
+        state.source_roots = roots
+            .into_iter()
+            .map(|(id, classpath)| {
+                (
+                    id,
+                    SourceRootIndex {
+                        classpath,
+                        bucket: Arc::new(BucketIndex::new()),
+                    },
+                )
+            })
+            .collect();
+    }
+
+    pub fn update_source_in_root(
+        &self,
+        source_root: Option<SourceRootId>,
+        origin: ClassOrigin,
+        classes: Vec<ClassMetadata>,
+    ) {
+        let state = self.state.read();
+        if let Some(root_id) = source_root
+            && let Some(root) = state.source_roots.get(&root_id)
+        {
+            root.bucket.update_source(origin, classes);
+            return;
+        }
+        drop(state);
+        self.source.update_source(origin, classes);
+    }
+
+    pub fn remove_source_origin_in_root(
+        &self,
+        source_root: Option<SourceRootId>,
+        origin: &ClassOrigin,
+    ) {
+        let state = self.state.read();
+        if let Some(root_id) = source_root
+            && let Some(root) = state.source_roots.get(&root_id)
+        {
+            root.bucket.remove_by_origin(origin);
+            return;
+        }
+        drop(state);
+        self.source.remove_by_origin(origin);
     }
 
     pub fn set_classpath(
@@ -105,6 +162,78 @@ impl ModuleIndex {
             .get(&state.active_classpath)
             .map(|cp| cp.buckets.clone())
             .unwrap_or_default()
+    }
+
+    pub fn visible_source_layers(
+        &self,
+        classpath_id: ClasspathId,
+        preferred_root: Option<SourceRootId>,
+    ) -> Vec<Arc<BucketIndex>> {
+        let state = self.state.read();
+        if state.source_roots.is_empty() {
+            return vec![Arc::clone(&self.source)];
+        }
+
+        let mut layers = Vec::new();
+        let mut seen = std::collections::HashSet::<SourceRootId>::new();
+
+        if let Some(root_id) = preferred_root
+            && let Some(root) = state.source_roots.get(&root_id)
+        {
+            layers.push(Arc::clone(&root.bucket));
+            seen.insert(root_id);
+        }
+
+        let mut push_matching = |requested: ClasspathId| {
+            for (root_id, root) in &state.source_roots {
+                if seen.contains(root_id) || root.classpath != requested {
+                    continue;
+                }
+                layers.push(Arc::clone(&root.bucket));
+                seen.insert(*root_id);
+            }
+        };
+
+        match classpath_id {
+            ClasspathId::Main => push_matching(ClasspathId::Main),
+            ClasspathId::Test => {
+                push_matching(ClasspathId::Test);
+                push_matching(ClasspathId::Main);
+            }
+        }
+
+        if layers.is_empty() {
+            layers.push(Arc::clone(&self.source));
+        }
+
+        layers
+    }
+
+    pub fn classpath_layers(&self, id: ClasspathId) -> Vec<Arc<BucketIndex>> {
+        let state = self.state.read();
+        state
+            .classpaths
+            .get(&id)
+            .map(|cp| cp.buckets.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn classpath_jars(&self, id: ClasspathId) -> Vec<Arc<str>> {
+        let state = self.state.read();
+        state
+            .classpaths
+            .get(&id)
+            .map(|cp| cp.jars.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn classpath_summary(&self) -> Vec<(ClasspathId, Vec<Arc<str>>)> {
+        let state = self.state.read();
+        state
+            .classpaths
+            .iter()
+            .map(|(id, cp)| (*id, cp.jars.clone()))
+            .collect()
     }
 
     #[allow(dead_code)]

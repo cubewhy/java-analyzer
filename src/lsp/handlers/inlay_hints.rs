@@ -19,9 +19,11 @@ pub async fn handle_inlay_hints(
         return None;
     }
 
-    let scope = workspace.scope_for_uri(uri);
+    let analysis = workspace.analysis_context_for_uri(uri);
+    let scope = analysis.scope();
     let index = workspace.index.read().await;
-    let view = index.view(scope);
+    let view =
+        index.view_for_analysis_context(scope.module, analysis.classpath, analysis.source_root);
     let env = ParseEnv {
         name_table: Some(view.build_name_table()),
     };

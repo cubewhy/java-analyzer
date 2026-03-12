@@ -71,6 +71,19 @@ impl DocumentStore {
     pub fn with_doc_mut<R>(&self, uri: &Url, f: impl FnOnce(&mut Document) -> R) -> Option<R> {
         self.docs.get_mut(uri).map(|mut d| f(&mut d))
     }
+
+    pub fn snapshot_documents(&self) -> Vec<(Url, String, String)> {
+        self.docs
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key().clone(),
+                    entry.value().language_id.clone(),
+                    entry.value().text.clone(),
+                )
+            })
+            .collect()
+    }
 }
 
 impl Default for DocumentStore {

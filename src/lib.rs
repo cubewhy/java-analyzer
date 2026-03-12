@@ -1,3 +1,4 @@
+pub mod build_integration;
 pub mod completion;
 pub mod decompiler;
 pub mod index;

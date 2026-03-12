@@ -30,9 +30,14 @@ pub async fn handle_goto_definition(
         }
     })?;
 
-    let scope = backend.workspace.scope_for_uri(uri);
+    let analysis = backend.workspace.analysis_context_for_uri(uri);
+    let scope = analysis.scope();
     let index_guard = backend.workspace.index.read().await;
-    let view = index_guard.view(scope);
+    let view = index_guard.view_for_analysis_context(
+        scope.module,
+        analysis.classpath,
+        analysis.source_root,
+    );
     let env = ParseEnv {
         name_table: Some(view.build_name_table()),
     };
@@ -56,6 +61,9 @@ pub async fn handle_goto_definition(
     lang.enrich_completion_context(&mut ctx, scope, &view);
 
     tracing::debug!(
+        module = scope.module.0,
+        classpath = ?analysis.classpath,
+        source_root = ?analysis.source_root.map(|id| id.0),
         location = ?ctx.location,
         enclosing_class = ?ctx.enclosing_class,
         enclosing_internal = ?ctx.enclosing_internal_name,

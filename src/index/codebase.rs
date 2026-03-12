@@ -22,71 +22,21 @@ pub fn index_codebase<P: AsRef<Path>>(
     root: P,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> CodebaseIndex {
-    // TODO: respect .gitignore
     let root = root.as_ref();
     tracing::info!(root = %root.display(), "codebase indexing started");
+    let source_files = collect_source_files([root.to_path_buf()]);
+    index_source_files(source_files, name_table)
+}
 
-    let source_files: Vec<PathBuf> = WalkDir::new(root)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|e| !is_excluded(e.path()))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            let ext = e.path().extension().and_then(|s| s.to_str());
-            matches!(ext, Some("java") | Some("kt"))
-        })
-        .map(|e| e.into_path())
-        .collect();
-
-    let file_count = source_files.len();
-
-    tracing::debug!("discovering stubs...");
-    let discovered_names: Vec<Arc<str>> = source_files
-        .par_iter()
-        .flat_map(|path| {
-            let content = std::fs::read_to_string(path).ok()?;
-            let lang = if path.extension().and_then(|s| s.to_str()) == Some("kt") {
-                "kotlin"
-            } else {
-                "java"
-            };
-            Some(super::source::discover_internal_names_str(&content, lang))
-        })
-        .flatten()
-        .collect();
-
-    let discovered_names_len = discovered_names.len();
-
-    let enriched_name_table = match name_table {
-        Some(existing) => existing.extend_with(discovered_names),
-        None => crate::index::NameTable::from_names(discovered_names),
-    };
-
-    tracing::debug!(
-        discovered_names_len,
-        enriched_name_table_len = enriched_name_table.len(),
-        "full structural analysis",
-    );
-    let classes: Vec<ClassMetadata> = source_files
-        .into_par_iter()
-        .flat_map(|path| {
-            let uri = path_to_uri_str(&path);
-            let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-            parse_source_file(&path, origin, Some(enriched_name_table.clone()))
-        })
-        .collect();
-
-    tracing::info!(
-        classes = classes.len(),
-        files = file_count,
-        "Codebase indexing complete"
-    );
-
-    CodebaseIndex {
-        classes,
-        file_count,
-    }
+pub fn index_codebase_paths<I>(
+    roots: I,
+    name_table: Option<Arc<crate::index::NameTable>>,
+) -> CodebaseIndex
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let source_files = collect_source_files(roots);
+    index_source_files(source_files, name_table)
 }
 
 /// Parse source text from memory (for LSP textDocument/didChange)
@@ -117,6 +67,82 @@ fn is_excluded(path: &Path) -> bool {
                 | "__pycache__"
         )
     })
+}
+
+fn collect_source_files<I>(roots: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    roots
+        .into_iter()
+        .flat_map(|root| {
+            WalkDir::new(root)
+                .follow_links(false)
+                .into_iter()
+                .filter_entry(|e| !is_excluded(e.path()))
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| {
+                    let ext = e.path().extension().and_then(|s| s.to_str());
+                    matches!(ext, Some("java") | Some("kt"))
+                })
+                .map(|e| e.into_path())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn index_source_files(
+    source_files: Vec<PathBuf>,
+    name_table: Option<Arc<crate::index::NameTable>>,
+) -> CodebaseIndex {
+    let file_count = source_files.len();
+
+    tracing::debug!("discovering stubs...");
+    let discovered_names: Vec<Arc<str>> = source_files
+        .par_iter()
+        .flat_map(|path| {
+            let content = std::fs::read_to_string(path).ok()?;
+            let lang = if path.extension().and_then(|s| s.to_str()) == Some("kt") {
+                "kotlin"
+            } else {
+                "java"
+            };
+            Some(super::source::discover_internal_names_str(&content, lang))
+        })
+        .flatten()
+        .collect();
+
+    let discovered_names_len = discovered_names.len();
+    let enriched_name_table = match name_table {
+        Some(existing) => existing.extend_with(discovered_names),
+        None => crate::index::NameTable::from_names(discovered_names),
+    };
+
+    tracing::debug!(
+        discovered_names_len,
+        enriched_name_table_len = enriched_name_table.len(),
+        "full structural analysis",
+    );
+    let classes: Vec<ClassMetadata> = source_files
+        .into_par_iter()
+        .flat_map(|path| {
+            let uri = path_to_uri_str(&path);
+            let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+            parse_source_file(&path, origin, Some(enriched_name_table.clone()))
+        })
+        .collect();
+
+    tracing::info!(
+        classes = classes.len(),
+        files = file_count,
+        "Codebase indexing complete"
+    );
+
+    CodebaseIndex {
+        classes,
+        file_count,
+    }
 }
 
 fn path_to_uri_str(path: &Path) -> String {

@@ -22,7 +22,7 @@ use crate::semantic::types::generics::{
 use crate::semantic::types::symbol_resolver::SymbolResolver;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::types::{
-    OverloadInvocationMode, TypeResolver, is_concrete_type_name, parse_single_type_to_internal,
+    TypeResolver, is_concrete_type_name, parse_single_type_to_internal,
     singleton_descriptor_to_type,
 };
 use crate::semantic::{CursorLocation, SemanticContext};
@@ -1201,6 +1201,7 @@ mod tests {
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex,
     };
     use crate::semantic::LocalVar;
+    use crate::semantic::types::OverloadInvocationMode;
     use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC, ACC_VARARGS};
 
     fn seg_names(expr: &str) -> Vec<(String, Option<i32>)> {
