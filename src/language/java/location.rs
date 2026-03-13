@@ -408,6 +408,7 @@ fn infer_annotation_target(node: Node) -> Option<Arc<str>> {
             "formal_parameter" | "spread_parameter" => "PARAMETER",
             "constructor_declaration" => "CONSTRUCTOR",
             "local_variable_declaration" => "LOCAL_VARIABLE",
+            "ERROR" | "class_body" | "block" | "program" => return None,
             _ => {
                 cur = n.parent();
                 continue;
@@ -1447,10 +1448,15 @@ mod tests {
     use crate::{
         language::java::{
             JavaContextExtractor,
-            location::{count_top_level_commas, determine_location, split_top_level_args},
+            location::{
+                count_top_level_commas, determine_location, infer_annotation_target,
+                split_top_level_args,
+            },
         },
-        semantic::CursorLocation,
-        semantic::context::{FunctionalTargetHint, StatementLabelCompletionKind},
+        semantic::{
+            CursorLocation,
+            context::{FunctionalTargetHint, StatementLabelCompletionKind},
+        },
     };
 
     fn setup_with(source: &str, offset: usize) -> (JavaContextExtractor, tree_sitter::Tree) {
@@ -2389,5 +2395,37 @@ class A {
                 expression_body: Some(ref body),
             }) if body == "x + 1"
         ));
+    }
+
+    #[test]
+    fn test_dangling_annotation_in_error_context_returns_none() {
+        let src = indoc::indoc! {r#"
+        class A {
+            @Overr
+        }
+        "#};
+        // Position cursor at the end of @Overr
+        let offset = src.find("@Overr").unwrap() + 6;
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        // Traverse up to find the annotation node
+        let mut n = cursor_node.expect("Node should exist");
+        while n.kind() != "marker_annotation" && n.kind() != "annotation" {
+            if let Some(parent) = n.parent() {
+                n = parent;
+            } else {
+                break;
+            }
+        }
+
+        let target = infer_annotation_target(n);
+
+        // Assert that we get None instead of "TYPE"
+        assert!(
+            target.is_none(),
+            "Expected None for a dangling annotation inside an ERROR/class_body, but got {:?}",
+            target
+        );
     }
 }
