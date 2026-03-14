@@ -490,24 +490,36 @@ pub fn inject_and_determine(
             .child_by_field_name("name")
             .is_some_and(|n| n.id() == sentinel_node.id());
         if is_name {
-            // Extract receiver from the type position of the declaration.
-            let mut wc = decl.walk();
-            let receiver_expr = decl
-                .named_children(&mut wc)
-                .find(|c| c.kind() != "modifiers" && c.kind() != "variable_declarator")
-                .and_then(|n| n.utf8_text(injected_source.as_bytes()).ok())
-                .map(|s| strip_sentinel(s.trim()))
-                .unwrap_or_default();
-            if !receiver_expr.is_empty() {
-                let clean_loc = CursorLocation::MemberAccess {
-                    receiver_semantic_type: None,
-                    receiver_type: None,
-                    member_prefix: String::new(),
-                    receiver_expr,
-                    arguments: None,
-                };
-                return Some((clean_loc, String::new()));
+            let type_text = {
+                let mut wc = decl.walk();
+                decl.named_children(&mut wc)
+                    .find(|c| c.kind() != "modifiers" && c.kind() != "variable_declarator")
+                    .and_then(|n| n.utf8_text(injected_source.as_bytes()).ok())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            };
+            // Only treat as misparse if the "type" is a primitive keyword.
+            // Normal cases like `String __KIRO__` should fall through to VariableName.
+            let is_primitive = matches!(
+                type_text.as_str(),
+                "int" | "long" | "double" | "float" | "boolean" | "char" | "byte" | "short"
+            );
+            if is_primitive {
+                let receiver_expr = strip_sentinel(&type_text);
+                return Some((
+                    CursorLocation::MemberAccess {
+                        receiver_semantic_type: None,
+                        receiver_type: None,
+                        member_prefix: String::new(),
+                        receiver_expr,
+                        arguments: None,
+                    },
+                    String::new(),
+                ));
             }
+
+            return Some((CursorLocation::Unknown, String::new()));
         }
     }
 

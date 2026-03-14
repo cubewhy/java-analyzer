@@ -199,6 +199,15 @@ fn determine_location_impl(
         }
     }
 
+    // cursor landed on a block with no precise node —
+    // check if the preceding child is an ERROR containing only a type expression,
+    // which means we're in a variable-name position: `List<String> |`
+    if matches!(node.kind(), "block" | "class_body")
+        && let Some(var_name_loc) = detect_variable_name_position(ctx, node)
+    {
+        return var_name_loc;
+    }
+
     // Last resort: treat the cursor node as a plain expression/identifier.
     if !matches!(node.kind(), "identifier" | "type_identifier") {
         return (CursorLocation::Unknown, String::new());
@@ -210,6 +219,68 @@ fn determine_location_impl(
             prefix: clean.clone(),
         },
         clean,
+    )
+}
+
+fn detect_variable_name_position(
+    ctx: &JavaContextExtractor,
+    block: Node,
+) -> Option<(CursorLocation, String)> {
+    // Find the last named child that ends before the cursor.
+    let preceding = {
+        let mut wc = block.walk();
+        let mut last: Option<Node> = None;
+        for child in block.named_children(&mut wc) {
+            if child.end_byte() <= ctx.offset {
+                last = Some(child);
+            } else {
+                break;
+            }
+        }
+        last
+    }?;
+
+    // Must be an ERROR node containing only a type-like node (no `=`, no `;`).
+    if preceding.kind() != "ERROR" {
+        return None;
+    }
+
+    // The ERROR must contain exactly one named child that is a type node.
+    let mut wc = preceding.walk();
+    let named_children: Vec<Node> = preceding.named_children(&mut wc).collect();
+    if named_children.len() != 1 {
+        return None;
+    }
+    let inner = named_children[0];
+    if !is_type_like_node_kind(inner.kind()) {
+        return None;
+    }
+
+    // Make sure there's no `=` or `;` inside the ERROR (which would mean it's an initializer).
+    let mut wc2 = preceding.walk();
+    let has_assignment_or_semi = preceding
+        .children(&mut wc2)
+        .any(|c| matches!(c.kind(), "=" | ";"));
+    if has_assignment_or_semi {
+        return None;
+    }
+
+    let type_name = ctx.node_text(inner).trim().to_string();
+    Some((CursorLocation::VariableName { type_name }, String::new()))
+}
+
+fn is_type_like_node_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "type_identifier"
+            | "generic_type"
+            | "array_type"
+            | "scoped_type_identifier"
+            | "integral_type"
+            | "floating_point_type"
+            | "boolean_type"
+            | "void_type"
+            | "annotated_type"
     )
 }
 
