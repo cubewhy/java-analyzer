@@ -571,7 +571,17 @@ impl JavaContextExtractor {
         let in_error_context = cursor_node
             .map(|n| n.kind() == "ERROR" || utils::find_ancestor(n, "ERROR").is_some())
             .unwrap_or(false);
-        if !in_error_context && utils::find_top_error_node(root).is_none() {
+
+        // Also trigger when cursor landed on a block or local_variable_declaration
+        // that contains a lambda-like structure (e.g., `(a) -> ` with no body yet).
+        let cursor_may_contain_lambda = cursor_node
+            .map(|n| matches!(n.kind(), "block" | "local_variable_declaration"))
+            .unwrap_or(false);
+
+        if !in_error_context
+            && !cursor_may_contain_lambda
+            && utils::find_top_error_node(root).is_none()
+        {
             return None;
         }
 
