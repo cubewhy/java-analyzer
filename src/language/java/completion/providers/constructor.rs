@@ -102,6 +102,11 @@ impl CompletionProvider for ConstructorProvider {
                 })
                 .collect();
 
+            let is_class_generic = meta
+                .generic_signature
+                .as_ref()
+                .is_some_and(|sig| sig.starts_with('<'));
+
             if constructors.is_empty() {
                 // Synthesise a default no-arg constructor
                 let candidate = CompletionCandidate::new(
@@ -117,7 +122,7 @@ impl CompletionProvider for ConstructorProvider {
                 .with_detail(format!("new {}()", fqn))
                 .with_score(type_score_boost);
 
-                let candidate = if meta.generic_signature.is_some() {
+                let candidate = if is_class_generic {
                     candidate.with_generics_callable_insert(
                         meta.name.as_ref(),
                         &[],
@@ -160,7 +165,7 @@ impl CompletionProvider for ConstructorProvider {
                 .with_detail(detail)
                 .with_score(type_score_boost);
 
-                let candidate = if meta.generic_signature.is_some() {
+                let candidate = if is_class_generic {
                     candidate.with_generics_callable_insert(
                         meta.name.as_ref(),
                         &[],
@@ -178,6 +183,7 @@ impl CompletionProvider for ConstructorProvider {
                 results.push(candidate);
             }
         }
+
         ProviderCompletionResult {
             candidates: results,
             is_incomplete: truncated,
