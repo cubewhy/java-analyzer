@@ -19,11 +19,6 @@ pub(crate) fn determine_location(
     trigger_char: Option<char>,
 ) -> (CursorLocation, String) {
     let (loc, query) = determine_location_impl(ctx, cursor_node, trigger_char);
-    if matches!(loc, CursorLocation::Unknown)
-        && let Some(type_name) = heuristics::detect_variable_name_after_type_text(ctx)
-    {
-        return (CursorLocation::VariableName { type_name }, String::new());
-    }
     if utils::location_has_newline(&loc) {
         return (CursorLocation::Unknown, String::new());
     }
@@ -184,6 +179,10 @@ fn determine_location_impl(
             },
             clean,
         );
+    }
+
+    if let Some(type_name) = heuristics::detect_variable_name_after_type_text(ctx) {
+        return (CursorLocation::VariableName { type_name }, String::new());
     }
 
     (CursorLocation::Unknown, String::new())
