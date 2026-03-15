@@ -1,6 +1,10 @@
 use crate::language::java::JavaContextExtractor;
-use crate::language::java::location::error::{handle_import_from_text, is_import_context};
-use crate::language::java::location::text::detect_new_keyword_before_cursor;
+use crate::language::java::location::heuristics::{
+    detect_member_tail_in_misread_local_decl, detect_new_keyword_before_cursor,
+    detect_trailing_dot_in_text, detect_variable_name_position_in_error, handle_import_from_text,
+    is_import_context, is_misread_expression_in_local_decl, is_variable_name_after_complete_type,
+    is_variable_name_after_previous_declaration,
+};
 use crate::language::java::utils::strip_sentinel;
 use crate::language::java::{
     completion_context::normalize_top_level_generic_base,
@@ -10,7 +14,6 @@ use crate::semantic::CursorLocation;
 use std::sync::Arc;
 use tree_sitter::Node;
 
-use super::text::detect_trailing_dot_in_text;
 use super::utils::{cursor_truncated_text, is_descendant_of};
 
 pub(super) fn extract_string_prefix(ctx: &JavaContextExtractor, str_node: Node) -> String {
@@ -643,6 +646,18 @@ pub(super) fn handle_identifier(
     node: Node,
     _trigger_char: Option<char>,
 ) -> (CursorLocation, String) {
+    // Heuristic: if a complete declaration ends on a previous line, treat the
+    // current identifier as a type starting a new declaration.
+    if let Some(type_name) = is_variable_name_after_previous_declaration(node, ctx) {
+        return (CursorLocation::VariableName { type_name }, String::new());
+    }
+    // Heuristic: an ERROR node that only contains a type with trailing whitespace
+    // indicates we're waiting for a variable name.
+    if let Some(err) = find_ancestor(node, "ERROR")
+        && let Some(type_name) = detect_variable_name_position_in_error(ctx, err)
+    {
+        return (CursorLocation::VariableName { type_name }, String::new());
+    }
     let mut ancestor = node;
     loop {
         ancestor = match ancestor.parent() {
@@ -672,22 +687,28 @@ pub(super) fn handle_identifier(
                 }
                 return handle_constructor(ctx, ancestor);
             }
+
             "local_variable_declaration" => {
-                // Misread: `str\nfunc(...)` parsed as local_variable_declaration
-                if let Some(next) = ancestor.next_sibling() {
-                    let next_text = &ctx.source[next.start_byte()..next.end_byte()];
-                    if next_text.trim_start().starts_with('(') {
-                        let text = cursor_truncated_text(ctx, node);
-                        let clean = strip_sentinel(&text);
-                        return (
-                            CursorLocation::Expression {
-                                prefix: clean.clone(),
-                            },
-                            clean,
-                        );
-                    }
+                // Heuristic: Misread expression (e.g., `str\nfunc(...)`)
+                if is_misread_expression_in_local_decl(node, ancestor, ctx) {
+                    let text = cursor_truncated_text(ctx, node);
+                    let clean = strip_sentinel(&text);
+                    return (
+                        CursorLocation::Expression {
+                            prefix: clean.clone(),
+                        },
+                        clean,
+                    );
                 }
-                // member tail misread: `a.put` in local decl context
+
+                // Heuristic: Variable name after complete type with whitespace
+                // Handles: `String |`, `List<String> |`, `int[] |`
+                if is_variable_name_after_complete_type(node, ancestor, ctx) {
+                    let type_name = extract_type_from_decl(ctx, ancestor);
+                    return (CursorLocation::VariableName { type_name }, String::new());
+                }
+
+                // Heuristic: Member tail misread as local declaration
                 if let Some((receiver_expr, member_prefix)) =
                     detect_member_tail_in_misread_local_decl(ctx, node, ancestor)
                 {
@@ -702,6 +723,8 @@ pub(super) fn handle_identifier(
                         member_prefix,
                     );
                 }
+
+                // Standard type/name position detection
                 if is_in_type_position(node, ancestor) {
                     let text = cursor_truncated_text(ctx, node);
                     return (
@@ -711,10 +734,12 @@ pub(super) fn handle_identifier(
                         text,
                     );
                 }
+
                 if is_in_name_position(node, ancestor) {
                     let type_name = extract_type_from_decl(ctx, ancestor);
                     return (CursorLocation::VariableName { type_name }, String::new());
                 }
+
                 if is_in_type_subtree(node, ancestor) {
                     let text = cursor_truncated_text(ctx, node);
                     return (
@@ -724,6 +749,7 @@ pub(super) fn handle_identifier(
                         text,
                     );
                 }
+
                 let text = cursor_truncated_text(ctx, node);
                 let clean = strip_sentinel(&text);
                 return (
@@ -733,6 +759,7 @@ pub(super) fn handle_identifier(
                     clean,
                 );
             }
+
             "formal_parameter" | "spread_parameter" => {
                 if is_in_formal_param_name_position(node, ancestor) {
                     let type_name = ancestor
@@ -833,30 +860,6 @@ fn is_in_constructor_type_arguments(id_node: Node, ctor_node: Node) -> bool {
     is_descendant_of(type_args, ty) && is_descendant_of(id_node, type_args)
 }
 
-fn detect_member_tail_in_misread_local_decl(
-    ctx: &JavaContextExtractor,
-    node: Node,
-    decl_node: Node,
-) -> Option<(String, String)> {
-    let err = find_ancestor(node, "ERROR")?;
-    if !is_descendant_of(err, decl_node) {
-        return None;
-    }
-    let start = decl_node.start_byte();
-    if ctx.offset <= start {
-        return None;
-    }
-    let raw = &ctx.source[start..ctx.offset];
-    let clean = strip_sentinel(raw).trim_end().to_string();
-    let dot = clean.rfind('.')?;
-    let receiver_expr = clean[..dot].trim().to_string();
-    let member_prefix = clean[dot + 1..].trim().to_string();
-    if receiver_expr.is_empty() {
-        return None;
-    }
-    Some((receiver_expr, member_prefix))
-}
-
 fn extract_type_from_decl(ctx: &JavaContextExtractor, decl_node: Node) -> String {
     let mut walker = decl_node.walk();
     for child in decl_node.named_children(&mut walker) {
@@ -932,6 +935,48 @@ mod tests {
             target.is_none(),
             "Expected None for a dangling annotation inside an ERROR/class_body, but got {:?}",
             target
+        );
+    }
+
+    #[test]
+    fn test_identifier_after_empty_array_initializer_is_expression_without_space() {
+        let src = "Object[] o = new Object[]{};\nArrayList";
+        let offset = src.find("ArrayList").unwrap();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let (location, _) = super::handle_identifier(&ctx, cursor_node.unwrap(), None);
+        assert!(
+            matches!(location, crate::semantic::CursorLocation::Expression { .. }),
+            "Expected Expression without trailing space after complete array initializer, got {:?}",
+            location
+        );
+    }
+
+    #[test]
+    fn test_identifier_after_invalid_array_syntax_is_expression_without_space() {
+        let src = "Object[] o = new Object[];\nArrayList";
+        let offset = src.find("ArrayList").unwrap();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let (location, _) = super::handle_identifier(&ctx, cursor_node.unwrap(), None);
+        assert!(
+            matches!(location, crate::semantic::CursorLocation::Expression { .. }),
+            "Expected Expression without trailing space after invalid array syntax, got {:?}",
+            location
+        );
+    }
+
+    #[test]
+    fn test_identifier_with_semicolon_after_type_is_expression() {
+        let src = "Object[] o = new Object[]{};\nArrayList ;";
+        let offset = src.find("ArrayList").unwrap() + "ArrayList".len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let (location, _) = super::handle_identifier(&ctx, cursor_node.unwrap(), None);
+        assert!(
+            matches!(location, crate::semantic::CursorLocation::Expression { .. }),
+            "Expected Expression for `ArrayList ;`, got {:?}",
+            location
         );
     }
 }

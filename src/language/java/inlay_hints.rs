@@ -57,6 +57,7 @@ pub fn collect_java_inlay_hints(
     hints
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_var_hints(
     source: &str,
     rope: &Rope,
@@ -135,6 +136,7 @@ fn collect_var_hints(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_parameter_hints(
     source: &str,
     rope: &Rope,

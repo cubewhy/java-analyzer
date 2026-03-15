@@ -101,10 +101,11 @@ pub(super) fn find_object_creation_at_cursor(node: Node, offset: usize) -> Optio
     }
     let mut cursor = node.walk();
     for child in node.named_children(&mut cursor) {
-        if child.start_byte() <= offset && child.end_byte() >= offset {
-            if let Some(found) = find_object_creation_at_cursor(child, offset) {
-                return Some(found);
-            }
+        if child.start_byte() <= offset
+            && child.end_byte() >= offset
+            && let Some(found) = find_object_creation_at_cursor(child, offset)
+        {
+            return Some(found);
         }
     }
     None
@@ -127,70 +128,6 @@ pub(super) fn location_has_newline(loc: &CursorLocation) -> bool {
         CursorLocation::StringLiteral { prefix } => prefix.contains('\n'),
         _ => false,
     }
-}
-
-/// Detect variable name position: block child is ERROR containing only a type node.
-/// e.g. `List<String> |` where cursor is after the type.
-pub(super) fn detect_variable_name_position(
-    ctx: &JavaContextExtractor,
-    block: Node,
-) -> Option<(CursorLocation, String)> {
-    let preceding = {
-        let mut wc = block.walk();
-        let mut last: Option<Node> = None;
-        for child in block.named_children(&mut wc) {
-            if child.end_byte() <= ctx.offset {
-                last = Some(child);
-            } else {
-                break;
-            }
-        }
-        last
-    }?;
-    if preceding.kind() != "ERROR" {
-        return None;
-    }
-    let mut wc = preceding.walk();
-    let named_children: Vec<Node> = preceding.named_children(&mut wc).collect();
-    if named_children.len() != 1 {
-        return None;
-    }
-    let inner = named_children[0];
-    if !is_type_like_node_kind(inner.kind()) {
-        return None;
-    }
-    // Reject plain identifiers that are Java keywords (not types)
-    if inner.kind() == "identifier" {
-        let text = ctx.node_text(inner).trim();
-        if crate::language::java::members::is_java_keyword(text) {
-            return None;
-        }
-    }
-    let mut wc2 = preceding.walk();
-    let has_assignment_or_semi = preceding
-        .children(&mut wc2)
-        .any(|c| matches!(c.kind(), "=" | ";"));
-    if has_assignment_or_semi {
-        return None;
-    }
-    let type_name = ctx.node_text(inner).trim().to_string();
-    Some((CursorLocation::VariableName { type_name }, String::new()))
-}
-
-pub(super) fn is_type_like_node_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "type_identifier"
-            | "identifier"
-            | "generic_type"
-            | "array_type"
-            | "scoped_type_identifier"
-            | "integral_type"
-            | "floating_point_type"
-            | "boolean_type"
-            | "void_type"
-            | "annotated_type"
-    )
 }
 
 pub(crate) fn is_member_part_of_scoped_type(node: Node) -> bool {

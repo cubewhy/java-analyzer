@@ -353,10 +353,10 @@ fn extract_lambda_params_from_error_nodes_in_ancestry(
 ) -> Vec<RankedLocal> {
     let mut current = cursor_node;
     while let Some(node) = current {
-        if node.kind() == "ERROR" || node.kind() == "block" || node.kind() == "program" {
-            if let Some(result) = extract_lambda_params_from_error_arrow_node(ctx, node, type_ctx) {
-                return result;
-            }
+        if (node.kind() == "ERROR" || node.kind() == "block" || node.kind() == "program")
+            && let Some(result) = extract_lambda_params_from_error_arrow_node(ctx, node, type_ctx)
+        {
+            return result;
         }
         current = node.parent();
     }
