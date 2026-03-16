@@ -273,6 +273,32 @@ impl<'a> TokenCollector<'a> {
     pub fn finish(self) -> Vec<SemanticToken> {
         self.data
     }
+
+    /// Collect tokens only for nodes that intersect the given byte range
+    /// [range_start_byte, range_end_byte). The returned token list uses the
+    /// standard LSP delta encoding relative to the first token in the range,
+    /// so callers must re-encode it if they want absolute positions — but
+    /// since the spec says range results use the same encoding as full
+    /// results, we return a self-contained delta sequence starting from 0.
+    pub fn collect_range(&mut self, node: Node, range_start_byte: usize, range_end_byte: usize) {
+        // Prune subtrees that are entirely outside the range
+        if node.end_byte() <= range_start_byte || node.start_byte() >= range_end_byte {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            // Skip children wholly outside the range
+            if child.end_byte() <= range_start_byte || child.start_byte() >= range_end_byte {
+                continue;
+            }
+            if let Some(classified) = self.lang.classify_semantic_token(child, self.bytes) {
+                self.push_token(child, classified.ty, &classified.modifiers);
+            }
+            if child.child_count() > 0 {
+                self.collect_range(child, range_start_byte, range_end_byte);
+            }
+        }
+    }
 }
 
 /// 计算 rope 的 [start_char, end_char) 区间内 UTF-16 code units 数量

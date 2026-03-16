@@ -1,6 +1,6 @@
 use dashmap::DashMap;
 use ropey::Rope;
-use tower_lsp::lsp_types::Url;
+use tower_lsp::lsp_types::{SemanticToken, Url};
 use tree_sitter::Tree;
 
 #[derive(Debug)]
@@ -14,6 +14,10 @@ pub struct Document {
 
     /// Cached tree for this doc's language (java/kotlin)
     pub tree: Option<Tree>,
+
+    /// Cached semantic token result: (result_id, flat SemanticToken data).
+    /// Invalidated whenever the document text changes.
+    pub semantic_token_cache: Option<(String, Vec<SemanticToken>)>,
 }
 
 impl Document {
@@ -26,6 +30,7 @@ impl Document {
             text: content,
             rope,
             tree: None,
+            semantic_token_cache: None,
         }
     }
 
@@ -34,6 +39,7 @@ impl Document {
         self.text = new_content;
         self.rope = Rope::from_str(&self.text);
         self.tree = None;
+        self.semantic_token_cache = None;
     }
 }
 

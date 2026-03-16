@@ -18,7 +18,9 @@ use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::lsp::config::JavaAnalyzerConfig;
 use crate::lsp::handlers::goto_definition::handle_goto_definition;
 use crate::lsp::handlers::inlay_hints::handle_inlay_hints;
-use crate::lsp::handlers::semantic_tokens::handle_semantic_tokens;
+use crate::lsp::handlers::semantic_tokens::{
+    handle_semantic_tokens, handle_semantic_tokens_full_delta, handle_semantic_tokens_range,
+};
 use crate::workspace::{Workspace, document::Document};
 
 pub struct Backend {
@@ -569,6 +571,32 @@ impl LanguageServer for Backend {
         params: SemanticTokensParams,
     ) -> LspResult<Option<SemanticTokensResult>> {
         let response = handle_semantic_tokens(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.workspace),
+            params,
+        )
+        .await;
+        Ok(response)
+    }
+
+    async fn semantic_tokens_full_delta(
+        &self,
+        params: SemanticTokensDeltaParams,
+    ) -> LspResult<Option<SemanticTokensFullDeltaResult>> {
+        let response = handle_semantic_tokens_full_delta(
+            Arc::clone(&self.registry),
+            Arc::clone(&self.workspace),
+            params,
+        )
+        .await;
+        Ok(response)
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> LspResult<Option<SemanticTokensRangeResult>> {
+        let response = handle_semantic_tokens_range(
             Arc::clone(&self.registry),
             Arc::clone(&self.workspace),
             params,

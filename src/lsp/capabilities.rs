@@ -49,7 +49,8 @@ pub fn server_capabilities() -> ServerCapabilities {
                             token_types: TOKEN_TYPES.to_vec(),
                             token_modifiers: TOKEN_MODIFIERS.to_vec(),
                         },
-                        full: Some(SemanticTokensFullOptions::Bool(true)),
+                        full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+                        range: Some(true),
                         ..Default::default()
                     },
                     static_registration_options: StaticRegistrationOptions {
