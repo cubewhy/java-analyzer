@@ -13,6 +13,8 @@ use tower_lsp::lsp_types::{
 };
 use tree_sitter::{Node, Parser, Tree};
 
+use crate::workspace::SourceFile;
+
 pub(crate) mod rope_utils;
 pub(crate) mod ts_utils;
 
@@ -67,17 +69,14 @@ pub trait Language: Send + Sync + std::fmt::Debug {
     /// build completion context using an existing syntax tree
     fn parse_completion_context_with_tree(
         &self,
-        source: &str,
-        rope: &Rope,
-        root: Node,
+        file: &SourceFile,
         line: u32,
         character: u32,
         trigger_char: Option<char>,
         _env: &ParseEnv,
     ) -> Option<SemanticContext> {
         // Default fallback: reparse (keeps other languages working)
-        let _ = (rope, root);
-        self.parse_completion_context(source, line, character, trigger_char)
+        self.parse_completion_context(file.text(), line, character, trigger_char)
     }
 
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
@@ -110,8 +109,8 @@ pub trait Language: Send + Sync + std::fmt::Debug {
 
     fn classify_semantic_token<'a>(
         &self,
-        _node: tree_sitter::Node<'a>,
-        _bytes: &'a [u8],
+        _node: Node<'a>,
+        _file: &'a SourceFile,
     ) -> Option<ClassifiedToken> {
         None
     }
@@ -122,8 +121,8 @@ pub trait Language: Send + Sync + std::fmt::Debug {
 
     fn collect_symbols<'a>(
         &self,
-        _node: tree_sitter::Node<'a>,
-        _bytes: &'a [u8],
+        _node: Node<'a>,
+        _file: &'a SourceFile,
     ) -> Option<Vec<DocumentSymbol>> {
         None
     }
@@ -134,9 +133,7 @@ pub trait Language: Send + Sync + std::fmt::Debug {
 
     fn collect_inlay_hints_with_tree(
         &self,
-        _source: &str,
-        _rope: &Rope,
-        _root: Node,
+        _file: &SourceFile,
         _range: Range,
         _env: &ParseEnv,
         _index: &IndexView,
@@ -180,8 +177,7 @@ impl Default for LanguageRegistry {
 }
 
 pub struct TokenCollector<'a> {
-    bytes: &'a [u8],
-    rope: &'a Rope,
+    file: &'a SourceFile,
     lang: &'a dyn Language,
 
     data: Vec<SemanticToken>,
@@ -190,10 +186,9 @@ pub struct TokenCollector<'a> {
 }
 
 impl<'a> TokenCollector<'a> {
-    pub fn new(bytes: &'a [u8], rope: &'a Rope, lang: &'a dyn Language) -> Self {
+    pub fn new(file: &'a SourceFile, lang: &'a dyn Language) -> Self {
         Self {
-            bytes,
-            rope,
+            file,
             lang,
             data: Vec::new(),
             last_line: 0,
@@ -220,18 +215,21 @@ impl<'a> TokenCollector<'a> {
         let end_byte = node.end_byte();
 
         // byte -> char index (Unicode scalar index)
-        let start_char = self.rope.byte_to_char(start_byte);
-        let end_char = self.rope.byte_to_char(end_byte);
+        let start_char = self.file.rope.byte_to_char(start_byte);
+        let end_char = self.file.rope.byte_to_char(end_byte);
 
         // char -> line + column(char)
-        let line_idx = self.rope.char_to_line(start_char);
-        let line_start_char = self.rope.line_to_char(line_idx);
+        let line_idx = self.file.rope.char_to_line(start_char);
+        let line_start_char = self.file.rope.line_to_char(line_idx);
         let col_char = start_char.saturating_sub(line_start_char);
 
         // column/length in UTF-16 code units (LSP required)
-        let col_utf16 =
-            utf16_units_in_rope_char_range(self.rope, line_start_char, line_start_char + col_char);
-        let len_utf16 = utf16_units_in_rope_char_range(self.rope, start_char, end_char);
+        let col_utf16 = utf16_units_in_rope_char_range(
+            &self.file.rope,
+            line_start_char,
+            line_start_char + col_char,
+        );
+        let len_utf16 = utf16_units_in_rope_char_range(&self.file.rope, start_char, end_char);
 
         let line = line_idx as u32;
         let col = col_utf16 as u32;
@@ -261,7 +259,7 @@ impl<'a> TokenCollector<'a> {
     pub fn collect(&mut self, node: Node) {
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if let Some(classified) = self.lang.classify_semantic_token(child, self.bytes) {
+            if let Some(classified) = self.lang.classify_semantic_token(child, self.file) {
                 self.push_token(child, classified.ty, &classified.modifiers);
             }
             if child.child_count() > 0 {
@@ -291,7 +289,7 @@ impl<'a> TokenCollector<'a> {
             if child.end_byte() <= range_start_byte || child.start_byte() >= range_end_byte {
                 continue;
             }
-            if let Some(classified) = self.lang.classify_semantic_token(child, self.bytes) {
+            if let Some(classified) = self.lang.classify_semantic_token(child, self.file) {
                 self.push_token(child, classified.ty, &classified.modifiers);
             }
             if child.child_count() > 0 {

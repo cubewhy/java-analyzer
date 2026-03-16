@@ -221,19 +221,22 @@ impl LanguageServer for Backend {
         info!(uri = %td.uri, lang = %td.language_id, "did_open");
 
         // 先存 document（Document::new 需要是 text+rope+tree=None 的新结构）
-        self.workspace.documents.open(Document::new(
-            td.uri.clone(),
-            td.language_id.clone(),
-            td.version,
-            td.text.clone(),
-        ));
+        self.workspace
+            .documents
+            .open(Document::new(crate::workspace::SourceFile::new(
+                td.uri.clone(),
+                td.language_id.as_str(),
+                td.version,
+                td.text.as_str(),
+                None,
+            )));
 
         // 立刻 parse 一次，缓存 tree（避免 completion/semantic_tokens 每次 parse）
         let mut parser = lang.make_parser();
         let tree = parser.parse(&td.text, None);
 
         self.workspace.documents.with_doc_mut(&td.uri, |doc| {
-            doc.tree = tree;
+            doc.set_tree(tree);
         });
 
         let uri_str = td.uri.to_string();
@@ -282,7 +285,7 @@ impl LanguageServer for Backend {
         let Some(lang_id) = self
             .workspace
             .documents
-            .with_doc(uri, |d| d.language_id.clone())
+            .with_doc(uri, |d| d.language_id().to_owned())
         else {
             return;
         };
@@ -297,79 +300,71 @@ impl LanguageServer for Backend {
         let mut changed_text_for_index: Option<String> = None;
 
         let ok = self.workspace.documents.with_doc_mut(uri, |doc| {
-            // 版本更新
-            doc.version = params.text_document.version;
+            let new_version = params.text_document.version;
+            let mut text: String = doc.source().text().to_owned();
+            let mut rope: ropey::Rope = (*doc.source().rope).clone();
 
-            // 如果 tree 还没有（比如之前没 parse 成功），先 full parse 一次兜底
-            if doc.tree.is_none() {
-                let mut parser = lang.make_parser();
-                doc.tree = parser.parse(&doc.text, None);
-            }
-
-            // 必须有 tree 才能增量
-            let Some(old_tree) = doc.tree.as_ref() else {
-                // 解析失败就只能退化：把 change 当 full 文本替换（这里按协议一般不会发生）
+            let base_tree: Option<tree_sitter::Tree> = match &doc.source().tree {
+                Some(t) => Some((**t).clone()),
+                None => {
+                    let mut p = lang.make_parser();
+                    p.parse(&text, None)
+                }
+            };
+            let Some(mut tree) = base_tree else {
                 return;
             };
 
-            let mut tree = old_tree.clone();
-
-            // 逐个应用 change（INCREMENTAL 可能一次发多个）
             for ch in &params.content_changes {
                 let Some(range) = ch.range else {
-                    // 客户端可能发 full text（range=None），那就退化成 full replace + full parse
-                    doc.text = ch.text.clone();
-                    doc.rope = ropey::Rope::from_str(&doc.text);
-
-                    let mut parser = lang.make_parser();
-                    doc.tree = parser.parse(&doc.text, None);
-                    changed_text_for_index = Some(doc.text.clone());
+                    text = ch.text.clone();
+                    let mut p = lang.make_parser();
+                    let new_tree = p.parse(&text, None);
+                    let uri_c = doc.source().uri.as_ref().clone();
+                    let lid_c = doc.source().language_id.clone();
+                    doc.update_source(crate::workspace::SourceFile::new(
+                        uri_c,
+                        lid_c.as_ref(),
+                        new_version,
+                        text.as_str(),
+                        new_tree,
+                    ));
+                    changed_text_for_index = Some(doc.source().text().to_owned());
                     return;
                 };
 
-                // 1) 旧 rope 上算 byte offsets（你已有 rope_line_col_to_offset）
-                let start_byte = match rope_line_col_to_offset(
-                    &doc.rope,
-                    range.start.line,
-                    range.start.character,
-                ) {
-                    Some(x) => x,
-                    None => continue,
-                };
+                let start_byte =
+                    match rope_line_col_to_offset(&rope, range.start.line, range.start.character) {
+                        Some(x) => x,
+                        None => continue,
+                    };
                 let old_end_byte =
-                    match rope_line_col_to_offset(&doc.rope, range.end.line, range.end.character) {
+                    match rope_line_col_to_offset(&rope, range.end.line, range.end.character) {
                         Some(x) => x,
                         None => continue,
                     };
 
-                // 2) old positions (tree-sitter Point 的 column 用“字节列”)
                 let start_line = range.start.line as usize;
                 let end_line = range.end.line as usize;
-
-                let start_line_byte = doc.rope.line_to_byte(start_line);
-                let end_line_byte = doc.rope.line_to_byte(end_line);
-
+                let start_line_byte = rope.line_to_byte(start_line);
+                let end_line_byte = rope.line_to_byte(end_line);
                 let start_position =
                     Point::new(start_line, start_byte.saturating_sub(start_line_byte));
                 let old_end_position =
                     Point::new(end_line, old_end_byte.saturating_sub(end_line_byte));
 
-                // 3) 更新 doc.text（byte range）
-                doc.text.replace_range(start_byte..old_end_byte, &ch.text);
+                text.replace_range(start_byte..old_end_byte, &ch.text);
 
-                // 4) 更新 rope（char range）
-                let start_char = doc.rope.byte_to_char(start_byte);
-                let old_end_char = doc.rope.byte_to_char(old_end_byte);
-                doc.rope.remove(start_char..old_end_char);
-                doc.rope.insert(start_char, &ch.text);
+                let start_char = rope.byte_to_char(start_byte);
+                let old_end_char = rope.byte_to_char(old_end_byte);
+                rope.remove(start_char..old_end_char);
+                rope.insert(start_char, &ch.text);
 
-                // 5) new end byte / new end point（按插入文本计算）
                 let new_end_byte = start_byte + ch.text.len();
                 let (new_end_row, new_end_col_bytes) =
                     point_after_insert_bytes(start_position.row, start_position.column, &ch.text);
                 let new_end_position = Point::new(new_end_row, new_end_col_bytes);
 
-                // 6) tree.edit
                 tree.edit(&InputEdit {
                     start_byte,
                     old_end_byte,
@@ -380,14 +375,19 @@ impl LanguageServer for Backend {
                 });
             }
 
-            // 7) incremental parse（复用 edited old tree）
             let mut parser = lang.make_parser();
-            let new_tree = parser.parse(&doc.text, Some(&tree));
-            doc.tree = new_tree;
-
-            changed_text_for_index = Some(doc.text.clone());
+            let new_tree = parser.parse(&text, Some(&tree));
+            let uri_c = doc.source().uri.as_ref().clone();
+            let lid_c = doc.source().language_id.clone();
+            doc.update_source(crate::workspace::SourceFile::new(
+                uri_c,
+                lid_c.as_ref(),
+                new_version,
+                text.as_str(),
+                new_tree,
+            ));
+            changed_text_for_index = Some(doc.source().text().to_owned());
         });
-
         if ok.is_none() {
             return;
         }
@@ -442,7 +442,7 @@ impl LanguageServer for Backend {
         let Some(lang_id) = self
             .workspace
             .documents
-            .with_doc(uri, |d| d.language_id.clone())
+            .with_doc(uri, |d| d.language_id().to_owned())
         else {
             return;
         };
@@ -459,15 +459,28 @@ impl LanguageServer for Backend {
         self.workspace.documents.with_doc_mut(uri, |doc| {
             if let Some(text) = params.text.as_ref() {
                 // 规范：如果 didSave 携带 text，以它为准（可能与内存不同步）
-                doc.text = text.clone();
-                doc.rope = ropey::Rope::from_str(&doc.text);
+                let mut parser = lang.make_parser();
+                let new_tree = parser.parse(text.as_str(), None);
+                let uri_c = doc.source().uri.as_ref().clone();
+                let lid_c = doc.source().language_id.clone();
+                let ver = doc.version();
+                doc.update_source(crate::workspace::SourceFile::new(
+                    uri_c,
+                    lid_c.as_ref(),
+                    ver,
+                    text.as_str(),
+                    new_tree,
+                ));
+                content_for_index = Some(doc.source().text().to_owned());
+                return;
             }
 
-            // 保存时重建树：稳定可靠（不依赖 edit ranges）
+            // No text payload: just re-parse the current source.
+            let cur_text = doc.source().text().to_owned();
             let mut parser = lang.make_parser();
-            doc.tree = parser.parse(&doc.text, None);
-
-            content_for_index = Some(doc.text.clone());
+            let new_tree = parser.parse(&cur_text, None);
+            doc.set_tree(new_tree);
+            content_for_index = Some(cur_text);
         });
 
         let Some(content) = content_for_index else {

@@ -24,7 +24,7 @@ pub async fn handle_completion(
 
     let lang_id = workspace
         .documents
-        .with_doc(uri, |doc| doc.language_id.clone())?;
+        .with_doc(uri, |doc| doc.language_id().to_owned())?;
 
     let lang = registry.find(&lang_id)?;
 
@@ -40,9 +40,9 @@ pub async fn handle_completion(
     );
 
     workspace.documents.with_doc_mut(uri, |doc| {
-        if doc.tree.is_none() {
-            let mut parser = lang.make_parser();
-            doc.tree = parser.parse(&doc.text, None);
+        if doc.source().tree.is_none() {
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
         }
     })?;
 
@@ -68,12 +68,10 @@ pub async fn handle_completion(
     };
 
     let (ctx, source_for_edits) = workspace.documents.with_doc(uri, |doc| {
-        let tree = doc.tree.as_ref()?;
+        let file = doc.source();
         let ctx = lang
             .parse_completion_context_with_tree(
-                &doc.text,
-                &doc.rope,
-                tree.root_node(),
+                file,
                 position.line,
                 position.character,
                 trigger,
@@ -82,7 +80,7 @@ pub async fn handle_completion(
             .with_file_uri(Arc::from(uri_str))
             .with_language_id(crate::language::LanguageId::new(lang_id.clone()));
 
-        Some((ctx, doc.text.clone()))
+        Some((ctx, file.text().to_owned()))
     })??;
     let ctx = if let Some(pkg) = inferred_package {
         ctx.with_inferred_package(pkg)

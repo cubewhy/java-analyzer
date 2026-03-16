@@ -13,7 +13,7 @@ pub async fn handle_inlay_hints(
     let uri = &params.text_document.uri;
     let lang_id = workspace
         .documents
-        .with_doc(uri, |doc| doc.language_id.clone())?;
+        .with_doc(uri, |doc| doc.language_id().to_owned())?;
     let lang = registry.find(&lang_id)?;
     if !lang.supports_inlay_hints() {
         return None;
@@ -28,21 +28,23 @@ pub async fn handle_inlay_hints(
         name_table: Some(view.build_name_table()),
     };
 
-    workspace.documents.with_doc_mut(uri, |doc| {
-        if doc.tree.is_none() {
-            doc.tree = lang.parse_tree(&doc.text, None);
-        }
-    })?;
+    // Ensure tree is parsed.
+    let has_tree = workspace
+        .documents
+        .with_doc(uri, |doc| doc.source().tree.is_some())
+        .unwrap_or(false);
+    if !has_tree {
+        workspace.documents.with_doc_mut(uri, |doc| {
+            if doc.source().tree.is_some() {
+                return;
+            }
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
+        });
+    }
 
     workspace.documents.with_doc(uri, |doc| {
-        let tree = doc.tree.as_ref()?;
-        lang.collect_inlay_hints_with_tree(
-            &doc.text,
-            &doc.rope,
-            tree.root_node(),
-            params.range,
-            &env,
-            &view,
-        )
+        let file = doc.source();
+        lang.collect_inlay_hints_with_tree(file, params.range, &env, &view)
     })?
 }

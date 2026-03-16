@@ -522,3 +522,5 @@ mod tests {
         assert_eq!(inferred.as_ref(), "org.example.foo");
     }
 }
+pub mod source_file;
+pub use source_file::SourceFile;

@@ -18,15 +18,16 @@ pub async fn handle_goto_definition(
     let pos = params.text_document_position_params.position;
 
     let (lang_id, full_end) = backend.workspace.documents.with_doc(uri, |doc| {
-        let full_end = token_end_character(&doc.text, pos.line, pos.character);
-        Some((doc.language_id.clone(), full_end))
+        let full_end = token_end_character(doc.source().text(), pos.line, pos.character);
+        Some((doc.language_id().to_owned(), full_end))
     })??;
 
     let lang = backend.registry.find(&lang_id)?;
 
     backend.workspace.documents.with_doc_mut(uri, |doc| {
-        if doc.tree.is_none() {
-            doc.tree = lang.parse_tree(&doc.text, None);
+        if doc.source().tree.is_none() {
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
         }
     })?;
 
@@ -43,16 +44,7 @@ pub async fn handle_goto_definition(
     };
 
     let ctx = backend.workspace.documents.with_doc(uri, |doc| {
-        let tree = doc.tree.as_ref()?;
-        lang.parse_completion_context_with_tree(
-            &doc.text,
-            &doc.rope,
-            tree.root_node(),
-            pos.line,
-            full_end,
-            None,
-            &env,
-        )
+        lang.parse_completion_context_with_tree(doc.source(), pos.line, full_end, None, &env)
     })??;
 
     let mut ctx = ctx;
@@ -86,10 +78,9 @@ pub async fn handle_goto_definition(
     {
         tracing::debug!(token = %token, "goto: local variable jump");
 
-        let range = backend
-            .workspace
-            .documents
-            .with_doc(uri, |doc| find_local_var_decl(&doc.text, lv.name.as_ref()));
+        let range = backend.workspace.documents.with_doc(uri, |doc| {
+            find_local_var_decl(doc.source().text(), lv.name.as_ref())
+        });
 
         return Some(GotoDefinitionResponse::Scalar(Location {
             uri: uri.clone(),
@@ -163,7 +154,7 @@ async fn goto_resolved_symbol(
                 let content = backend
                     .workspace
                     .documents
-                    .with_doc(&target_uri, |d| d.text.clone())
+                    .with_doc(&target_uri, |d| d.source().text().to_owned())
                     .or_else(|| {
                         target_uri
                             .to_file_path()

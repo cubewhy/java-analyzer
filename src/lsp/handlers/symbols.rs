@@ -13,21 +13,29 @@ pub async fn handle_document_symbol(
 
     let lang_id = workspace
         .documents
-        .with_doc(&uri, |doc| doc.language_id.clone())?;
+        .with_doc(&uri, |doc| doc.language_id().to_owned())?;
 
     let lang = registry.find(&lang_id)?;
 
-    workspace.documents.with_doc_mut(&uri, |doc| {
-        if doc.tree.is_none() {
-            doc.tree = lang.parse_tree(&doc.text, None);
-        }
-    })?;
+    // Ensure tree is parsed.
+    let has_tree = workspace
+        .documents
+        .with_doc(&uri, |doc| doc.source().tree.is_some())
+        .unwrap_or(false);
+    if !has_tree {
+        workspace.documents.with_doc_mut(&uri, |doc| {
+            if doc.source().tree.is_some() {
+                return;
+            }
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
+        });
+    }
 
     let symbols = workspace.documents.with_doc(&uri, |doc| {
-        let tree = doc.tree.as_ref()?;
-        let root = tree.root_node();
-        let bytes = doc.text.as_bytes();
-        lang.collect_symbols(root, bytes)
+        let file = doc.source();
+        let root = file.root_node()?;
+        lang.collect_symbols(root, file)
     })??;
 
     Some(DocumentSymbolResponse::Nested(symbols))

@@ -18,6 +18,7 @@ use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::{ClassifiedToken, ParseEnv};
 use crate::semantic::{CursorLocation, SemanticContext};
+use crate::workspace::SourceFile;
 use ropey::Rope;
 use smallvec::smallvec;
 use tower_lsp::lsp_types::{
@@ -115,20 +116,18 @@ impl Language for JavaLanguage {
 
     fn parse_completion_context_with_tree(
         &self,
-        source: &str,
-        rope: &Rope,
-        root: Node,
+        file: &SourceFile,
         line: u32,
         character: u32,
         trigger_char: Option<char>,
         env: &ParseEnv,
     ) -> Option<SemanticContext> {
-        let offset = rope_line_col_to_offset(rope, line, character)?;
+        let offset = rope_line_col_to_offset(&file.rope, line, character)?;
         tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context (cached tree)");
         let extractor = JavaContextExtractor::with_rope(
-            source.to_string(),
+            file.text().to_string(),
             offset,
-            rope.clone(),
+            (*file.rope).clone(),
             env.name_table.clone(),
         );
         if extractor.is_in_comment() {
@@ -142,6 +141,7 @@ impl Language for JavaLanguage {
                 vec![],
             ));
         }
+        let root = file.root_node()?;
         Some(extractor.extract(root, trigger_char))
     }
 
@@ -165,8 +165,9 @@ impl Language for JavaLanguage {
     fn classify_semantic_token<'a>(
         &self,
         node: Node<'a>,
-        bytes: &'a [u8],
+        file: &'a SourceFile,
     ) -> Option<ClassifiedToken> {
+        let bytes = file.bytes();
         match node.kind() {
             "type_identifier" => {
                 if is_annotation_name(node) {
@@ -271,9 +272,9 @@ impl Language for JavaLanguage {
     fn collect_symbols<'a>(
         &self,
         node: tree_sitter::Node<'a>,
-        bytes: &'a [u8],
+        file: &'a SourceFile,
     ) -> Option<Vec<tower_lsp::lsp_types::DocumentSymbol>> {
-        Some(collect_java_symbols(node, bytes))
+        Some(collect_java_symbols(node, file.bytes()))
     }
 
     fn supports_inlay_hints(&self) -> bool {
@@ -282,17 +283,16 @@ impl Language for JavaLanguage {
 
     fn collect_inlay_hints_with_tree(
         &self,
-        source: &str,
-        rope: &Rope,
-        root: Node,
+        file: &SourceFile,
         range: Range,
         env: &ParseEnv,
         index: &IndexView,
     ) -> Option<Vec<InlayHint>> {
-        let byte_range = lsp_range_to_byte_range(rope, range, source.len())?;
+        let root = file.root_node()?;
+        let byte_range = lsp_range_to_byte_range(&file.rope, range, file.text().len())?;
         let hints = collect_java_inlay_hints(
-            source,
-            rope,
+            file.text(),
+            &file.rope,
             root,
             env.name_table.clone(),
             index,
@@ -303,7 +303,7 @@ impl Language for JavaLanguage {
             hints
                 .into_iter()
                 .map(|hint| InlayHint {
-                    position: byte_offset_to_position(rope, hint.offset),
+                    position: byte_offset_to_position(&file.rope, hint.offset),
                     label: InlayHintLabel::String(hint.label),
                     kind: Some(match hint.kind {
                         JavaInlayHintKind::Type => InlayHintKind::TYPE,
@@ -685,9 +685,13 @@ mod tests {
 
         super::JavaLanguage
             .parse_completion_context_with_tree(
-                src,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src,
+                    Some(tree),
+                ),
                 line,
                 col,
                 trigger,
@@ -921,9 +925,13 @@ mod tests {
         let tree = parser.parse(&src, None).expect("failed to parse java");
         let ctx = super::JavaLanguage
             .parse_completion_context_with_tree(
-                &src,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src,
+                    Some(tree),
+                ),
                 line,
                 col,
                 None,
@@ -3850,9 +3858,13 @@ mod tests {
         let tree = parser.parse(src, None).expect("failed to parse java");
         let ctx = super::JavaLanguage
             .parse_completion_context_with_tree(
-                src,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src,
+                    Some(tree),
+                ),
                 line,
                 col,
                 None,
@@ -3956,9 +3968,13 @@ mod tests {
         let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
         let ctx = super::JavaLanguage
             .parse_completion_context_with_tree(
-                &src_no_cursor,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src_no_cursor,
+                    Some(tree),
+                ),
                 line,
                 col,
                 None,
@@ -4071,9 +4087,13 @@ mod tests {
         let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
         let ctx = super::JavaLanguage
             .parse_completion_context_with_tree(
-                &src_no_cursor,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src_no_cursor,
+                    Some(tree),
+                ),
                 line,
                 col,
                 None,
@@ -4783,9 +4803,13 @@ mod tests {
         let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
         let mut ctx = super::JavaLanguage
             .parse_completion_context_with_tree(
-                &src_no_cursor,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src_no_cursor,
+                    Some(tree),
+                ),
                 line,
                 col,
                 None,
@@ -5585,9 +5609,13 @@ mod tests {
             let tree = parser.parse(src_type, None).expect("parse");
             super::JavaLanguage
                 .parse_completion_context_with_tree(
-                    src_type,
-                    &rope,
-                    tree.root_node(),
+                    &crate::workspace::SourceFile::new(
+                        tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                        "",
+                        0,
+                        src_type,
+                        Some(tree),
+                    ),
                     type_line,
                     type_col,
                     None,
@@ -5630,9 +5658,13 @@ mod tests {
             let tree = parser.parse(src_ctor, None).expect("parse");
             super::JavaLanguage
                 .parse_completion_context_with_tree(
-                    src_ctor,
-                    &rope,
-                    tree.root_node(),
+                    &crate::workspace::SourceFile::new(
+                        tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                        "",
+                        0,
+                        src_ctor,
+                        Some(tree),
+                    ),
                     ctor_line,
                     ctor_col,
                     None,
@@ -5672,9 +5704,13 @@ mod tests {
             let tree = parser.parse(src_decl, None).expect("parse");
             super::JavaLanguage
                 .parse_completion_context_with_tree(
-                    src_decl,
-                    &rope,
-                    tree.root_node(),
+                    &crate::workspace::SourceFile::new(
+                        tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                        "",
+                        0,
+                        src_decl,
+                        Some(tree),
+                    ),
                     decl_line,
                     decl_col,
                     None,

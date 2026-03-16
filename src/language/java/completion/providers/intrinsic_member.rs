@@ -139,9 +139,13 @@ mod tests {
         let name_table = view.build_name_table();
         let mut ctx = JavaLanguage
             .parse_completion_context_with_tree(
-                &source,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    source,
+                    Some(tree),
+                ),
                 line as u32,
                 col as u32,
                 Some('.'),

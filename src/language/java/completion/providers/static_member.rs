@@ -309,9 +309,13 @@ mod tests {
 
         JavaLanguage
             .parse_completion_context_with_tree(
-                src,
-                &rope,
-                tree.root_node(),
+                &crate::workspace::SourceFile::new(
+                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
+                    "",
+                    0,
+                    src,
+                    Some(tree),
+                ),
                 line,
                 col,
                 trigger,

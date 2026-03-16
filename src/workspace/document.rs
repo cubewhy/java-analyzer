@@ -1,48 +1,86 @@
+use std::sync::Arc;
+
 use dashmap::DashMap;
-use ropey::Rope;
 use tower_lsp::lsp_types::{SemanticToken, Url};
 use tree_sitter::Tree;
 
+use super::source_file::SourceFile;
+
+/// Per-document mutable LSP state.
+///
+/// `Document` owns the current [`SourceFile`] snapshot plus any LSP-level
+/// caches that survive across re-parses (e.g. the semantic-token result
+/// cache used for incremental delta responses).
+///
+/// Immutable analysis (completion, inlay hints, semantic tokens, …) should
+/// read through `doc.source()` and never access the fields of `Document`
+/// directly except to update LSP caches.
 #[derive(Debug)]
 pub struct Document {
-    pub uri: Url,
-    pub language_id: String,
-    pub version: i32,
+    /// The current parsed snapshot.  Replaced atomically on every
+    /// `didChange` / `didOpen` / `didSave`.
+    source: Arc<SourceFile>,
 
-    pub text: String,
-    pub rope: Rope,
-
-    /// Cached tree for this doc's language (java/kotlin)
-    pub tree: Option<Tree>,
-
-    /// Cached semantic token result: (result_id, flat SemanticToken data).
-    /// Invalidated whenever the document text changes.
+    /// Cached semantic token result: `(result_id, flat token data)`.
+    /// Keyed on `result_id` (= document version as string) and invalidated
+    /// whenever `source` is replaced with a new version.
     pub semantic_token_cache: Option<(String, Vec<SemanticToken>)>,
 }
 
 impl Document {
-    pub fn new(uri: Url, language_id: String, version: i32, content: String) -> Self {
-        let rope = Rope::from_str(&content);
+    /// Create a new `Document` from an initial [`SourceFile`].
+    pub fn new(source: SourceFile) -> Self {
         Self {
-            uri,
-            language_id,
-            version,
-            text: content,
-            rope,
-            tree: None,
+            source: Arc::new(source),
             semantic_token_cache: None,
         }
     }
 
-    pub fn apply_full_change(&mut self, version: i32, new_content: String) {
-        self.version = version;
-        self.text = new_content;
-        self.rope = Rope::from_str(&self.text);
-        self.tree = None;
+    /// Read access to the current source snapshot.
+    #[inline]
+    pub fn source(&self) -> &Arc<SourceFile> {
+        &self.source
+    }
+
+    /// Replace the current source snapshot with a new one.
+    /// Invalidates all version-sensitive caches.
+    pub fn update_source(&mut self, source: SourceFile) {
+        self.source = Arc::new(source);
         self.semantic_token_cache = None;
+    }
+
+    /// Attach an already-incremented tree to the current source, producing a
+    /// new `SourceFile` with the updated tree.  Used by the `did_change`
+    /// handler after `tree.edit` + `parser.parse(…, Some(&old))`.
+    pub fn set_tree(&mut self, tree: Option<Tree>) {
+        // Avoid a full clone of the Arc<SourceFile> by replacing source
+        // with a new SourceFile that shares everything except the tree.
+        let prev = Arc::unwrap_or_clone(Arc::clone(&self.source));
+        self.source = Arc::new(prev.with_tree(tree));
+        // Tree change does not invalidate semantic-token cache by itself;
+        // text already changed before the tree was updated.
+    }
+
+    // ── Convenience pass-throughs ────────────────────────────────────────
+
+    pub fn uri(&self) -> &Url {
+        &self.source.uri
+    }
+
+    pub fn language_id(&self) -> &str {
+        &self.source.language_id
+    }
+
+    pub fn version(&self) -> i32 {
+        self.source.version
+    }
+
+    pub fn text(&self) -> &str {
+        self.source.text()
     }
 }
 
+/// Thread-safe store of open LSP documents.
 pub struct DocumentStore {
     docs: DashMap<Url, Document>,
 }
@@ -55,25 +93,19 @@ impl DocumentStore {
     }
 
     pub fn open(&self, doc: Document) {
-        self.docs.insert(doc.uri.clone(), doc);
-    }
-
-    pub fn update(&self, uri: &Url, version: i32, content: String) {
-        if let Some(mut doc) = self.docs.get_mut(uri) {
-            doc.apply_full_change(version, content);
-        }
+        self.docs.insert(doc.uri().clone(), doc);
     }
 
     pub fn close(&self, uri: &Url) {
         self.docs.remove(uri);
     }
 
-    /// Read-only access without cloning the whole doc
+    /// Read-only access — do NOT `.await` inside `f`.
     pub fn with_doc<R>(&self, uri: &Url, f: impl FnOnce(&Document) -> R) -> Option<R> {
         self.docs.get(uri).map(|d| f(&d))
     }
 
-    /// Mutable access without cloning; do NOT .await inside f
+    /// Mutable access — do NOT `.await` inside `f`.
     pub fn with_doc_mut<R>(&self, uri: &Url, f: impl FnOnce(&mut Document) -> R) -> Option<R> {
         self.docs.get_mut(uri).map(|mut d| f(&mut d))
     }
@@ -82,10 +114,11 @@ impl DocumentStore {
         self.docs
             .iter()
             .map(|entry| {
+                let doc = entry.value();
                 (
-                    entry.key().clone(),
-                    entry.value().language_id.clone(),
-                    entry.value().text.clone(),
+                    doc.uri().clone(),
+                    doc.language_id().to_owned(),
+                    doc.text().to_owned(),
                 )
             })
             .collect()
