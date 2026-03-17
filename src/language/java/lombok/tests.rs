@@ -340,3 +340,232 @@ mod user_reported_issues {
         );
     }
 }
+
+mod to_string_tests {
+    use super::*;
+
+    #[test]
+    fn class_level_to_string_generates_method() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString
+            public class Person {
+                private String name;
+                private int age;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        let to_string = class.methods.iter().find(|m| m.name.as_ref() == "toString");
+
+        assert!(to_string.is_some(), "Should generate toString() method");
+
+        let method = to_string.unwrap();
+        assert_eq!(
+            method.return_type.as_ref().map(|t| t.as_ref()),
+            Some("java/lang/String"),
+            "toString() should return String"
+        );
+        assert!(
+            method.params.is_empty(),
+            "toString() should have no parameters"
+        );
+    }
+
+    #[test]
+    fn to_string_with_exclude() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString(exclude = "password")
+            public class User {
+                private String username;
+                private String password;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "toString"),
+            "Should generate toString() method"
+        );
+    }
+
+    #[test]
+    fn to_string_with_of() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString(of = {"name", "email"})
+            public class User {
+                private String name;
+                private String email;
+                private String password;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "toString"),
+            "Should generate toString() method"
+        );
+    }
+
+    #[test]
+    fn to_string_does_not_override_existing() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString
+            public class Person {
+                private String name;
+                
+                @Override
+                public String toString() {
+                    return "Custom: " + name;
+                }
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should have exactly one toString method (the explicit one)
+        let to_string_count = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "toString")
+            .count();
+
+        assert_eq!(
+            to_string_count, 1,
+            "Should not generate toString() when it already exists"
+        );
+    }
+
+    #[test]
+    fn to_string_skips_static_fields() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString
+            public class Config {
+                private String name;
+                private static String DEFAULT_NAME = "default";
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "toString"),
+            "Should generate toString() method"
+        );
+    }
+
+    #[test]
+    fn to_string_with_call_super() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString(callSuper = true)
+            public class Employee extends Person {
+                private String employeeId;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "toString"),
+            "Should generate toString() method with callSuper"
+        );
+    }
+
+    #[test]
+    fn to_string_is_public() {
+        let src = r#"
+            package org.example;
+            
+            import lombok.ToString;
+            
+            @ToString
+            public class Person {
+                private String name;
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        let to_string = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "toString")
+            .expect("toString() should be generated");
+
+        assert_eq!(
+            to_string.access_flags & 0x0001,
+            0x0001,
+            "toString() should be public"
+        );
+    }
+
+    #[test]
+    fn to_string_comprehensive_example() {
+        let src = r#"
+            package com.example;
+            
+            import lombok.ToString;
+            
+            @ToString(exclude = {"password", "internalId"})
+            public class User {
+                private String username;
+                private String email;
+                private String password;
+                private long internalId;
+                private boolean active;
+                private static String DEFAULT_ROLE = "user";
+            }
+        "#;
+
+        let class = parse_first_class(src);
+
+        // Should generate toString()
+        let to_string = class.methods.iter().find(|m| m.name.as_ref() == "toString");
+
+        assert!(to_string.is_some(), "Should generate toString() method");
+
+        let method = to_string.unwrap();
+
+        // Verify signature
+        assert_eq!(
+            method.return_type.as_ref().map(|t| t.as_ref()),
+            Some("java/lang/String"),
+            "toString() should return String"
+        );
+        assert!(
+            method.params.is_empty(),
+            "toString() should have no parameters"
+        );
+        assert_eq!(
+            method.access_flags & 0x0001,
+            0x0001,
+            "toString() should be public"
+        );
+    }
+}

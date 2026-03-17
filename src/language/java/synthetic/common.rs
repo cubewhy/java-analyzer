@@ -5,7 +5,7 @@ use crate::{
     index::{FieldSummary, MethodSummary},
     language::java::{
         JavaContextExtractor,
-        lombok::rules::GetterSetterRule,
+        lombok::rules::{GetterSetterRule, ToStringRule},
         members::extract_class_members_from_body,
         synthetic::rules::{enum_rule, record_rule},
         type_ctx::SourceTypeCtx,
@@ -15,7 +15,8 @@ use crate::{
 
 use super::rules::{enum_rule::EnumRule, record_rule::RecordRule};
 
-const SYNTHETIC_RULES: [&dyn SyntheticMemberRule; 3] = [&RecordRule, &EnumRule, &GetterSetterRule];
+const SYNTHETIC_RULES: [&dyn SyntheticMemberRule; 4] =
+    [&RecordRule, &EnumRule, &GetterSetterRule, &ToStringRule];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyntheticOrigin {

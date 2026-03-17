@@ -15,12 +15,13 @@ src/language/java/lombok/
 ├── config.rs                    # lombok.config file parsing (175 lines)
 ├── types.rs                     # Type definitions and constants (118 lines)
 ├── utils.rs                     # Helper functions (400 lines)
-├── rules.rs                     # Rules module entry point (3 lines)
+├── rules.rs                     # Rules module entry point (5 lines)
 ├── rules/
-│   └── getter_setter_rule.rs   # @Getter and @Setter implementation (420 lines)
-└── tests.rs                     # Comprehensive test suite (385 lines)
+│   ├── getter_setter_rule.rs   # @Getter and @Setter implementation (420 lines)
+│   └── to_string_rule.rs       # @ToString implementation (278 lines)
+└── tests.rs                     # Comprehensive test suite (571 lines)
 
-Total: ~1,500 lines of code
+Total: ~1,967 lines of code
 ```
 
 ### Integration Points
@@ -152,8 +153,53 @@ Class-level annotations are extracted using `first_child_of_kind(node, "modifier
 Synthetic members track their origin via `SyntheticOrigin` enum:
 - `LombokGetter { field_name }` - resolves to field declaration
 - `LombokSetter { field_name }` - resolves to field declaration
+- `LombokToString` - resolves to class declaration
 
-When user navigates to a synthetic method, the LSP resolves it back to the source field.
+When user navigates to a synthetic method, the LSP resolves it back to the source field or class.
+
+## Implemented Features
+
+### Phase 1-2: @Getter and @Setter (Complete)
+
+See sections below for detailed documentation.
+
+### Phase 3: @ToString (Complete)
+
+**Class-level usage:**
+```java
+@ToString
+public class Person {
+    private String name;
+    private int age;
+}
+// Generates: public String toString()
+```
+
+**Supported Parameters:**
+- `includeFieldNames` - Include field names in output (default: true)
+- `exclude` - Exclude specific fields from toString
+- `of` - Only include specific fields
+- `callSuper` - Include super.toString() in output
+- `doNotUseGetters` - Access fields directly instead of using getters
+- `onlyExplicitlyIncluded` - Only include fields marked with @ToString.Include
+
+**Features:**
+- Generates `public String toString()` method
+- Skips static fields automatically
+- Respects `exclude` and `of` parameters
+- Does not override existing toString() methods
+- Supports @ToString.Include and @ToString.Exclude field annotations
+
+**Example with parameters:**
+```java
+@ToString(exclude = {"password", "internalId"})
+public class User {
+    private String username;
+    private String email;
+    private String password;  // excluded
+    private long internalId;  // excluded
+}
+```
 
 ## Testing Strategy
 
@@ -168,6 +214,10 @@ mod getter_tests {
 
 mod setter_tests {
     // Tests for @Setter annotation
+}
+
+mod to_string_tests {
+    // Tests for @ToString annotation
 }
 
 mod annotation_resolution_tests {
@@ -186,6 +236,7 @@ mod user_reported_issues {
 - Utility functions
 - Name transformations
 - Access level parsing
+- Field inclusion/exclusion logic
 
 **Integration Tests** (in tests.rs):
 - Field-level annotations
@@ -194,6 +245,7 @@ mod user_reported_issues {
 - Final field handling
 - Access modifiers
 - Annotation resolution
+- Parameter handling (exclude, of, callSuper)
 - User-reported issues
 
 **Total: 28 tests, all passing**
