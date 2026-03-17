@@ -132,11 +132,18 @@ fn generate_getter(
         return;
     }
 
+    // Determine if the getter should be static (if the field is static)
+    let is_static = (field.access_flags & rust_asm::constants::ACC_STATIC) != 0;
+    let mut access_flags = access_level.to_access_flags();
+    if is_static {
+        access_flags |= rust_asm::constants::ACC_STATIC;
+    }
+
     out.methods.push(MethodSummary {
         name: Arc::from(getter_name.clone()),
         params: MethodParams::empty(),
         annotations: vec![], // TODO: Copy annotations based on onMethod parameter
-        access_flags: access_level.to_access_flags(),
+        access_flags,
         is_synthetic: false,
         generic_signature: None,
         return_type: Some(Arc::clone(&field.descriptor)),
@@ -185,6 +192,13 @@ fn generate_setter(
         None // void
     };
 
+    // Determine if the setter should be static (if the field is static)
+    let is_static = (field.access_flags & rust_asm::constants::ACC_STATIC) != 0;
+    let mut access_flags = access_level.to_access_flags();
+    if is_static {
+        access_flags |= rust_asm::constants::ACC_STATIC;
+    }
+
     out.methods.push(MethodSummary {
         name: Arc::from(setter_name.clone()),
         params: MethodParams {
@@ -195,7 +209,7 @@ fn generate_setter(
             }],
         },
         annotations: vec![],
-        access_flags: access_level.to_access_flags(),
+        access_flags,
         is_synthetic: false,
         generic_signature: None,
         return_type,

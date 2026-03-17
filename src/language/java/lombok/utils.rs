@@ -81,16 +81,19 @@ pub fn should_generate_for_field(
 ) -> bool {
     use rust_asm::constants::ACC_STATIC;
 
-    // Skip static fields
-    if (field.access_flags & ACC_STATIC) != 0 {
-        return false;
-    }
+    let is_static = (field.access_flags & ACC_STATIC) != 0;
 
     // Field-level annotation takes precedence
     if let Some(anno) = field_level_anno {
+        // Field-level annotation on static field is allowed (generates static getter)
         // Check for AccessLevel.NONE
         let access = parse_access_level(anno);
         return access != AccessLevel::None;
+    }
+
+    // Class-level annotation: skip static fields
+    if is_static {
+        return false;
     }
 
     // Check class-level annotation
