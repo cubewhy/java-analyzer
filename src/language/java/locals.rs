@@ -243,7 +243,7 @@ fn extract_params(
     type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<RankedLocal> {
     let method = match cursor_node
-        .and_then(|n| ancestor_of_kind(n, "method_declaration"))
+        .and_then(|n| ancestor_of_kinds(n, &["method_declaration", "constructor_declaration"]))
         .or_else(|| find_node_by_offset(root, "method_declaration", ctx.offset))
     {
         Some(m) => m,
