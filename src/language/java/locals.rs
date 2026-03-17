@@ -1,14 +1,17 @@
 use std::{collections::HashSet, sync::Arc};
 
 use tree_sitter::{Node, Query};
-use tree_sitter_utils::traversal::find_node_by_offset;
+use tree_sitter_utils::traversal::{
+    ancestor_of_kind, ancestor_of_kinds, any_child_of_kind, find_node_by_offset,
+    first_child_of_kind, first_child_of_kinds,
+};
 
 use crate::{
     language::{
         java::{
             JavaContextExtractor,
             type_ctx::{SourceTypeCtx, extract_param_type},
-            utils::{find_ancestor, get_initializer_text, java_type_to_internal},
+            utils::{get_initializer_text, java_type_to_internal},
         },
         ts_utils::run_query,
     },
@@ -43,7 +46,7 @@ pub fn extract_locals_with_type_ctx(
     type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<LocalVar> {
     let search_root = cursor_node
-        .and_then(|n| find_ancestor(n, "method_declaration"))
+        .and_then(|n| ancestor_of_kind(n, "method_declaration"))
         .or_else(|| find_node_by_offset(root, "method_declaration", ctx.offset))
         .unwrap_or(root);
     let query_src = r#"
@@ -81,14 +84,8 @@ pub fn extract_locals_with_type_ctx(
             }
 
             // Pattern 1: The declarator contains an argument list (direct method calls are inserted into it)
-            {
-                let mut dc = declarator.walk();
-                if declarator
-                    .children(&mut dc)
-                    .any(|c| c.kind() == "argument_list")
-                {
-                    return None;
-                }
+            if any_child_of_kind(declarator, "argument_list").is_some() {
+                return None;
             }
 
             // Pattern 2: Zero-length semicolon + next sibling begins with `(` (method call after a newline)
@@ -175,48 +172,45 @@ fn collect_misread_decls(
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         if node.kind() == "variable_declarator" {
-            let mut vc = node.walk();
-            for vchild in node.children(&mut vc) {
-                if vchild.kind() == "assignment_expression" {
-                    let lhs = vchild.child_by_field_name("left").or_else(|| {
-                        let mut wc = vchild.walk();
-                        vchild.named_children(&mut wc).next()
-                    });
-                    let rhs = vchild.child_by_field_name("right").or_else(|| {
-                        let mut wc = vchild.walk();
-                        vchild.named_children(&mut wc).nth(1)
-                    });
-                    if let (Some(name_node), Some(init_node)) = (lhs, rhs) {
-                        if name_node.kind() != "identifier" {
-                            continue;
-                        }
-                        if name_node.start_byte() >= ctx.offset {
-                            continue;
-                        }
-                        let name = ctx.node_text(name_node);
-                        let type_name = find_type_in_error_sibling(ctx, node);
-                        let init_text = ctx.node_text(init_node).to_string();
-                        let lv = if type_name.as_deref() == Some("var") {
-                            LocalVar {
-                                name: Arc::from(name),
-                                type_internal: TypeName::new("var"),
-                                init_expr: Some(init_text),
-                            }
-                        } else {
-                            let raw_ty = type_name.as_deref().unwrap_or("Object");
-                            LocalVar {
-                                name: Arc::from(name),
-                                type_internal: resolve_declared_source_type(raw_ty, type_ctx),
-                                init_expr: None,
-                            }
-                        };
-                        vars.push(RankedLocal {
-                            local: lv,
-                            declaration_start: name_node.start_byte(),
-                            visibility_scope: local_visibility_scope(node)
-                                .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
-                        });
+            if let Some(assignment) = first_child_of_kind(node, "assignment_expression") {
+                let lhs = assignment.child_by_field_name("left").or_else(|| {
+                    let mut wc = assignment.walk();
+                    assignment.named_children(&mut wc).next()
+                });
+                let rhs = assignment.child_by_field_name("right").or_else(|| {
+                    let mut wc = assignment.walk();
+                    assignment.named_children(&mut wc).nth(1)
+                });
+                if let (Some(name_node), Some(init_node)) = (lhs, rhs) {
+                    if name_node.kind() != "identifier" {
+                        continue;
                     }
+                    if name_node.start_byte() >= ctx.offset {
+                        continue;
+                    }
+                    let name = ctx.node_text(name_node);
+                    let type_name = find_type_in_error_sibling(ctx, node);
+                    let init_text = ctx.node_text(init_node).to_string();
+                    let lv = if type_name.as_deref() == Some("var") {
+                        LocalVar {
+                            name: Arc::from(name),
+                            type_internal: TypeName::new("var"),
+                            init_expr: Some(init_text),
+                        }
+                    } else {
+                        let raw_ty = type_name.as_deref().unwrap_or("Object");
+                        LocalVar {
+                            name: Arc::from(name),
+                            type_internal: resolve_declared_source_type(raw_ty, type_ctx),
+                            init_expr: None,
+                        }
+                    };
+                    vars.push(RankedLocal {
+                        local: lv,
+                        declaration_start: name_node.start_byte(),
+                        visibility_scope: local_visibility_scope(node)
+                            .unwrap_or_else(|| fallback_visibility_scope(ctx.offset)),
+                    });
                 }
             }
         }
@@ -231,18 +225,12 @@ fn collect_misread_decls(
 
 fn find_type_in_error_sibling(ctx: &JavaContextExtractor, declarator_node: Node) -> Option<String> {
     // Look inside ERROR children of the declarator for type_identifier
-    let mut cursor = declarator_node.walk();
-    for child in declarator_node.children(&mut cursor) {
-        if child.kind() == "ERROR" {
-            let mut ec = child.walk();
-            for ec_child in child.children(&mut ec) {
-                if ec_child.kind() == "type_identifier"
-                    || ec_child.kind() == "integral_type"
-                    || ec_child.kind() == "void_type"
-                {
-                    return Some(ctx.node_text(ec_child).to_string());
-                }
-            }
+    if let Some(error_child) = first_child_of_kind(declarator_node, "ERROR") {
+        if let Some(type_node) = first_child_of_kinds(
+            error_child,
+            &["type_identifier", "integral_type", "void_type"],
+        ) {
+            return Some(ctx.node_text(type_node).to_string());
         }
     }
     None
@@ -255,7 +243,7 @@ fn extract_params(
     type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<RankedLocal> {
     let method = match cursor_node
-        .and_then(|n| find_ancestor(n, "method_declaration"))
+        .and_then(|n| ancestor_of_kind(n, "method_declaration"))
         .or_else(|| find_node_by_offset(root, "method_declaration", ctx.offset))
     {
         Some(m) => m,
@@ -264,33 +252,30 @@ fn extract_params(
     let Some(params_node) = method.child_by_field_name("parameters") else {
         return vec![];
     };
+
     let mut vars = Vec::new();
     let mut cursor = params_node.walk();
+
     for child in params_node.children(&mut cursor) {
         if !matches!(child.kind(), "formal_parameter" | "spread_parameter") {
             continue;
         }
-        let name_node = child.child_by_field_name("name").or_else(|| {
-            let mut nc = child.walk();
-            for n in child.named_children(&mut nc) {
-                if n.kind() == "identifier" {
-                    return Some(n);
-                }
-                if n.kind() == "variable_declarator" {
-                    if let Some(named) = n.child_by_field_name("name") {
-                        return Some(named);
-                    }
-                    let mut vc = n.walk();
-                    if let Some(id) = n.named_children(&mut vc).find(|c| c.kind() == "identifier") {
-                        return Some(id);
-                    }
-                }
-            }
-            None
-        });
+
+        // Extract parameter name using traversal utilities
+        let name_node = child
+            .child_by_field_name("name")
+            .or_else(|| first_child_of_kind(child, "identifier"))
+            .or_else(|| {
+                first_child_of_kind(child, "variable_declarator").and_then(|n| {
+                    n.child_by_field_name("name")
+                        .or_else(|| first_child_of_kind(n, "identifier"))
+                })
+            });
+
         let Some(name_node) = name_node else {
             continue;
         };
+
         let name = ctx.node_text(name_node).to_string();
         let mut raw_ty = extract_param_type(ctx.node_text(child)).trim().to_string();
         if child.kind() == "spread_parameter" || raw_ty.ends_with("...") {
@@ -841,30 +826,21 @@ fn method_like_body_scope(method: Node) -> Option<ScopeRange> {
 }
 
 fn nearest_local_scope_owner(node: Node) -> Option<Node> {
-    let mut current = Some(node);
-    while let Some(candidate) = current {
-        if is_local_scope_owner(candidate.kind()) {
-            return Some(candidate);
-        }
-        current = candidate.parent();
-    }
-    None
-}
-
-fn is_local_scope_owner(kind: &str) -> bool {
-    matches!(
-        kind,
-        "block"
-            | "for_statement"
-            | "enhanced_for_statement"
-            | "catch_clause"
-            | "switch_block_statement_group"
-            | "switch_rule"
-            | "method_declaration"
-            | "constructor_declaration"
-            | "lambda_expression"
-            | "static_initializer"
-            | "instance_initializer"
+    ancestor_of_kinds(
+        node,
+        &[
+            "block",
+            "for_statement",
+            "enhanced_for_statement",
+            "catch_clause",
+            "switch_block_statement_group",
+            "switch_rule",
+            "method_declaration",
+            "constructor_declaration",
+            "lambda_expression",
+            "static_initializer",
+            "instance_initializer",
+        ],
     )
 }
 
