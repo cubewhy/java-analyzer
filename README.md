@@ -18,6 +18,7 @@ Extreme fast Java LSP, built in Rust
 - Java 8 to 25 support
 - Gradle 4.0 to 9.x support
 - Maven 3.0+ support
+- Lombok support (Partial) [Implement Status (AI generated)](docs/lombok-implementation.md)
 
 ## FAQ
 
