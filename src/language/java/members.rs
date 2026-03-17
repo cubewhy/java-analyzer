@@ -1,7 +1,7 @@
 use rust_asm::constants::{ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_VARARGS};
 use std::sync::Arc;
 use tree_sitter::{Node, Query};
-use tree_sitter_utils::traversal::{first_child_of_kind, first_child_of_kinds};
+use tree_sitter_utils::traversal::{ancestor_of_kind, first_child_of_kind, first_child_of_kinds};
 use tree_sitter_utils::{Handler, HandlerExt, Input};
 
 use crate::{
@@ -461,10 +461,8 @@ pub fn parse_method_node(
     type_ctx: &SourceTypeCtx,
     node: Node,
 ) -> Option<CurrentClassMember> {
-    let mut name: Option<&str> = None;
     let mut flags = 0;
     let mut ret_type = "void";
-    let mut params_node: Option<Node> = None;
     let mut method_annos: Vec<AnnotationSummary> = Vec::new();
 
     // Use traversal utilities where applicable
@@ -473,7 +471,7 @@ pub fn parse_method_node(
         method_annos = parse_annotations_in_node(ctx, modifiers, type_ctx);
     }
 
-    name = first_child_of_kind(node, "identifier").map(|n| ctx.node_text(n));
+    let name = first_child_of_kind(node, "identifier").map(|n| ctx.node_text(n));
 
     if let Some(ret_node) = first_child_of_kinds(
         node,
@@ -491,7 +489,7 @@ pub fn parse_method_node(
         ret_type = ctx.node_text(ret_node);
     }
 
-    params_node = first_child_of_kind(node, "formal_parameters");
+    let params_node = first_child_of_kind(node, "formal_parameters");
 
     if flags == 0 {
         flags = ACC_PUBLIC;
@@ -499,7 +497,6 @@ pub fn parse_method_node(
 
     let name = name.filter(|n| *n != "<init>" && *n != "<clinit>" && !is_java_keyword(n))?;
     let params_text = params_node.map(|n| ctx.node_text(n)).unwrap_or("()");
-    let mut flags = flags;
     if let Some(params_node) = params_node
         && has_spread_parameter(params_node)
     {
@@ -546,7 +543,7 @@ pub fn parse_constructor_node(
     node: Node,
 ) -> Option<CurrentClassMember> {
     let mut flags = 0;
-    let mut params_node: Option<Node> = None;
+    let mut params_node: Option<Node>;
     let mut method_annos: Vec<AnnotationSummary> = Vec::new();
 
     // Use traversal utilities
@@ -558,13 +555,12 @@ pub fn parse_constructor_node(
     params_node = first_child_of_kind(node, "formal_parameters");
 
     // For compact constructors, find the parent record_declaration to get parameters
-    if node.kind() == "compact_constructor_declaration" {
-        use tree_sitter_utils::traversal::ancestor_of_kind;
-        if let Some(record) = ancestor_of_kind(node, "record_declaration") {
-            params_node = record
-                .child_by_field_name("parameters")
-                .or_else(|| first_child_of_kind(record, "formal_parameters"));
-        }
+    if node.kind() == "compact_constructor_declaration"
+        && let Some(record) = ancestor_of_kind(node, "record_declaration")
+    {
+        params_node = record
+            .child_by_field_name("parameters")
+            .or_else(|| first_child_of_kind(record, "formal_parameters"));
     }
 
     if flags == 0 {
@@ -572,7 +568,6 @@ pub fn parse_constructor_node(
     }
 
     let params_text = params_node.map(|n| ctx.node_text(n)).unwrap_or("()");
-    let mut flags = flags;
     if let Some(params_node) = params_node
         && has_spread_parameter(params_node)
     {

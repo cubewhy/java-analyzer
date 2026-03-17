@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use tree_sitter::{Node, Query};
+use tree_sitter_utils::{Handler, HandlerExt, Input};
 
 use crate::language::{
     java::JavaContextExtractor,
@@ -223,8 +224,6 @@ pub(crate) fn extract_enclosing_statement_labels(
     ctx: &JavaContextExtractor,
     cursor_node: Option<Node>,
 ) -> Vec<StatementLabel> {
-    use tree_sitter_utils::{Handler, HandlerExt, Input};
-
     let Some(start_node) = cursor_node else {
         return vec![];
     };

@@ -5,6 +5,7 @@ use tree_sitter_utils::traversal::{
     ancestor_of_kind, ancestor_of_kinds, any_child_of_kind, find_node_by_offset,
     first_child_of_kind, first_child_of_kinds,
 };
+use tree_sitter_utils::{Handler, HandlerExt, Input};
 
 use crate::{
     language::{
@@ -274,9 +275,6 @@ fn extract_params(
         return vec![];
     };
 
-    // Use combinator to process parameters
-    use tree_sitter_utils::{Handler, HandlerExt, Input};
-
     let param_handler = (|inp: Input<(&JavaContextExtractor, Option<&SourceTypeCtx>, Node)>| -> Option<RankedLocal> {
         let (ctx, type_ctx, method) = inp.ctx;
 
@@ -464,8 +462,6 @@ fn extract_lambda_params_from_node(
     params: Node,
     type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<RankedLocal> {
-    use tree_sitter_utils::{Handler, HandlerExt, Input};
-
     let visibility_scope = lambda_param_visibility_scope(params)
         .unwrap_or_else(|| fallback_visibility_scope(ctx.offset));
 
@@ -617,8 +613,6 @@ fn extract_lambda_param_names_with_starts(
     ctx: &JavaContextExtractor,
     params: Node,
 ) -> Vec<(Arc<str>, usize)> {
-    use tree_sitter_utils::{Handler, HandlerExt, Input};
-
     match params.kind() {
         "identifier" => vec![(Arc::from(ctx.node_text(params)), params.start_byte())],
         "inferred_parameters" => {
