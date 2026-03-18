@@ -5,7 +5,10 @@ use crate::{
     index::{FieldSummary, MethodSummary},
     language::java::{
         JavaContextExtractor,
-        lombok::rules::{ConstructorRule, EqualsAndHashCodeRule, GetterSetterRule, ToStringRule},
+        lombok::rules::{
+            ConstructorRule, DataRule, EqualsAndHashCodeRule, GetterSetterRule, ToStringRule,
+            ValueRule,
+        },
         members::extract_class_members_from_body,
         synthetic::rules::{enum_rule, record_rule},
         type_ctx::SourceTypeCtx,
@@ -15,9 +18,11 @@ use crate::{
 
 use super::rules::{enum_rule::EnumRule, record_rule::RecordRule};
 
-const SYNTHETIC_RULES: [&dyn SyntheticMemberRule; 6] = [
+const SYNTHETIC_RULES: [&dyn SyntheticMemberRule; 8] = [
     &RecordRule,
     &EnumRule,
+    &DataRule,
+    &ValueRule,
     &GetterSetterRule,
     &ToStringRule,
     &EqualsAndHashCodeRule,

@@ -2170,3 +2170,942 @@ class User {
         );
     }
 }
+
+// ============================================================================
+// @Data Tests
+// ============================================================================
+
+mod data_tests {
+    use super::*;
+
+    #[test]
+    fn test_data_generates_all_methods() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Person {
+                private String name;
+                private int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have getters for all fields
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getName"),
+            "Should generate getName()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getAge"),
+            "Should generate getAge()"
+        );
+
+        // Should have setters for all non-final fields
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "setName"),
+            "Should generate setName()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "setAge"),
+            "Should generate setAge()"
+        );
+
+        // Should have toString, equals, hashCode
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "toString"),
+            "Should generate toString()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "equals"),
+            "Should generate equals()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "hashCode"),
+            "Should generate hashCode()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "canEqual"),
+            "Should generate canEqual()"
+        );
+
+        // Should have no-args constructor (no final fields)
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1, "Should have 1 constructor");
+        assert_eq!(
+            constructors[0].params.len(),
+            0,
+            "Constructor should have 0 params"
+        );
+    }
+
+    #[test]
+    fn test_data_respects_final_fields() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Person {
+                private final String id;
+                private String name;
+                private int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have getters for all fields
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getId"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getAge"));
+
+        // Should have setters only for non-final fields
+        assert!(
+            !class.methods.iter().any(|m| m.name.as_ref() == "setId"),
+            "Should NOT generate setId() for final field"
+        );
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setAge"));
+
+        // Should have constructor for final field only
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(
+            constructors[0].params.len(),
+            1,
+            "Constructor should have 1 param for final field"
+        );
+        assert_eq!(constructors[0].params.items[0].name.as_ref(), "id");
+    }
+
+    #[test]
+    fn test_data_with_static_fields() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Config {
+                private static final String VERSION = \"1.0\";
+                private String name;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should NOT generate getter/setter for static field
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getVERSION"),
+            "Should NOT generate getter for static field"
+        );
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setVERSION"),
+            "Should NOT generate setter for static field"
+        );
+
+        // Should generate getter/setter for instance field
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+    }
+
+    #[test]
+    fn test_data_with_field_level_getter_override() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            import lombok.Getter;
+            import lombok.AccessLevel;
+            
+            @Data
+            public class Person {
+                @Getter(AccessLevel.NONE)
+                private String password;
+                private String name;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should NOT generate getter for password (AccessLevel.NONE)
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getPassword"),
+            "Should NOT generate getter for field with AccessLevel.NONE"
+        );
+
+        // Should still generate setter for password
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setPassword"),
+            "Should generate setter for password"
+        );
+
+        // Should generate getter/setter for name
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+    }
+
+    #[test]
+    fn test_data_with_field_level_setter_override() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            import lombok.Setter;
+            import lombok.AccessLevel;
+            
+            @Data
+            public class Person {
+                @Setter(AccessLevel.PROTECTED)
+                private String name;
+                private int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should generate protected setter for name
+        let setter = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "setName")
+            .expect("Should generate setName()");
+
+        assert_eq!(
+            setter.access_flags & rust_asm::constants::ACC_PROTECTED,
+            rust_asm::constants::ACC_PROTECTED,
+            "setName() should be protected"
+        );
+
+        // Should generate public setter for age
+        let age_setter = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "setAge")
+            .expect("Should generate setAge()");
+
+        assert_eq!(
+            age_setter.access_flags & ACC_PUBLIC,
+            ACC_PUBLIC,
+            "setAge() should be public"
+        );
+    }
+
+    #[test]
+    fn test_data_with_explicit_getter() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Person {
+                private String name;
+                
+                public String getName() {
+                    return \"Custom: \" + name;
+                }
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have only one getName() method (the explicit one)
+        let getters: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "getName")
+            .collect();
+        assert_eq!(
+            getters.len(),
+            1,
+            "Should have only 1 getName() (explicit, not synthetic)"
+        );
+
+        // Should still generate setter
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+    }
+
+    #[test]
+    fn test_data_with_explicit_constructor() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Person {
+                private final String id;
+                private String name;
+                
+                public Person(String id, String name, int extra) {
+                    this.id = id;
+                    this.name = name;
+                }
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have only the explicit constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(
+            constructors.len(),
+            1,
+            "Should have only 1 constructor (explicit)"
+        );
+        assert_eq!(
+            constructors[0].params.len(),
+            3,
+            "Constructor should have 3 params"
+        );
+
+        // Should still generate getters/setters
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getId"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+    }
+
+    #[test]
+    fn test_data_with_explicit_to_string() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Person {
+                private String name;
+                
+                @Override
+                public String toString() {
+                    return \"Person[\" + name + \"]\";
+                }
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have only one toString() method (the explicit one)
+        let to_strings: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "toString")
+            .collect();
+        assert_eq!(
+            to_strings.len(),
+            1,
+            "Should have only 1 toString() (explicit)"
+        );
+
+        // Should still generate other methods
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+    }
+
+    #[test]
+    fn test_data_required_args_constructor() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Person {
+                private final String id;
+                private final int version;
+                private String name;
+                private int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have constructor for final fields only
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(
+            constructors[0].params.len(),
+            2,
+            "Constructor should have 2 params for final fields"
+        );
+        assert_eq!(constructors[0].params.items[0].name.as_ref(), "id");
+        assert_eq!(constructors[0].params.items[1].name.as_ref(), "version");
+    }
+
+    #[test]
+    fn test_data_with_boolean_fields() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Flags {
+                private boolean active;
+                private boolean enabled;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should generate isXxx() getters for boolean fields
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "isActive"),
+            "Should generate isActive() for boolean field"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "isEnabled"),
+            "Should generate isEnabled() for boolean field"
+        );
+
+        // Should generate setters
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setActive"));
+        assert!(
+            class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setEnabled")
+        );
+    }
+
+    #[test]
+    fn test_data_empty_class() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data
+            public class Empty {
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have toString, equals, hashCode
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "toString"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+
+        // Should have no-args constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].params.len(), 0);
+    }
+
+    #[test]
+    fn test_data_with_static_constructor() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            
+            @Data(staticConstructor = \"of\")
+            public class Point {
+                private final double x;
+                private final double y;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].params.len(), 2);
+
+        // Should have static factory method
+        let of_method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "of")
+            .expect("Should generate static 'of' method");
+
+        assert_eq!(
+            of_method.access_flags & ACC_STATIC,
+            ACC_STATIC,
+            "'of' method should be static"
+        );
+        assert_eq!(
+            of_method.access_flags & ACC_PUBLIC,
+            ACC_PUBLIC,
+            "'of' method should be public"
+        );
+        assert_eq!(of_method.params.len(), 2, "'of' should have 2 params");
+    }
+
+    #[test]
+    fn test_data_with_explicit_component_annotations() {
+        let src = indoc::indoc! {"
+            import lombok.Data;
+            import lombok.ToString;
+            
+            @Data
+            @ToString(includeFieldNames = false)
+            public class Person {
+                private String name;
+                private int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // @Data should defer to explicit @ToString
+        // We can't test the behavior difference, but we can verify toString exists
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "toString"));
+
+        // Should still generate other methods
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+    }
+}
+
+// ============================================================================
+// @Value Tests
+// ============================================================================
+
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn test_value_generates_getters_only() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Point {
+                double x;
+                double y;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have getters
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getX"),
+            "Should generate getX()"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "getY"),
+            "Should generate getY()"
+        );
+
+        // Should NOT have setters (immutable)
+        assert!(
+            !class.methods.iter().any(|m| m.name.as_ref() == "setX"),
+            "Should NOT generate setX() for @Value"
+        );
+        assert!(
+            !class.methods.iter().any(|m| m.name.as_ref() == "setY"),
+            "Should NOT generate setY() for @Value"
+        );
+
+        // Should have toString, equals, hashCode
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "toString"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+    }
+
+    #[test]
+    fn test_value_all_args_constructor() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Person {
+                String name;
+                int age;
+                String email;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have all-args constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(
+            constructors[0].params.len(),
+            3,
+            "Constructor should have all 3 fields"
+        );
+        assert_eq!(constructors[0].params.items[0].name.as_ref(), "name");
+        assert_eq!(constructors[0].params.items[1].name.as_ref(), "age");
+        assert_eq!(constructors[0].params.items[2].name.as_ref(), "email");
+    }
+
+    #[test]
+    fn test_value_with_static_fields() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Config {
+                static final String VERSION = \"1.0\";
+                String name;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should NOT generate getter for static field
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "getVERSION"),
+            "Should NOT generate getter for static field"
+        );
+
+        // Should generate getter for instance field
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+
+        // Constructor should only include instance fields
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(
+            constructors[0].params.len(),
+            1,
+            "Constructor should have 1 param (instance field only)"
+        );
+    }
+
+    #[test]
+    fn test_value_with_explicit_getter() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Person {
+                String name;
+                
+                public String getName() {
+                    return \"Mr. \" + name;
+                }
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have only one getName() method (the explicit one)
+        let getters: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "getName")
+            .collect();
+        assert_eq!(getters.len(), 1, "Should have only 1 getName() (explicit)");
+
+        // Should NOT have setter
+        assert!(!class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+    }
+
+    #[test]
+    fn test_value_with_field_level_getter_override() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            import lombok.Getter;
+            import lombok.AccessLevel;
+            
+            @Value
+            public class Person {
+                @Getter(AccessLevel.PACKAGE)
+                String name;
+                int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should generate package-private getter for name
+        let name_getter = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "getName")
+            .expect("Should generate getName()");
+
+        // Package-private means no access flags
+        assert_eq!(
+            name_getter.access_flags
+                & (ACC_PUBLIC
+                    | rust_asm::constants::ACC_PROTECTED
+                    | rust_asm::constants::ACC_PRIVATE),
+            0,
+            "getName() should be package-private"
+        );
+
+        // Should generate public getter for age
+        let age_getter = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "getAge")
+            .expect("Should generate getAge()");
+
+        assert_eq!(
+            age_getter.access_flags & ACC_PUBLIC,
+            ACC_PUBLIC,
+            "getAge() should be public"
+        );
+    }
+
+    #[test]
+    fn test_value_empty_class() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Empty {
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have toString, equals, hashCode
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "toString"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+
+        // Should have no-args constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].params.len(), 0);
+    }
+
+    #[test]
+    fn test_value_with_static_constructor() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value(staticConstructor = \"of\")
+            public class Point {
+                double x;
+                double y;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].params.len(), 2);
+
+        // Should have static factory method
+        let of_method = class
+            .methods
+            .iter()
+            .find(|m| m.name.as_ref() == "of")
+            .expect("Should generate static 'of' method");
+
+        assert_eq!(
+            of_method.access_flags & ACC_STATIC,
+            ACC_STATIC,
+            "'of' method should be static"
+        );
+        assert_eq!(
+            of_method.access_flags & ACC_PUBLIC,
+            ACC_PUBLIC,
+            "'of' method should be public"
+        );
+        assert_eq!(of_method.params.len(), 2, "'of' should have 2 params");
+    }
+
+    #[test]
+    fn test_value_with_boolean_fields() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Flags {
+                boolean active;
+                boolean enabled;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should generate isXxx() getters for boolean fields
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "isActive"),
+            "Should generate isActive() for boolean field"
+        );
+        assert!(
+            class.methods.iter().any(|m| m.name.as_ref() == "isEnabled"),
+            "Should generate isEnabled() for boolean field"
+        );
+
+        // Should NOT generate setters
+        assert!(!class.methods.iter().any(|m| m.name.as_ref() == "setActive"));
+        assert!(
+            !class
+                .methods
+                .iter()
+                .any(|m| m.name.as_ref() == "setEnabled")
+        );
+    }
+
+    #[test]
+    fn test_value_with_explicit_constructor() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Person {
+                String name;
+                int age;
+                
+                public Person(String name) {
+                    this.name = name;
+                    this.age = 0;
+                }
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have only the explicit constructor
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1, "Should have only 1 constructor");
+        assert_eq!(
+            constructors[0].params.len(),
+            1,
+            "Constructor should have 1 param"
+        );
+
+        // Should still generate getters
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getAge"));
+    }
+
+    #[test]
+    fn test_value_with_explicit_to_string() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Person {
+                String name;
+                
+                @Override
+                public String toString() {
+                    return \"Person[\" + name + \"]\";
+                }
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Should have only one toString() method (the explicit one)
+        let to_strings: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "toString")
+            .collect();
+        assert_eq!(to_strings.len(), 1, "Should have only 1 toString()");
+
+        // Should still generate other methods
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+    }
+
+    #[test]
+    fn test_value_constructor_order() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            
+            @Value
+            public class Person {
+                String firstName;
+                String lastName;
+                int age;
+                String email;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // Constructor parameters should be in field declaration order
+        let constructors: Vec<_> = class
+            .methods
+            .iter()
+            .filter(|m| m.name.as_ref() == "<init>")
+            .collect();
+        assert_eq!(constructors.len(), 1);
+        assert_eq!(constructors[0].params.len(), 4);
+        assert_eq!(constructors[0].params.items[0].name.as_ref(), "firstName");
+        assert_eq!(constructors[0].params.items[1].name.as_ref(), "lastName");
+        assert_eq!(constructors[0].params.items[2].name.as_ref(), "age");
+        assert_eq!(constructors[0].params.items[3].name.as_ref(), "email");
+    }
+
+    #[test]
+    fn test_value_with_explicit_component_annotations() {
+        let src = indoc::indoc! {"
+            import lombok.Value;
+            import lombok.ToString;
+            
+            @Value
+            @ToString(includeFieldNames = false)
+            public class Person {
+                String name;
+                int age;
+            }
+        "};
+
+        let class = parse_first_class(src);
+
+        // @Value should defer to explicit @ToString
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "toString"));
+
+        // Should still generate other methods
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "getName"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "equals"));
+        assert!(class.methods.iter().any(|m| m.name.as_ref() == "hashCode"));
+
+        // Should NOT have setters
+        assert!(!class.methods.iter().any(|m| m.name.as_ref() == "setName"));
+        assert!(!class.methods.iter().any(|m| m.name.as_ref() == "setAge"));
+    }
+}
