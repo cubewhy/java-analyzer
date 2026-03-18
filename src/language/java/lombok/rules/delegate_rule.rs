@@ -3,20 +3,21 @@ use tree_sitter::Node;
 use tree_sitter_utils::traversal::first_child_of_kind;
 
 use crate::{
-    index::{AnnotationValue, FieldSummary, MethodSummary},
+    index::{AnnotationValue, FieldSummary, MethodParam, MethodParams, MethodSummary},
     language::java::{
         JavaContextExtractor,
         lombok::{
             types::annotations,
             utils::{find_lombok_annotation, get_annotation_value},
         },
-        members::parse_annotations_in_node,
+        members::{extract_class_members_from_body, parse_annotations_in_node},
         synthetic::{
             SyntheticDefinition, SyntheticDefinitionKind, SyntheticInput, SyntheticMemberRule,
             SyntheticMemberSet, SyntheticOrigin,
         },
         type_ctx::SourceTypeCtx,
     },
+    semantic::context::CurrentClassMember,
 };
 
 pub struct DelegateRule;
@@ -47,7 +48,7 @@ impl SyntheticMemberRule for DelegateRule {
                     continue;
                 }
 
-                generate_delegate_methods(field, delegate_anno, explicit_methods, out);
+                generate_delegate_methods(input, field, delegate_anno, explicit_methods, out);
             }
         }
     }
@@ -55,6 +56,7 @@ impl SyntheticMemberRule for DelegateRule {
 
 /// Generate delegate methods for a field
 fn generate_delegate_methods(
+    input: &SyntheticInput<'_>,
     field: &FieldSummary,
     annotation: &crate::index::AnnotationSummary,
     explicit_methods: &[MethodSummary],
@@ -64,29 +66,161 @@ fn generate_delegate_methods(
     let types_to_delegate = get_types_parameter(annotation);
 
     // Parse excludes parameter (which types to exclude)
-    let types_to_exclude = get_excludes_parameter(annotation);
+    let _types_to_exclude = get_excludes_parameter(annotation);
 
-    // For a static analysis tool without full classpath resolution,
-    // we generate marker methods that indicate delegation is happening.
-    // The actual method signatures would need full type resolution.
-
-    // If types are explicitly specified, we know what to delegate
+    // If types are explicitly specified, try to find and parse them
     if !types_to_delegate.is_empty() {
-        // Generate placeholder methods for explicitly specified types
-        // In a full implementation, we would resolve these types and generate
-        // all their public methods
-        generate_delegate_markers_for_types(
-            field,
-            &types_to_delegate,
-            &types_to_exclude,
-            explicit_methods,
-            out,
-        );
-    } else {
-        // Delegate all public methods of the field's type
-        // Without full type resolution, we generate a marker
-        generate_delegate_marker_for_field_type(field, &types_to_exclude, explicit_methods, out);
+        for type_name in &types_to_delegate {
+            // Try to find the interface/class in the same file
+            if let Some(methods) = find_type_methods(input, type_name) {
+                // Generate delegate methods for each method in the interface
+                for method in methods {
+                    generate_delegate_method(field, &method, explicit_methods, out);
+                }
+            }
+        }
     }
+
+    // Always add a marker for IDE integration
+    out.definitions.push(SyntheticDefinition {
+        kind: SyntheticDefinitionKind::Method,
+        name: Arc::from(format!("$delegate${}", field.name)),
+        descriptor: None,
+        origin: SyntheticOrigin::LombokDelegate {
+            field_name: Arc::clone(&field.name),
+        },
+    });
+}
+
+/// Find methods in a type (interface or class) within the same source file
+fn find_type_methods(input: &SyntheticInput<'_>, type_name: &str) -> Option<Vec<MethodSummary>> {
+    // Extract simple name from type descriptor (e.g., "LFilter;" -> "Filter")
+    let simple_name = type_name
+        .trim_start_matches('L')
+        .trim_end_matches(';')
+        .split('/')
+        .last()
+        .unwrap_or(type_name);
+
+    // First, search for nested types within the current class
+    if let Some(body) = input.decl.child_by_field_name("body") {
+        let mut cursor = body.walk();
+        for child in body.children(&mut cursor) {
+            if matches!(child.kind(), "interface_declaration" | "class_declaration") {
+                if let Some(name_node) = child.child_by_field_name("name") {
+                    let name = input.ctx.node_text(name_node);
+                    if name == simple_name {
+                        // Found the nested type! Extract its methods
+                        return extract_methods_from_type(input, child);
+                    }
+                }
+            }
+        }
+    }
+
+    // If not found as nested type, search at the top level
+    let root = input.decl.parent()?;
+    let mut cursor = root.walk();
+
+    for child in root.children(&mut cursor) {
+        if matches!(child.kind(), "interface_declaration" | "class_declaration") {
+            // Check if this is the type we're looking for
+            if let Some(name_node) = child.child_by_field_name("name") {
+                let name = input.ctx.node_text(name_node);
+                if name == simple_name {
+                    // Found the type! Extract its methods
+                    return extract_methods_from_type(input, child);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Extract methods from a type declaration
+fn extract_methods_from_type(
+    input: &SyntheticInput<'_>,
+    type_node: Node,
+) -> Option<Vec<MethodSummary>> {
+    let body = type_node.child_by_field_name("body")?;
+    let members = extract_class_members_from_body(input.ctx, body, input.type_ctx);
+
+    let methods: Vec<MethodSummary> = members
+        .iter()
+        .filter_map(|member| match member {
+            CurrentClassMember::Method(method) => Some((**method).clone()),
+            _ => None,
+        })
+        .collect();
+
+    Some(methods)
+}
+
+/// Generate a single delegate method
+fn generate_delegate_method(
+    field: &FieldSummary,
+    source_method: &MethodSummary,
+    explicit_methods: &[MethodSummary],
+    out: &mut SyntheticMemberSet,
+) {
+    // Don't generate if method already exists
+    let method_name = source_method.name.as_ref();
+    let method_descriptor = source_method.desc();
+
+    if has_method(explicit_methods, method_name, method_descriptor.as_ref()) {
+        return;
+    }
+
+    // Don't delegate Object methods
+    if is_object_method(method_name) {
+        return;
+    }
+
+    // Generate the delegate method with public access
+    let access_flags = rust_asm::constants::ACC_PUBLIC;
+
+    out.methods.push(MethodSummary {
+        name: Arc::clone(&source_method.name),
+        params: source_method.params.clone(),
+        annotations: vec![],
+        access_flags,
+        is_synthetic: false,
+        generic_signature: source_method.generic_signature.clone(),
+        return_type: source_method.return_type.clone(),
+    });
+
+    out.definitions.push(SyntheticDefinition {
+        kind: SyntheticDefinitionKind::Method,
+        name: Arc::clone(&source_method.name),
+        descriptor: Some(method_descriptor),
+        origin: SyntheticOrigin::LombokDelegate {
+            field_name: Arc::clone(&field.name),
+        },
+    });
+}
+
+/// Check if a method is an Object method that should not be delegated
+fn is_object_method(method_name: &str) -> bool {
+    matches!(
+        method_name,
+        "equals"
+            | "hashCode"
+            | "toString"
+            | "clone"
+            | "finalize"
+            | "getClass"
+            | "notify"
+            | "notifyAll"
+            | "wait"
+    )
+}
+
+/// Check if a method with the given name and descriptor already exists
+fn has_method(methods: &[MethodSummary], name: &str, descriptor: &str) -> bool {
+    methods
+        .iter()
+        .any(|method| method.name.as_ref() == name && method.desc().as_ref() == descriptor)
 }
 
 /// Get the types parameter from @Delegate annotation
@@ -125,55 +259,6 @@ fn get_excludes_parameter(annotation: &crate::index::AnnotationSummary) -> Vec<A
     } else {
         vec![]
     }
-}
-
-/// Generate delegate markers for explicitly specified types
-fn generate_delegate_markers_for_types(
-    field: &FieldSummary,
-    types: &[Arc<str>],
-    _excludes: &[Arc<str>],
-    _explicit_methods: &[MethodSummary],
-    out: &mut SyntheticMemberSet,
-) {
-    // For each type specified in the types parameter, we would need to:
-    // 1. Resolve the type to find all its public methods
-    // 2. Generate delegate methods for each
-    //
-    // Since this is a static analysis tool without full classpath,
-    // we generate a marker definition that IDEs can use to trigger
-    // more sophisticated type resolution.
-
-    for _type_name in types {
-        // Generate a marker that indicates delegation is configured
-        // Real implementation would resolve the type and generate actual methods
-        out.definitions.push(SyntheticDefinition {
-            kind: SyntheticDefinitionKind::Method,
-            name: Arc::from(format!("$delegate${}", field.name)),
-            descriptor: None,
-            origin: SyntheticOrigin::LombokDelegate {
-                field_name: Arc::clone(&field.name),
-            },
-        });
-    }
-}
-
-/// Generate delegate marker for field's type
-fn generate_delegate_marker_for_field_type(
-    field: &FieldSummary,
-    _excludes: &[Arc<str>],
-    _explicit_methods: &[MethodSummary],
-    out: &mut SyntheticMemberSet,
-) {
-    // Without full type resolution, we generate a marker
-    // that indicates this field has delegation configured
-    out.definitions.push(SyntheticDefinition {
-        kind: SyntheticDefinitionKind::Method,
-        name: Arc::from(format!("$delegate${}", field.name)),
-        descriptor: None,
-        origin: SyntheticOrigin::LombokDelegate {
-            field_name: Arc::clone(&field.name),
-        },
-    });
 }
 
 #[cfg(test)]

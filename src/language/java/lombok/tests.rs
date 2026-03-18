@@ -4510,4 +4510,60 @@ mod delegate_tests {
         });
         assert!(has_delegate_anno, "Field should have @Delegate annotation");
     }
+
+    #[test]
+    fn test_delegate_simple_stack_example() {
+        let src = indoc::indoc! {"
+            import lombok.experimental.Delegate;
+            import java.util.ArrayList;
+            import java.util.List;
+
+            public class SimpleStack {
+                private interface Filter {
+                    boolean add(Object o);
+                    boolean remove(Object o);
+                    void clear();
+                }
+
+                @Delegate(types = Filter.class)
+                private final List<String> collection = new ArrayList<>();
+
+                public static void main(String[] args) {
+                    SimpleStack stack = new SimpleStack();
+                    stack.add(\"Java\");
+                    stack.clear();
+                }
+            }
+        "};
+
+        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let simple_stack = classes.iter().find(|c| c.name.as_ref() == "SimpleStack");
+        assert!(simple_stack.is_some(), "Should find SimpleStack class");
+
+        let simple_stack = simple_stack.unwrap();
+
+        // Should have delegated methods from Filter interface
+        let has_add = simple_stack
+            .methods
+            .iter()
+            .any(|m| m.name.as_ref() == "add");
+        let has_remove = simple_stack
+            .methods
+            .iter()
+            .any(|m| m.name.as_ref() == "remove");
+        let has_clear = simple_stack
+            .methods
+            .iter()
+            .any(|m| m.name.as_ref() == "clear");
+
+        assert!(has_add, "Should have add() method delegated from Filter");
+        assert!(
+            has_remove,
+            "Should have remove() method delegated from Filter"
+        );
+        assert!(
+            has_clear,
+            "Should have clear() method delegated from Filter"
+        );
+    }
 }
