@@ -49,7 +49,7 @@ impl SyntheticMemberRule for ToStringRule {
             // Generate toString() method based on class-level annotation
             generate_to_string_method(
                 input,
-                &class_annotation,
+                class_annotation,
                 explicit_fields,
                 explicit_methods,
                 &config,
@@ -107,19 +107,6 @@ fn generate_to_string_method(
 
     // Determine which fields to include
     let _fields_to_include = determine_fields_to_include(
-        explicit_fields,
-        &exclude_fields,
-        &of_fields,
-        only_explicitly_included,
-    );
-    let only_explicitly_included = get_bool_param(annotation, "onlyExplicitlyIncluded", false);
-
-    // Get exclude and of parameters
-    let exclude_fields = get_string_array_param(annotation, "exclude");
-    let of_fields = get_string_array_param(annotation, "of");
-
-    // Determine which fields to include
-    let fields_to_include = determine_fields_to_include(
         explicit_fields,
         &exclude_fields,
         &of_fields,
