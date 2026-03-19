@@ -343,7 +343,13 @@ impl BucketIndex {
 
     pub fn exact_match_keys(&self) -> Vec<Arc<str>> {
         let inner = self.inner.read();
-        inner.classes.keys().cloned().collect()
+        let keys: Vec<Arc<str>> = inner.classes.keys().cloned().collect();
+        tracing::debug!(
+            key_count = keys.len(),
+            sample_keys = ?keys.iter().take(5).map(|k| k.as_ref()).collect::<Vec<_>>(),
+            "BucketIndex::exact_match_keys"
+        );
+        keys
     }
 
     pub fn class_count(&self) -> usize {

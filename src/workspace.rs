@@ -34,8 +34,10 @@ impl AnalysisContext {
 
 pub struct Workspace {
     pub documents: DocumentStore,
-    pub index: Arc<RwLock<WorkspaceIndex>>,
-    /// Salsa database for incremental computation (uses parking_lot for sync access)
+    /// Workspace index shared between async code and Salsa
+    /// Uses parking_lot::RwLock for sync access (required by Salsa)
+    pub index: Arc<parking_lot::RwLock<WorkspaceIndex>>,
+    /// Salsa database for incremental computation
     pub salsa_db: Arc<parking_lot::Mutex<SalsaDatabase>>,
     /// Mapping from URI to Salsa SourceFile input
     salsa_files: Arc<parking_lot::RwLock<HashMap<Url, crate::salsa_db::SourceFile>>>,
@@ -45,13 +47,12 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new() -> Self {
-        let index = Arc::new(RwLock::new(WorkspaceIndex::new()));
+        // Create a single WorkspaceIndex shared by both async code and Salsa
+        // Use parking_lot::RwLock for sync access (required by Salsa)
+        let index = Arc::new(parking_lot::RwLock::new(WorkspaceIndex::new()));
 
-        // Create Salsa database with workspace index reference
-        let salsa_db = {
-            let index_clone = Arc::new(parking_lot::RwLock::new(WorkspaceIndex::new()));
-            SalsaDatabase::with_workspace_index(index_clone)
-        };
+        // Create Salsa database with the same workspace index reference
+        let salsa_db = SalsaDatabase::with_workspace_index(Arc::clone(&index));
 
         Self {
             documents: DocumentStore::new(),
@@ -151,7 +152,7 @@ impl Workspace {
 
     pub async fn set_jdk_classes(&self, classes: Vec<ClassMetadata>) {
         *self.jdk_classes.write().await = classes.clone();
-        self.index.write().await.add_jdk_classes(classes);
+        self.index.write().add_jdk_classes(classes);
     }
 
     pub async fn apply_workspace_model(&self, snapshot: WorkspaceModelSnapshot) -> Result<()> {
@@ -293,7 +294,7 @@ impl Workspace {
         }
 
         {
-            let mut guard = self.index.write().await;
+            let mut guard = self.index.write();
             *guard = new_index;
         }
         *self.model.write() = Some(snapshot.clone());
@@ -301,25 +302,31 @@ impl Workspace {
         let open_docs = self.documents.snapshot_documents();
         for (uri, language_id, content) in open_docs {
             let context = self.analysis_context_for_uri(&uri);
-            let name_table = self
-                .index
-                .read()
-                .await
-                .build_name_table_for_analysis_context(
-                    context.module,
-                    context.classpath,
-                    context.source_root,
-                );
-            let classes = index_source_text(uri.as_ref(), &content, &language_id, Some(name_table));
+
+            // Get or create Salsa file for this document
+            let salsa_file = self.get_or_create_salsa_file(&uri, &content, &language_id);
+
+            // Use Salsa queries for incremental parsing
+            let classes = {
+                let db = self.salsa_db.lock();
+
+                // Trigger parse query (memoized) - this tracks changes
+                let _result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
+
+                // Get the actual classes (not memoized, but fast)
+                crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file)
+            };
+
             let origin = ClassOrigin::SourceFile(Arc::from(uri.to_string().as_str()));
             tracing::debug!(
                 uri = %uri,
                 module = context.module.0,
                 classpath = ?context.classpath,
                 source_root = ?context.source_root.map(|id| id.0),
-                "reindexing open document against workspace model"
+                class_count = classes.len(),
+                "reindexing open document against workspace model (using Salsa)"
             );
-            self.index.write().await.update_source_in_context(
+            self.index.write().update_source_in_context(
                 context.module,
                 context.source_root,
                 origin,
@@ -364,7 +371,7 @@ impl Workspace {
         for (origin, classes) in by_origin {
             index.update_source(scope, origin, classes);
         }
-        *self.index.write().await = index;
+        *self.index.write() = index;
         *self.model.write() = None;
         Ok(())
     }

@@ -49,10 +49,33 @@ pub async fn handle_completion(
     let analysis = workspace.analysis_context_for_uri(uri);
     let inferred_package = workspace.infer_java_package_for_uri(uri, analysis.source_root);
     let scope = analysis.scope();
-    let index = workspace.index.read().await;
-    let view =
-        index.view_for_analysis_context(scope.module, analysis.classpath, analysis.source_root);
+
+    // Use cached IndexView and NameTable via Salsa for better performance
+    let (view, name_table) = {
+        let db = workspace.salsa_db.lock();
+
+        // Get cached IndexView (memoized)
+        let view = crate::salsa_queries::get_index_view_for_context(
+            &*db,
+            scope.module,
+            analysis.classpath,
+            analysis.source_root,
+        );
+
+        // Get cached NameTable (memoized)
+        let name_table = crate::salsa_queries::get_name_table_for_context(
+            &*db,
+            scope.module,
+            analysis.classpath,
+            analysis.source_root,
+        );
+
+        (view, name_table)
+    };
+
+    let index = workspace.index.read();
     let visible_classpath = index.module_classpath_jars(scope.module, analysis.classpath);
+
     tracing::debug!(
         uri = %uri,
         module = scope.module.0,
@@ -60,11 +83,13 @@ pub async fn handle_completion(
         source_root = ?analysis.source_root.map(|id| id.0),
         root_kind = ?analysis.root_kind,
         visible_classpath_len = visible_classpath.len(),
-        "completion using analysis context"
+        name_table_len = name_table.len(),
+        view_layers = view.layer_count(),
+        "completion using cached IndexView and NameTable"
     );
 
     let env = ParseEnv {
-        name_table: Some(view.build_name_table()),
+        name_table: Some(name_table),
     };
 
     let (ctx, source_for_edits) = workspace.documents.with_doc(uri, |doc| {

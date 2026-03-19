@@ -21,11 +21,32 @@ pub async fn handle_inlay_hints(
 
     let analysis = workspace.analysis_context_for_uri(uri);
     let scope = analysis.scope();
-    let index = workspace.index.read().await;
-    let view =
-        index.view_for_analysis_context(scope.module, analysis.classpath, analysis.source_root);
+
+    // Use cached IndexView and NameTable via Salsa for better performance
+    let (view, name_table) = {
+        let db = workspace.salsa_db.lock();
+
+        // Get cached IndexView (memoized)
+        let view = crate::salsa_queries::get_index_view_for_context(
+            &*db,
+            scope.module,
+            analysis.classpath,
+            analysis.source_root,
+        );
+
+        // Get cached NameTable (memoized)
+        let name_table = crate::salsa_queries::get_name_table_for_context(
+            &*db,
+            scope.module,
+            analysis.classpath,
+            analysis.source_root,
+        );
+
+        (view, name_table)
+    };
+
     let env = ParseEnv {
-        name_table: Some(view.build_name_table()),
+        name_table: Some(name_table),
     };
 
     // Ensure tree is parsed.

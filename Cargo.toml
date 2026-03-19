@@ -37,3 +37,8 @@ async-trait = "0.1.89"
 
 [dev-dependencies]
 insta = { version = "1", features = ["ron"] }
+criterion = "0.5"
+
+[[bench]]
+name = "salsa_performance"
+harness = false

@@ -49,6 +49,11 @@ impl IndexView {
         Self { layers }
     }
 
+    /// Get the number of layers in this view
+    pub fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
         let mut best: Option<Arc<ClassMetadata>> = None;
         for layer in &self.layers {
@@ -435,8 +440,14 @@ impl IndexView {
     pub fn exact_match_keys(&self) -> Vec<Arc<str>> {
         let mut out = Vec::new();
         let mut seen: FxHashSet<Arc<str>> = Default::default();
-        for layer in &self.layers {
-            for key in layer.exact_match_keys() {
+        for (idx, layer) in self.layers.iter().enumerate() {
+            let layer_keys = layer.exact_match_keys();
+            tracing::debug!(
+                layer_idx = idx,
+                layer_key_count = layer_keys.len(),
+                "IndexView layer keys"
+            );
+            for key in layer_keys {
                 if seen.insert(Arc::clone(&key)) {
                     out.push(key);
                 }
@@ -465,6 +476,11 @@ impl IndexView {
 
     pub fn build_name_table(&self) -> Arc<NameTable> {
         let names = self.exact_match_keys();
+        tracing::debug!(
+            layer_count = self.layers.len(),
+            name_count = names.len(),
+            "IndexView::build_name_table"
+        );
         NameTable::from_names(names)
     }
 }

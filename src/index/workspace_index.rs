@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -19,6 +20,9 @@ pub struct WorkspaceIndex {
     jdk: Arc<BucketIndex>,
     jar_cache: DashMap<Arc<str>, Arc<BucketIndex>>,
     graph: RwLock<ModuleGraph>,
+    /// Version counter that increments on every mutation
+    /// Used by Salsa to detect changes
+    version: AtomicU64,
 }
 
 impl WorkspaceIndex {
@@ -31,7 +35,19 @@ impl WorkspaceIndex {
             jdk: Arc::new(BucketIndex::new()),
             jar_cache: DashMap::new(),
             graph: RwLock::new(ModuleGraph::new()),
+            version: AtomicU64::new(0),
         }
+    }
+
+    /// Get the current version of the workspace index
+    /// This increments whenever the index is mutated
+    pub fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    /// Increment the version counter (called on every mutation)
+    fn increment_version(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn ensure_module(&self, id: ModuleId, name: Arc<str>) -> Arc<ModuleIndex> {
@@ -52,7 +68,8 @@ impl WorkspaceIndex {
         classes: Vec<ClassMetadata>,
     ) {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
-        module.update_source(origin, classes);
+        module.source.update_source(origin, classes);
+        self.increment_version();
     }
 
     pub fn update_source_in_context(
@@ -64,6 +81,7 @@ impl WorkspaceIndex {
     ) {
         let module = self.ensure_module(module, default_module_name(module));
         module.update_source_in_root(source_root, origin, classes);
+        self.increment_version();
     }
 
     pub fn remove_source_origin(&self, scope: IndexScope, origin: &ClassOrigin) {
@@ -83,6 +101,7 @@ impl WorkspaceIndex {
 
     pub fn add_jdk_classes(&self, classes: Vec<ClassMetadata>) {
         self.jdk.add_classes(classes);
+        self.increment_version();
     }
 
     pub fn add_jar_classes(&self, scope: IndexScope, classes: Vec<ClassMetadata>) {
@@ -90,6 +109,7 @@ impl WorkspaceIndex {
         let bucket = Arc::new(BucketIndex::new());
         bucket.add_classes(classes);
         module.add_classpath_bucket(ClasspathId::Main, bucket);
+        self.increment_version();
     }
 
     pub fn get_or_index_jar(&self, path: Arc<str>) -> Arc<BucketIndex> {

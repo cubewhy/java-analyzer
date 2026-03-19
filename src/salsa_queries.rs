@@ -23,7 +23,8 @@ pub trait Db: salsa::Database {
 }
 
 pub use index::{
-    build_name_table_for_context, extract_classes, get_extracted_classes,
+    build_name_table_for_context, cached_index_view_metadata, cached_name_table, extract_classes,
+    get_extracted_classes, get_index_view_for_context, get_name_table_for_context,
     visible_classpath_for_context,
 };
 /// Re-export commonly used query functions

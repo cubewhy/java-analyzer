@@ -107,10 +107,22 @@ impl ModuleIndex {
         if let Some(root_id) = source_root
             && let Some(root) = state.source_roots.get(&root_id)
         {
+            tracing::debug!(
+                module = self.id.0,
+                source_root = root_id.0,
+                class_count = classes.len(),
+                "update_source_in_root: adding to source root bucket"
+            );
             root.bucket.update_source(origin, classes);
             return;
         }
         drop(state);
+        tracing::debug!(
+            module = self.id.0,
+            source_root = ?source_root.map(|id| id.0),
+            class_count = classes.len(),
+            "update_source_in_root: adding to module-level source bucket (fallback)"
+        );
         self.source.update_source(origin, classes);
     }
 
@@ -171,6 +183,10 @@ impl ModuleIndex {
     ) -> Vec<Arc<BucketIndex>> {
         let state = self.state.read();
         if state.source_roots.is_empty() {
+            tracing::debug!(
+                module = self.id.0,
+                "visible_source_layers: no source roots, returning module-level source"
+            );
             return vec![Arc::clone(&self.source)];
         }
 
@@ -180,6 +196,11 @@ impl ModuleIndex {
         if let Some(root_id) = preferred_root
             && let Some(root) = state.source_roots.get(&root_id)
         {
+            tracing::debug!(
+                module = self.id.0,
+                preferred_root = root_id.0,
+                "visible_source_layers: adding preferred root"
+            );
             layers.push(Arc::clone(&root.bucket));
             seen.insert(root_id);
         }
@@ -189,6 +210,12 @@ impl ModuleIndex {
                 if seen.contains(root_id) || root.classpath != requested {
                     continue;
                 }
+                tracing::debug!(
+                    module = self.id.0,
+                    root_id = root_id.0,
+                    classpath = ?requested,
+                    "visible_source_layers: adding matching root"
+                );
                 layers.push(Arc::clone(&root.bucket));
                 seen.insert(*root_id);
             }
@@ -203,6 +230,10 @@ impl ModuleIndex {
         }
 
         if layers.is_empty() {
+            tracing::debug!(
+                module = self.id.0,
+                "visible_source_layers: no matching roots, falling back to module-level source"
+            );
             layers.push(Arc::clone(&self.source));
         }
 

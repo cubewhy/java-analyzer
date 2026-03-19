@@ -814,6 +814,11 @@ impl NameTable {
         self.0.contains(internal_name)
     }
 
+    /// Iterate over all names in the table
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<str>> {
+        self.0.iter()
+    }
+
     /// Build directly from a class slice — no GlobalIndex needed.
     /// Used by JDK indexer to resolve source types against already-parsed bytecode.
     pub fn from_classes(classes: &[ClassMetadata]) -> Arc<Self> {

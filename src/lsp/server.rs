@@ -265,7 +265,7 @@ impl LanguageServer for Backend {
             language = lang.id(),
             "did_open indexing with Salsa (incremental)"
         );
-        self.workspace.index.write().await.update_source_in_context(
+        self.workspace.index.write().update_source_in_context(
             analysis.module,
             analysis.source_root,
             origin,
@@ -421,7 +421,7 @@ impl LanguageServer for Backend {
             language = lang.id(),
             "did_change indexing with Salsa (incremental)"
         );
-        self.workspace.index.write().await.update_source_in_context(
+        self.workspace.index.write().update_source_in_context(
             analysis.module,
             analysis.source_root,
             origin,
@@ -488,7 +488,6 @@ impl LanguageServer for Backend {
             .workspace
             .index
             .read()
-            .await
             .build_name_table_for_analysis_context(
                 analysis.module,
                 analysis.classpath,
@@ -498,7 +497,6 @@ impl LanguageServer for Backend {
             .workspace
             .index
             .read()
-            .await
             .module_classpath_jars(analysis.module, analysis.classpath);
         let classes = index_source_text(&uri_str, &content, &lang_id, Some(name_table));
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
@@ -510,7 +508,7 @@ impl LanguageServer for Backend {
             visible_classpath_len = visible_classpath.len(),
             "did_save indexing with analysis context"
         );
-        self.workspace.index.write().await.update_source_in_context(
+        self.workspace.index.write().update_source_in_context(
             analysis.module,
             analysis.source_root,
             origin,
