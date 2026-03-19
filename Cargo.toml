@@ -42,3 +42,7 @@ criterion = "0.5"
 [[bench]]
 name = "salsa_performance"
 harness = false
+
+[[bench]]
+name = "parallel_completion"
+harness = false

@@ -1,8 +1,6 @@
 use crate::completion::CompletionCandidate;
 use crate::completion::post_processor;
-use crate::completion::provider::{
-    CompletionProvider, ProviderCompletionResult, ProviderSearchSpace,
-};
+use crate::completion::provider::{CompletionProvider, ProviderSearchSpace};
 use crate::index::{IndexScope, IndexView};
 use crate::language::Language;
 use crate::semantic::{CursorLocation, SemanticContext};
@@ -82,71 +80,83 @@ impl CompletionEngine {
         lang.enrich_completion_context(&mut ctx, scope, index);
 
         let t_total = Instant::now();
-        let mut candidates: Vec<CompletionCandidate> = Vec::new();
         let broad_query = is_broad_query(&ctx, policy.short_prefix_len);
+
+        // Phase 4: Parallel Provider Execution
+        // Execute all applicable providers in parallel using rayon
+        use rayon::prelude::*;
+
+        let lang_providers: Vec<_> = lang
+            .completion_providers()
+            .iter()
+            .filter(|p| p.is_applicable(&ctx))
+            .collect();
+
+        let extra_providers: Vec<_> = self
+            .extra_providers
+            .iter()
+            .filter(|p| p.is_applicable(&ctx))
+            .collect();
+
+        // Execute language providers in parallel
+        let lang_results: Vec<_> = lang_providers
+            .par_iter()
+            .map(|provider| {
+                let tp = Instant::now();
+                let use_limit =
+                    broad_query && provider.search_space(&ctx) == ProviderSearchSpace::Broad;
+                let limit = use_limit.then_some(policy.broad_provider_limit);
+
+                let result = provider.provide(scope, &ctx, index, limit);
+
+                tracing::debug!(
+                    provider = provider.name(),
+                    candidates = result.candidates.len(),
+                    limited = use_limit,
+                    elapsed_ms = tp.elapsed().as_secs_f64() * 1000.0,
+                    "completion provider dispatch (parallel)"
+                );
+
+                (result, use_limit)
+            })
+            .collect();
+
+        // Execute extra providers in parallel
+        let extra_results: Vec<_> = extra_providers
+            .par_iter()
+            .map(|provider| {
+                let tp = Instant::now();
+                let use_limit =
+                    broad_query && provider.search_space(&ctx) == ProviderSearchSpace::Broad;
+                let limit = use_limit.then_some(policy.broad_provider_limit);
+
+                let result = provider.provide(scope, &ctx, index, limit);
+
+                tracing::debug!(
+                    provider = provider.name(),
+                    candidates = result.candidates.len(),
+                    limited = use_limit,
+                    elapsed_ms = tp.elapsed().as_secs_f64() * 1000.0,
+                    "completion extra provider dispatch (parallel)"
+                );
+
+                (result, use_limit)
+            })
+            .collect();
+
+        // Collect results
+        let mut candidates: Vec<CompletionCandidate> = Vec::new();
         let mut metadata = CompletionMetadata {
             broad_query,
             ..CompletionMetadata::default()
         };
 
-        for provider in lang.completion_providers() {
-            if !provider.is_applicable(&ctx) {
-                tracing::debug!(
-                    provider = provider.name(),
-                    "completion provider skipped by applicability gate"
-                );
-                continue;
-            }
-            let tp = Instant::now();
-            let use_limit =
-                broad_query && provider.search_space(&ctx) == ProviderSearchSpace::Broad;
-            let limit = use_limit.then_some(policy.broad_provider_limit);
+        for (result, use_limit) in lang_results.into_iter().chain(extra_results.into_iter()) {
             if use_limit {
                 metadata.used_broad_provider = true;
             }
-            let ProviderCompletionResult {
-                candidates: mut out,
-                is_incomplete,
-            } = provider.provide(scope, &ctx, index, limit);
-            metadata.provider_truncated |= is_incomplete;
-            tracing::debug!(
-                provider = provider.name(),
-                candidates = out.len(),
-                limited = use_limit,
-                elapsed_ms = tp.elapsed().as_secs_f64() * 1000.0,
-                "completion provider dispatch"
-            );
-            candidates.append(&mut out);
-        }
-
-        for provider in &self.extra_providers {
-            if !provider.is_applicable(&ctx) {
-                tracing::debug!(
-                    provider = provider.name(),
-                    "completion extra provider skipped by applicability gate"
-                );
-                continue;
-            }
-            let tp = Instant::now();
-            let use_limit =
-                broad_query && provider.search_space(&ctx) == ProviderSearchSpace::Broad;
-            let limit = use_limit.then_some(policy.broad_provider_limit);
-            if use_limit {
-                metadata.used_broad_provider = true;
-            }
-            let ProviderCompletionResult {
-                candidates: mut out,
-                is_incomplete,
-            } = provider.provide(scope, &ctx, index, limit);
-            metadata.provider_truncated |= is_incomplete;
-            tracing::debug!(
-                provider = provider.name(),
-                candidates = out.len(),
-                limited = use_limit,
-                elapsed_ms = tp.elapsed().as_secs_f64() * 1000.0,
-                "completion extra provider dispatch"
-            );
-            candidates.append(&mut out);
+            metadata.provider_truncated |= result.is_incomplete;
+            candidates.extend(result.candidates);
         }
 
         tracing::debug!(
