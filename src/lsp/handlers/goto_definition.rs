@@ -25,7 +25,7 @@ pub async fn handle_goto_definition(
     let lang = backend.registry.find(&lang_id)?;
 
     backend.workspace.documents.with_doc_mut(uri, |doc| {
-        if doc.source().tree.is_none() {
+        if !doc.source().has_unified_syntax() {
             let tree = lang.parse_tree(doc.source().text(), None);
             doc.set_tree(tree);
         }

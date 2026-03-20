@@ -20,12 +20,12 @@ fn ensure_tree(
     // First pass: check if tree already exists (read-only).
     let has_tree = workspace
         .documents
-        .with_doc(uri, |doc| doc.source().tree.is_some())
+        .with_doc(uri, |doc| doc.source().has_unified_syntax())
         .unwrap_or(false);
 
     if !has_tree {
         workspace.documents.with_doc_mut(uri, |doc| {
-            if doc.source().tree.is_some() {
+            if doc.source().has_unified_syntax() {
                 return; // already set by a concurrent call
             }
             let tree = lang.parse_tree(doc.source().text(), None);

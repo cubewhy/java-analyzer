@@ -325,6 +325,24 @@ impl Language for JavaLanguage {
         )
     }
 
+    fn may_have_inlay_hints_in_range(&self, file: &SourceFile, range: Range) -> bool {
+        let Some(root) = file.root_node() else {
+            return false;
+        };
+        let Some(byte_range) = lsp_range_to_byte_range(&file.rope, range, file.text().len()) else {
+            return false;
+        };
+        if byte_range.is_empty() {
+            return false;
+        }
+
+        crate::language::java::inlay_hints::has_java_inlay_hint_candidates(
+            file.text(),
+            root,
+            byte_range,
+        )
+    }
+
     // ========================================================================
     // Salsa-based methods for incremental computation
     // ========================================================================

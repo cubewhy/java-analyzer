@@ -4,6 +4,8 @@ use ropey::Rope;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::{Node, Tree};
 
+use crate::syntax::SyntaxSnapshot;
+
 /// A versioned, fully-parsed snapshot of a single source file.
 ///
 /// `SourceFile` is the canonical input value for all language-analysis
@@ -44,6 +46,9 @@ pub struct SourceFile {
     /// parser failed to produce a tree (should be rare in practice because
     /// tree-sitter is error-tolerant).
     pub tree: Option<Arc<Tree>>,
+
+    /// Unified immutable syntax snapshot derived from the parser output.
+    pub syntax: Option<Arc<SyntaxSnapshot>>,
 }
 
 impl SourceFile {
@@ -59,13 +64,18 @@ impl SourceFile {
         tree: Option<Tree>,
     ) -> Self {
         let text: Arc<str> = text.into();
+        let language_id: Arc<str> = language_id.into();
         let rope = Arc::new(Rope::from_str(&text));
+        let syntax = tree
+            .as_ref()
+            .map(|tree| Arc::new(SyntaxSnapshot::from_tree(language_id.as_ref(), &text, tree)));
         Self {
             uri: Arc::new(uri),
-            language_id: language_id.into(),
+            language_id,
             version,
             rope,
             tree: tree.map(Arc::new),
+            syntax,
             text,
         }
     }
@@ -92,10 +102,28 @@ impl SourceFile {
     /// `tree` field is replaced.  Used by the server after an incremental
     /// re-parse to attach the updated tree without cloning the source text.
     pub fn with_tree(self, tree: Option<Tree>) -> Self {
+        let syntax = tree.as_ref().map(|tree| {
+            Arc::new(SyntaxSnapshot::from_tree(
+                self.language_id.as_ref(),
+                &self.text,
+                tree,
+            ))
+        });
         Self {
             tree: tree.map(Arc::new),
+            syntax,
             ..self
         }
+    }
+
+    #[inline]
+    pub fn syntax(&self) -> Option<&Arc<SyntaxSnapshot>> {
+        self.syntax.as_ref()
+    }
+
+    #[inline]
+    pub fn has_unified_syntax(&self) -> bool {
+        self.syntax.is_some()
     }
 }
 
@@ -107,6 +135,7 @@ impl std::fmt::Debug for SourceFile {
             .field("version", &self.version)
             .field("text_len", &self.text.len())
             .field("has_tree", &self.tree.is_some())
+            .field("has_syntax", &self.syntax.is_some())
             .finish()
     }
 }

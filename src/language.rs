@@ -143,6 +143,10 @@ pub trait Language: Send + Sync + std::fmt::Debug {
         None
     }
 
+    fn may_have_inlay_hints_in_range(&self, _file: &SourceFile, _range: Range) -> bool {
+        true
+    }
+
     // ========================================================================
     // NEW: Salsa-based methods for incremental computation
     // ========================================================================
