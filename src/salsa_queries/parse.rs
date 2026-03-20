@@ -5,6 +5,7 @@ use crate::salsa_db::SourceFile;
 /// These queries are the foundation of incremental parsing. When a file's
 /// content changes, only these queries (and their dependents) are invalidated.
 use std::sync::Arc;
+use tree_sitter::{Parser, Tree};
 
 /// Metadata about a parsed syntax tree
 ///
@@ -102,6 +103,30 @@ pub fn extract_imports(db: &dyn Db, file: SourceFile) -> Arc<Vec<Arc<str>>> {
     };
 
     Arc::new(imports)
+}
+
+/// Helper: Parse a tree for a given language (not cached - used by other queries)
+///
+/// This is NOT a Salsa query because Tree doesn't implement the required traits.
+/// Instead, we parse on-demand when needed by Salsa queries.
+pub fn parse_tree_for_language(content: &str, language_id: &str) -> Option<Tree> {
+    let mut parser = Parser::new();
+
+    match language_id {
+        "java" => {
+            parser
+                .set_language(&tree_sitter_java::LANGUAGE.into())
+                .ok()?;
+        }
+        "kotlin" => {
+            parser
+                .set_language(&tree_sitter_kotlin::LANGUAGE.into())
+                .ok()?;
+        }
+        _ => return None,
+    }
+
+    parser.parse(content, None)
 }
 
 #[cfg(test)]

@@ -1,0 +1,284 @@
+/// Salsa queries for completion context extraction
+///
+/// This module provides incremental, cached context extraction for code completion.
+/// All queries are memoized by Salsa and automatically invalidated when inputs change.
+use super::Db;
+use crate::salsa_db::SourceFile;
+use std::sync::Arc;
+
+// ============================================================================
+// Salsa-Compatible Data Structures
+// ============================================================================
+
+/// Lightweight completion context data (Salsa-compatible)
+///
+/// This is a simplified version of SemanticContext that only contains
+/// data that can be hashed and compared. Complex types like TypeName
+/// are converted to strings.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CompletionContextData {
+    pub location: CursorLocationData,
+    pub query: Arc<str>,
+    pub enclosing_class: Option<Arc<str>>,
+    pub enclosing_internal_name: Option<Arc<str>>,
+    pub enclosing_package: Option<Arc<str>>,
+    pub local_var_count: usize,
+    pub import_count: usize,
+    pub static_import_count: usize,
+    pub content_hash: u64,
+    pub file_uri: Arc<str>,
+    pub language_id: Arc<str>,
+}
+
+/// Cursor location data (Salsa-compatible)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CursorLocationData {
+    Expression {
+        prefix: Arc<str>,
+    },
+    MemberAccess {
+        receiver_expr: Arc<str>,
+        member_prefix: Arc<str>,
+        receiver_type_hint: Option<Arc<str>>,
+        /// Serialized CallArgs for method calls
+        arguments: Option<Arc<str>>,
+    },
+    StaticAccess {
+        class_internal_name: Arc<str>,
+        member_prefix: Arc<str>,
+    },
+    Import {
+        prefix: Arc<str>,
+    },
+    ImportStatic {
+        prefix: Arc<str>,
+    },
+    MethodArgument {
+        prefix: Arc<str>,
+        method_name: Option<Arc<str>>,
+        arg_index: Option<usize>,
+    },
+    Annotation {
+        prefix: Arc<str>,
+    },
+    StatementLabel {
+        kind: StatementLabelKind,
+        prefix: Arc<str>,
+    },
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatementLabelKind {
+    Break,
+    Continue,
+}
+
+/// Local variable metadata (Salsa-compatible)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LocalVarData {
+    pub name: Arc<str>,
+    pub type_internal: Arc<str>,
+    pub init_expr: Option<Arc<str>>,
+}
+
+/// AST node metadata (Salsa-compatible)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NodeMetadata {
+    pub kind: Arc<str>,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub parent_kind: Option<Arc<str>>,
+    pub text: Arc<str>,
+}
+
+// ============================================================================
+// Core Salsa Queries
+// ============================================================================
+
+/// Extract completion context for a position in a file (CACHED)
+///
+/// This is the main entry point for context extraction. It's memoized by
+/// (file, line, character, trigger_char) so repeated requests at the same
+/// position are instant.
+#[salsa::tracked]
+pub fn extract_completion_context(
+    db: &dyn Db,
+    file: SourceFile,
+    line: u32,
+    character: u32,
+    trigger_char: Option<char>,
+) -> Arc<CompletionContextData> {
+    let language_id = file.language_id(db);
+
+    match language_id.as_ref() {
+        "java" => {
+            super::java::extract_java_completion_context(db, file, line, character, trigger_char)
+        }
+        "kotlin" => super::kotlin::extract_kotlin_completion_context(
+            db,
+            file,
+            line,
+            character,
+            trigger_char,
+        ),
+        _ => {
+            // Unknown language - return empty context
+            Arc::new(CompletionContextData {
+                location: CursorLocationData::Unknown,
+                query: Arc::from(""),
+                enclosing_class: None,
+                enclosing_internal_name: None,
+                enclosing_package: None,
+                local_var_count: 0,
+                import_count: 0,
+                static_import_count: 0,
+                content_hash: 0,
+                file_uri: Arc::from(file.file_id(db).as_str()),
+                language_id: Arc::clone(&language_id),
+            })
+        }
+    }
+}
+
+/// Find the AST node at a specific position (CACHED)
+///
+/// This is cached per (file, offset) so navigating to the same position
+/// multiple times is instant.
+#[salsa::tracked]
+pub fn find_node_at_position(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: usize,
+) -> Option<Arc<NodeMetadata>> {
+    let content = file.content(db);
+    let language_id = file.language_id(db);
+
+    // Parse tree
+    let tree = super::parse::parse_tree_for_language(content, language_id.as_ref())?;
+    let root = tree.root_node();
+
+    // Find deepest node at offset
+    let node = find_deepest_node_at_offset(root, offset)?;
+
+    let parent_kind = node.parent().map(|p| Arc::from(p.kind()));
+    let text = node.utf8_text(content.as_bytes()).ok()?;
+
+    Some(Arc::new(NodeMetadata {
+        kind: Arc::from(node.kind()),
+        start_byte: node.start_byte(),
+        end_byte: node.end_byte(),
+        parent_kind,
+        text: Arc::from(text),
+    }))
+}
+
+/// Helper: Find the deepest node at a given offset
+fn find_deepest_node_at_offset<'a>(
+    root: tree_sitter::Node<'a>,
+    offset: usize,
+) -> Option<tree_sitter::Node<'a>> {
+    let mut cursor = root.walk();
+    let mut node = root;
+
+    loop {
+        let mut found_child = false;
+        let children: Vec<_> = node.children(&mut cursor).collect();
+        for child in children {
+            if child.start_byte() <= offset && offset < child.end_byte() {
+                node = child;
+                found_child = true;
+                break;
+            }
+        }
+
+        if !found_child {
+            return Some(node);
+        }
+    }
+}
+
+/// Compute content hash for a scope around the cursor (CACHED)
+///
+/// This is used to detect when the relevant scope has changed.
+/// Only the method/class containing the cursor is hashed, not the entire file.
+#[salsa::tracked]
+pub fn compute_scope_content_hash(db: &dyn Db, file: SourceFile, offset: usize) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let content = file.content(db);
+
+    // Find enclosing method or class
+    let scope_range = find_enclosing_scope_range(db, file, offset).unwrap_or((0, content.len()));
+
+    let scope_content = &content[scope_range.0..scope_range.1.min(content.len())];
+
+    let mut hasher = DefaultHasher::new();
+    scope_content.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Find the byte range of the enclosing scope (method or class)
+fn find_enclosing_scope_range(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: usize,
+) -> Option<(usize, usize)> {
+    // Try to find enclosing method first
+    if let Some((start, end)) = super::semantic::find_enclosing_method_bounds(db, file, offset) {
+        return Some((start, end));
+    }
+
+    // Fall back to enclosing class
+    if let Some((_, start, end)) = super::semantic::find_enclosing_class_bounds(db, file, offset) {
+        return Some((start, end));
+    }
+
+    None
+}
+
+// ============================================================================
+// Conversion Utilities
+// ============================================================================
+
+/// Convert line/column to byte offset
+pub fn line_col_to_offset(content: &str, line: u32, character: u32) -> Option<usize> {
+    let mut current_line = 0u32;
+    let mut current_col = 0u32;
+    let mut offset = 0usize;
+
+    for ch in content.chars() {
+        if current_line == line && current_col == character {
+            return Some(offset);
+        }
+
+        if ch == '\n' {
+            current_line += 1;
+            current_col = 0;
+        } else {
+            current_col += ch.len_utf16() as u32;
+        }
+
+        offset += ch.len_utf8();
+    }
+
+    if current_line == line && current_col == character {
+        Some(offset)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_line_col_to_offset() {
+        let content = "line 0\nline 1\nline 2";
+        assert_eq!(line_col_to_offset(content, 0, 0), Some(0));
+        assert_eq!(line_col_to_offset(content, 1, 0), Some(7));
+        assert_eq!(line_col_to_offset(content, 2, 0), Some(14));
+    }
+}
