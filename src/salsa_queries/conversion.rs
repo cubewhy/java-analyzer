@@ -104,9 +104,8 @@ fn enrich_java_semantic_context(
 ) -> SemanticContext {
     let source = file.content(db);
     let rope = ropey::Rope::from_str(source);
-    let tree = crate::language::java::make_java_parser()
-        .parse(source, None)
-        .expect("java completion conversion parse");
+    let tree = crate::salsa_queries::parse::parse_tree(db, file)
+        .expect("java completion conversion parse tree");
     let root = tree.root_node();
     let extractor = JavaContextExtractor::with_rope(
         Arc::<str>::from(source.as_str()),
@@ -340,6 +339,9 @@ pub fn convert_field_summary(field: &FieldSummary) -> CurrentClassMember {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::salsa_db::{Database, FileId, SourceFile};
+    use ropey::Rope;
+    use tower_lsp::lsp_types::Url;
 
     #[test]
     fn test_convert_cursor_location_expression() {
@@ -381,5 +383,38 @@ mod tests {
             }
             _ => panic!("Expected MemberAccess location"),
         }
+    }
+
+    #[test]
+    fn test_java_completion_context_conversion_enriches_locals() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let marked_source = indoc::indoc! {r#"
+            class Test {
+                void demo() {
+                    String localValue = "";
+                    localV|
+                }
+            }
+        "#};
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let character = (marker - rope.line_to_byte(line as usize)) as u32;
+        let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
+
+        let data = crate::salsa_queries::java::extract_java_completion_context(
+            &db, file, line, character, None,
+        );
+        let ctx = SemanticContext::from_salsa_data(data.as_ref().clone(), &db, file, None);
+
+        assert_eq!(ctx.query, "localV");
+        assert!(
+            ctx.local_variables
+                .iter()
+                .any(|local| local.name.as_ref() == "localValue"),
+            "expected localValue to be present in the converted semantic context"
+        );
     }
 }

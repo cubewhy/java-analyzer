@@ -346,42 +346,29 @@ pub(crate) fn extract_java_semantic_context_for_test(
     trigger_char: Option<char>,
     env: &ParseEnv,
 ) -> Option<SemanticContext> {
-    let mut parser = make_java_parser();
-    let tree = parser.parse(source, None)?;
     let rope = Rope::from_str(source);
     let offset = rope_line_col_to_offset(&rope, line, character)?;
-    let file = crate::workspace::SourceFile::new(
-        tower_lsp::lsp_types::Url::parse("file:///test.java").ok()?,
-        "java",
-        0,
-        source.to_owned(),
-        Some(tree),
-    );
+    let mut parser = make_java_parser();
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+
     let mut extractor = JavaContextExtractor::with_rope(
-        file.text().to_string(),
+        Arc::<str>::from(source),
         offset,
-        (*file.rope).clone(),
+        rope,
         env.name_table.clone(),
     );
+
     if let Some(view) = env.view.clone() {
         extractor = extractor.with_view(view);
     }
-    if let Some(workspace) = env.workspace.clone() {
-        extractor = extractor.with_workspace(workspace);
+    if let Some(workspace) = env.workspace.as_ref() {
+        extractor = extractor.with_workspace(Arc::clone(workspace));
     }
-    extractor = extractor.with_file_uri(Arc::from(file.uri.as_str()));
-    if extractor.is_in_comment() {
-        return Some(SemanticContext::new(
-            CursorLocation::Unknown,
-            "",
-            vec![],
-            None,
-            None,
-            None,
-            vec![],
-        ));
+    if let Some(metrics) = env.metrics.as_ref() {
+        extractor = extractor.with_metrics(Arc::clone(metrics));
     }
-    let root = file.root_node()?;
+
     Some(extractor.extract(root, trigger_char))
 }
 
