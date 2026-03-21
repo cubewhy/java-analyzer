@@ -4,7 +4,9 @@ use crate::language::java::editor_semantics::semantic_context_at_offset;
 use crate::language::java::inlay_hints::{JavaInlayHintKind, collect_java_inlay_hints};
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::context::{
-    CompletionContextData, CursorLocationData, line_col_to_offset,
+    CompletionContextData, CursorLocationData, ExpectedTypeSourceData, FunctionalExprShapeData,
+    FunctionalMethodCallHintData, FunctionalTargetHintData, MethodRefQualifierKindData,
+    StatementLabelData, StatementLabelTargetKindData, line_col_to_offset,
 };
 use crate::salsa_queries::hints::{InlayHintData, InlayHintKindData};
 use crate::salsa_queries::symbols::{ResolvedSymbolData, SymbolKind};
@@ -244,6 +246,17 @@ pub fn extract_java_completion_context(
         crate::language::java::location::determine_location(&extractor, cursor_node, trigger_char);
     let location = convert_rich_location(&rich_location);
     let query = Arc::from(rich_query.as_str());
+    let statement_labels = convert_statement_labels(
+        crate::language::java::scope::extract_enclosing_statement_labels(&extractor, cursor_node),
+    );
+    let char_after_cursor = content[offset.min(content.len())..]
+        .chars()
+        .find(|c| !(c.is_alphanumeric() || *c == '_'));
+    let is_class_member_position =
+        crate::language::java::scope::is_cursor_in_class_member_position(cursor_node);
+    let functional_target_hint = convert_functional_target_hint(
+        crate::language::java::location::infer_functional_target_hint(&extractor, cursor_node),
+    );
 
     // Extract scope information (all cached separately)
     let package = super::parse::extract_package(db, file);
@@ -273,6 +286,10 @@ pub fn extract_java_completion_context(
         local_var_count,
         import_count: imports.len(),
         static_import_count: static_imports.len(),
+        statement_labels,
+        char_after_cursor,
+        is_class_member_position,
+        functional_target_hint,
         content_hash,
         file_uri: Arc::from(file.file_id(db).as_str()),
         language_id: Arc::from("java"),
@@ -391,9 +408,132 @@ fn empty_context(db: &dyn Db, file: SourceFile) -> CompletionContextData {
         local_var_count: 0,
         import_count: 0,
         static_import_count: 0,
+        statement_labels: vec![],
+        char_after_cursor: None,
+        is_class_member_position: false,
+        functional_target_hint: None,
         content_hash: 0,
         file_uri: Arc::from(file.file_id(db).as_str()),
         language_id: Arc::from("java"),
+    }
+}
+
+fn convert_statement_labels(
+    labels: Vec<crate::semantic::context::StatementLabel>,
+) -> Vec<StatementLabelData> {
+    labels
+        .into_iter()
+        .map(|label| StatementLabelData {
+            name: label.name,
+            target_kind: convert_statement_label_target_kind(label.target_kind),
+        })
+        .collect()
+}
+
+fn convert_statement_label_target_kind(
+    kind: crate::semantic::context::StatementLabelTargetKind,
+) -> StatementLabelTargetKindData {
+    match kind {
+        crate::semantic::context::StatementLabelTargetKind::Block => {
+            StatementLabelTargetKindData::Block
+        }
+        crate::semantic::context::StatementLabelTargetKind::While => {
+            StatementLabelTargetKindData::While
+        }
+        crate::semantic::context::StatementLabelTargetKind::DoWhile => {
+            StatementLabelTargetKindData::DoWhile
+        }
+        crate::semantic::context::StatementLabelTargetKind::For => {
+            StatementLabelTargetKindData::For
+        }
+        crate::semantic::context::StatementLabelTargetKind::EnhancedFor => {
+            StatementLabelTargetKindData::EnhancedFor
+        }
+        crate::semantic::context::StatementLabelTargetKind::Switch => {
+            StatementLabelTargetKindData::Switch
+        }
+        crate::semantic::context::StatementLabelTargetKind::Other => {
+            StatementLabelTargetKindData::Other
+        }
+    }
+}
+
+fn convert_functional_target_hint(
+    hint: Option<crate::semantic::context::FunctionalTargetHint>,
+) -> Option<FunctionalTargetHintData> {
+    hint.map(|hint| FunctionalTargetHintData {
+        expected_type_source: hint.expected_type_source.map(Arc::from),
+        expected_type_context: hint.expected_type_context.map(convert_expected_type_source),
+        assignment_lhs_expr: hint.assignment_lhs_expr.map(Arc::from),
+        method_call: hint.method_call.map(convert_functional_method_call_hint),
+        expr_shape: hint.expr_shape.map(convert_functional_expr_shape),
+    })
+}
+
+fn convert_expected_type_source(
+    source: crate::semantic::context::ExpectedTypeSource,
+) -> ExpectedTypeSourceData {
+    match source {
+        crate::semantic::context::ExpectedTypeSource::VariableInitializer => {
+            ExpectedTypeSourceData::VariableInitializer
+        }
+        crate::semantic::context::ExpectedTypeSource::AssignmentRhs => {
+            ExpectedTypeSourceData::AssignmentRhs
+        }
+        crate::semantic::context::ExpectedTypeSource::ReturnExpr => {
+            ExpectedTypeSourceData::ReturnExpr
+        }
+        crate::semantic::context::ExpectedTypeSource::MethodArgument { arg_index } => {
+            ExpectedTypeSourceData::MethodArgument { arg_index }
+        }
+    }
+}
+
+fn convert_functional_method_call_hint(
+    hint: crate::semantic::context::FunctionalMethodCallHint,
+) -> FunctionalMethodCallHintData {
+    FunctionalMethodCallHintData {
+        receiver_expr: Arc::from(hint.receiver_expr),
+        method_name: Arc::from(hint.method_name),
+        arg_index: hint.arg_index,
+        arg_texts: hint.arg_texts.into_iter().map(Arc::from).collect(),
+    }
+}
+
+fn convert_functional_expr_shape(
+    shape: crate::semantic::context::FunctionalExprShape,
+) -> FunctionalExprShapeData {
+    match shape {
+        crate::semantic::context::FunctionalExprShape::MethodReference {
+            qualifier_expr,
+            member_name,
+            is_constructor,
+            qualifier_kind,
+        } => FunctionalExprShapeData::MethodReference {
+            qualifier_expr: Arc::from(qualifier_expr),
+            member_name: Arc::from(member_name),
+            is_constructor,
+            qualifier_kind: convert_method_ref_qualifier_kind(qualifier_kind),
+        },
+        crate::semantic::context::FunctionalExprShape::Lambda {
+            param_count,
+            expression_body,
+        } => FunctionalExprShapeData::Lambda {
+            param_count,
+            expression_body: expression_body.map(Arc::from),
+        },
+    }
+}
+
+fn convert_method_ref_qualifier_kind(
+    kind: crate::semantic::context::MethodRefQualifierKind,
+) -> MethodRefQualifierKindData {
+    match kind {
+        crate::semantic::context::MethodRefQualifierKind::Type => MethodRefQualifierKindData::Type,
+        crate::semantic::context::MethodRefQualifierKind::Expr => MethodRefQualifierKindData::Expr,
+        crate::semantic::context::MethodRefQualifierKind::Unknown => {
+            MethodRefQualifierKindData::Unknown
+        }
     }
 }
 

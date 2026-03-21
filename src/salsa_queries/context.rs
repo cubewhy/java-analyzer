@@ -26,6 +26,10 @@ pub struct CompletionContextData {
     pub local_var_count: usize,
     pub import_count: usize,
     pub static_import_count: usize,
+    pub statement_labels: Vec<StatementLabelData>,
+    pub char_after_cursor: Option<char>,
+    pub is_class_member_position: bool,
+    pub functional_target_hint: Option<FunctionalTargetHintData>,
     pub content_hash: u64,
     pub file_uri: Arc<str>,
     pub language_id: Arc<str>,
@@ -93,6 +97,69 @@ pub enum StatementLabelKind {
     Continue,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatementLabelTargetKindData {
+    Block,
+    While,
+    DoWhile,
+    For,
+    EnhancedFor,
+    Switch,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StatementLabelData {
+    pub name: Arc<str>,
+    pub target_kind: StatementLabelTargetKindData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExpectedTypeSourceData {
+    VariableInitializer,
+    AssignmentRhs,
+    ReturnExpr,
+    MethodArgument { arg_index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionalMethodCallHintData {
+    pub receiver_expr: Arc<str>,
+    pub method_name: Arc<str>,
+    pub arg_index: usize,
+    pub arg_texts: Vec<Arc<str>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MethodRefQualifierKindData {
+    Type,
+    Expr,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FunctionalExprShapeData {
+    MethodReference {
+        qualifier_expr: Arc<str>,
+        member_name: Arc<str>,
+        is_constructor: bool,
+        qualifier_kind: MethodRefQualifierKindData,
+    },
+    Lambda {
+        param_count: usize,
+        expression_body: Option<Arc<str>>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FunctionalTargetHintData {
+    pub expected_type_source: Option<Arc<str>>,
+    pub expected_type_context: Option<ExpectedTypeSourceData>,
+    pub assignment_lhs_expr: Option<Arc<str>>,
+    pub method_call: Option<FunctionalMethodCallHintData>,
+    pub expr_shape: Option<FunctionalExprShapeData>,
+}
+
 /// Local variable metadata (Salsa-compatible)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LocalVarData {
@@ -153,6 +220,10 @@ pub fn extract_completion_context(
                 local_var_count: 0,
                 import_count: 0,
                 static_import_count: 0,
+                statement_labels: vec![],
+                char_after_cursor: None,
+                is_class_member_position: false,
+                functional_target_hint: None,
                 content_hash: 0,
                 file_uri: Arc::from(file.file_id(db).as_str()),
                 language_id: Arc::clone(&language_id),

@@ -4,11 +4,18 @@ use std::sync::Arc;
 use crate::index::{FieldSummary, IndexView, MethodSummary};
 use crate::language::java::JavaContextExtractor;
 use crate::language::java::type_ctx::SourceTypeCtx;
-use crate::language::java::{flow, members, scope};
+use crate::language::java::{flow, members};
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::Db;
-use crate::salsa_queries::{CompletionContextData, CursorLocationData};
-use crate::semantic::context::CurrentClassMember;
+use crate::salsa_queries::{
+    CompletionContextData, CursorLocationData, ExpectedTypeSourceData, FunctionalExprShapeData,
+    FunctionalTargetHintData, MethodRefQualifierKindData, StatementLabelData,
+    StatementLabelTargetKindData,
+};
+use crate::semantic::context::{
+    CurrentClassMember, ExpectedTypeSource, FunctionalExprShape, FunctionalMethodCallHint,
+    FunctionalTargetHint, MethodRefQualifierKind, StatementLabel, StatementLabelTargetKind,
+};
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext};
 use crate::workspace::AnalysisContext;
@@ -155,7 +162,6 @@ fn enrich_java_semantic_context(
         });
 
     let static_imports = fetch_static_imports(db, file);
-    let is_class_member_position = scope::is_cursor_in_class_member_position(cursor_node);
     let enclosing_class_member = cursor_node
         .and_then(|n| ancestor_of_kind(n, "method_declaration"))
         .or_else(|| find_node_by_offset(root, "method_declaration", data.cursor_offset))
@@ -163,8 +169,6 @@ fn enrich_java_semantic_context(
             crate::language::java::utils::find_enclosing_method_in_error(root, data.cursor_offset)
         })
         .and_then(|m| members::parse_method_node(&extractor, &type_ctx, m));
-    let char_after_cursor = compute_char_after_cursor(file.content(db), data.cursor_offset);
-    let statement_labels = scope::extract_enclosing_statement_labels(&extractor, cursor_node);
     let active_lambda_param_names = workspace
         .map(|_| {
             crate::salsa_queries::extract_active_lambda_param_names_incremental(
@@ -179,23 +183,26 @@ fn enrich_java_semantic_context(
                 data.cursor_offset,
             )
         });
-    let functional_target_hint =
-        crate::language::java::location::infer_functional_target_hint(&extractor, cursor_node);
     let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
         &extractor,
         cursor_node,
         &type_ctx,
         &local_variables,
     );
+    let statement_labels = convert_statement_labels(&data.statement_labels);
+    let functional_target_hint = data
+        .functional_target_hint
+        .as_ref()
+        .map(convert_functional_target_hint);
 
     let mut ctx = ctx;
     ctx.local_variables = local_variables;
 
     ctx.with_static_imports(static_imports)
-        .with_class_member_position(is_class_member_position)
+        .with_class_member_position(data.is_class_member_position)
         .with_class_members(members.into_values())
         .with_enclosing_member(enclosing_class_member)
-        .with_char_after_cursor(char_after_cursor)
+        .with_char_after_cursor(data.char_after_cursor)
         .with_statement_labels(statement_labels)
         .with_active_lambda_param_names(active_lambda_param_names)
         .with_functional_target_hint(functional_target_hint)
@@ -217,12 +224,6 @@ fn fetch_static_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str>> {
         "java" => crate::salsa_queries::java::extract_java_static_imports(db, file),
         _ => Vec::new(),
     }
-}
-
-fn compute_char_after_cursor(content: &str, cursor_offset: usize) -> Option<char> {
-    content[cursor_offset.min(content.len())..]
-        .chars()
-        .find(|c| !(c.is_alphanumeric() || *c == '_'))
 }
 
 fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {
@@ -332,6 +333,104 @@ pub fn convert_local_var(data: &crate::salsa_queries::LocalVarData) -> LocalVar 
     }
 }
 
+fn convert_statement_labels(data: &[StatementLabelData]) -> Vec<StatementLabel> {
+    data.iter()
+        .map(|label| StatementLabel {
+            name: Arc::clone(&label.name),
+            target_kind: convert_statement_label_target_kind(label.target_kind),
+        })
+        .collect()
+}
+
+fn convert_statement_label_target_kind(
+    kind: StatementLabelTargetKindData,
+) -> StatementLabelTargetKind {
+    match kind {
+        StatementLabelTargetKindData::Block => StatementLabelTargetKind::Block,
+        StatementLabelTargetKindData::While => StatementLabelTargetKind::While,
+        StatementLabelTargetKindData::DoWhile => StatementLabelTargetKind::DoWhile,
+        StatementLabelTargetKindData::For => StatementLabelTargetKind::For,
+        StatementLabelTargetKindData::EnhancedFor => StatementLabelTargetKind::EnhancedFor,
+        StatementLabelTargetKindData::Switch => StatementLabelTargetKind::Switch,
+        StatementLabelTargetKindData::Other => StatementLabelTargetKind::Other,
+    }
+}
+
+fn convert_functional_target_hint(data: &FunctionalTargetHintData) -> FunctionalTargetHint {
+    FunctionalTargetHint {
+        expected_type_source: data.expected_type_source.as_deref().map(str::to_owned),
+        expected_type_context: data
+            .expected_type_context
+            .as_ref()
+            .map(convert_expected_type_source),
+        assignment_lhs_expr: data.assignment_lhs_expr.as_deref().map(str::to_owned),
+        method_call: data
+            .method_call
+            .as_ref()
+            .map(convert_functional_method_call_hint),
+        expr_shape: data.expr_shape.as_ref().map(convert_functional_expr_shape),
+    }
+}
+
+fn convert_expected_type_source(data: &ExpectedTypeSourceData) -> ExpectedTypeSource {
+    match data {
+        ExpectedTypeSourceData::VariableInitializer => ExpectedTypeSource::VariableInitializer,
+        ExpectedTypeSourceData::AssignmentRhs => ExpectedTypeSource::AssignmentRhs,
+        ExpectedTypeSourceData::ReturnExpr => ExpectedTypeSource::ReturnExpr,
+        ExpectedTypeSourceData::MethodArgument { arg_index } => {
+            ExpectedTypeSource::MethodArgument {
+                arg_index: *arg_index,
+            }
+        }
+    }
+}
+
+fn convert_functional_method_call_hint(
+    data: &crate::salsa_queries::FunctionalMethodCallHintData,
+) -> FunctionalMethodCallHint {
+    FunctionalMethodCallHint {
+        receiver_expr: data.receiver_expr.as_ref().to_string(),
+        method_name: data.method_name.as_ref().to_string(),
+        arg_index: data.arg_index,
+        arg_texts: data
+            .arg_texts
+            .iter()
+            .map(|arg| arg.as_ref().to_string())
+            .collect(),
+    }
+}
+
+fn convert_functional_expr_shape(data: &FunctionalExprShapeData) -> FunctionalExprShape {
+    match data {
+        FunctionalExprShapeData::MethodReference {
+            qualifier_expr,
+            member_name,
+            is_constructor,
+            qualifier_kind,
+        } => FunctionalExprShape::MethodReference {
+            qualifier_expr: qualifier_expr.as_ref().to_string(),
+            member_name: member_name.as_ref().to_string(),
+            is_constructor: *is_constructor,
+            qualifier_kind: convert_method_ref_qualifier_kind(*qualifier_kind),
+        },
+        FunctionalExprShapeData::Lambda {
+            param_count,
+            expression_body,
+        } => FunctionalExprShape::Lambda {
+            param_count: *param_count,
+            expression_body: expression_body.as_deref().map(str::to_owned),
+        },
+    }
+}
+
+fn convert_method_ref_qualifier_kind(data: MethodRefQualifierKindData) -> MethodRefQualifierKind {
+    match data {
+        MethodRefQualifierKindData::Type => MethodRefQualifierKind::Type,
+        MethodRefQualifierKindData::Expr => MethodRefQualifierKind::Expr,
+        MethodRefQualifierKindData::Unknown => MethodRefQualifierKind::Unknown,
+    }
+}
+
 pub fn convert_field_summary(field: &FieldSummary) -> CurrentClassMember {
     CurrentClassMember::Field(Arc::new(field.clone()))
 }
@@ -340,6 +439,10 @@ pub fn convert_field_summary(field: &FieldSummary) -> CurrentClassMember {
 mod tests {
     use super::*;
     use crate::salsa_db::{Database, FileId, SourceFile};
+    use crate::semantic::context::{
+        ExpectedTypeSource, FunctionalExprShape, StatementLabelCompletionKind,
+        StatementLabelTargetKind,
+    };
     use ropey::Rope;
     use tower_lsp::lsp_types::Url;
 
@@ -416,5 +519,86 @@ mod tests {
                 .any(|local| local.name.as_ref() == "localValue"),
             "expected localValue to be present in the converted semantic context"
         );
+    }
+
+    #[test]
+    fn test_java_completion_context_conversion_preserves_statement_labels() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let marked_source = indoc::indoc! {r#"
+            class Test {
+                void demo() {
+                    outer: while (true) {
+                        break out|
+                    }
+                }
+            }
+        "#};
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let character = (marker - rope.line_to_byte(line as usize)) as u32;
+        let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
+
+        let data = crate::salsa_queries::java::extract_java_completion_context(
+            &db, file, line, character, None,
+        );
+        let ctx = SemanticContext::from_salsa_data(data.as_ref().clone(), &db, file, None);
+
+        match &ctx.location {
+            CursorLocation::StatementLabel { kind, prefix } => {
+                assert_eq!(*kind, StatementLabelCompletionKind::Break);
+                assert_eq!(prefix, "out");
+            }
+            other => panic!("expected statement-label location, got {other:?}"),
+        }
+        assert_eq!(
+            ctx.statement_labels
+                .iter()
+                .map(|label| (label.name.as_ref(), label.target_kind))
+                .collect::<Vec<_>>(),
+            vec![("outer", StatementLabelTargetKind::While)]
+        );
+    }
+
+    #[test]
+    fn test_java_completion_context_conversion_preserves_functional_target_hint() {
+        let db = Database::default();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let marked_source = indoc::indoc! {r#"
+            class Test {
+                void demo() {
+                    java.util.function.Function<String, Integer> fn = s -> s.subs|
+                }
+            }
+        "#};
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let character = (marker - rope.line_to_byte(line as usize)) as u32;
+        let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
+
+        let data = crate::salsa_queries::java::extract_java_completion_context(
+            &db, file, line, character, None,
+        );
+        let ctx = SemanticContext::from_salsa_data(data.as_ref().clone(), &db, file, None);
+        let hint = ctx
+            .functional_target_hint
+            .as_ref()
+            .expect("expected functional target hint");
+
+        assert_eq!(
+            hint.expected_type_context,
+            Some(ExpectedTypeSource::VariableInitializer)
+        );
+        assert!(hint.expected_type_source.is_some());
+        match hint.expr_shape.as_ref() {
+            Some(FunctionalExprShape::Lambda { param_count, .. }) => {
+                assert_eq!(*param_count, 1);
+            }
+            other => panic!("expected lambda expr shape, got {other:?}"),
+        }
     }
 }
