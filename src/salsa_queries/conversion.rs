@@ -1,15 +1,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::index::{FieldSummary, IndexView, MethodParams, MethodSummary};
+use crate::index::{FieldSummary, IndexView, MethodSummary};
+use crate::language::java::JavaContextExtractor;
 use crate::language::java::type_ctx::SourceTypeCtx;
+use crate::language::java::{flow, locals, members, scope};
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::Db;
 use crate::salsa_queries::{CompletionContextData, CursorLocationData};
-use crate::semantic::context::{CurrentClassMember, StatementLabel, StatementLabelTargetKind};
+use crate::semantic::context::CurrentClassMember;
 use crate::semantic::types::type_name::TypeName;
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext};
 use crate::workspace::AnalysisContext;
+use tree_sitter_utils::traversal::{ancestor_of_kind, find_node_by_offset};
 
 #[derive(Clone)]
 pub struct RequestAnalysisState {
@@ -103,6 +106,20 @@ fn enrich_java_semantic_context(
     existing_imports: Vec<Arc<str>>,
     analysis: Option<&RequestAnalysisState>,
 ) -> SemanticContext {
+    let source = file.content(db);
+    let rope = ropey::Rope::from_str(source);
+    let tree = crate::language::java::make_java_parser()
+        .parse(source, None)
+        .expect("java completion conversion parse");
+    let root = tree.root_node();
+    let extractor = JavaContextExtractor::with_rope(
+        Arc::<str>::from(source.as_str()),
+        data.cursor_offset.min(source.len()),
+        rope,
+        None,
+    );
+    let cursor_node = extractor.find_cursor_node(root);
+
     let members = workspace
         .map(|ws| fetch_class_members_from_workspace(db, file, ws, data.cursor_offset))
         .unwrap_or_default();
@@ -127,27 +144,42 @@ fn enrich_java_semantic_context(
     }
     let type_ctx = Arc::new(type_ctx.with_current_class_methods(method_map));
 
-    let static_imports = fetch_static_imports(db, file);
-    let is_class_member_position = detect_java_class_member_position(db, file, data.cursor_offset);
-    let enclosing_class_member =
-        detect_java_enclosing_member(db, file, data.cursor_offset, &type_ctx);
-    let char_after_cursor = compute_char_after_cursor(file.content(db), data.cursor_offset);
-    let statement_labels = infer_statement_labels(&ctx.location);
-    let active_lambda_param_names = infer_lambda_params(&ctx.location);
-
-    let mut flow_type_overrides = HashMap::new();
-    if let CursorLocation::MemberAccess {
-        receiver_type: Some(receiver_type),
-        receiver_expr,
-        ..
-    } = &ctx.location
-        && !receiver_expr.is_empty()
+    let mut local_variables = ctx.local_variables.clone();
+    for lambda_local in
+        locals::extract_active_lambda_params(&extractor, cursor_node, Some(&type_ctx))
     {
-        flow_type_overrides.insert(
-            Arc::from(receiver_expr.as_str()),
-            TypeName::new(Arc::clone(receiver_type)),
-        );
+        if !local_variables
+            .iter()
+            .any(|existing| existing.name == lambda_local.name)
+        {
+            local_variables.push(lambda_local);
+        }
     }
+
+    let static_imports = fetch_static_imports(db, file);
+    let is_class_member_position = scope::is_cursor_in_class_member_position(cursor_node);
+    let enclosing_class_member = cursor_node
+        .and_then(|n| ancestor_of_kind(n, "method_declaration"))
+        .or_else(|| find_node_by_offset(root, "method_declaration", data.cursor_offset))
+        .or_else(|| {
+            crate::language::java::utils::find_enclosing_method_in_error(root, data.cursor_offset)
+        })
+        .and_then(|m| members::parse_method_node(&extractor, &type_ctx, m));
+    let char_after_cursor = compute_char_after_cursor(file.content(db), data.cursor_offset);
+    let statement_labels = scope::extract_enclosing_statement_labels(&extractor, cursor_node);
+    let active_lambda_param_names =
+        locals::extract_active_lambda_param_names(&extractor, cursor_node);
+    let functional_target_hint =
+        crate::language::java::location::infer_functional_target_hint(&extractor, cursor_node);
+    let flow_type_overrides = flow::extract_instanceof_true_branch_overrides(
+        &extractor,
+        cursor_node,
+        &type_ctx,
+        &local_variables,
+    );
+
+    let mut ctx = ctx;
+    ctx.local_variables = local_variables;
 
     ctx.with_static_imports(static_imports)
         .with_class_member_position(is_class_member_position)
@@ -156,6 +188,7 @@ fn enrich_java_semantic_context(
         .with_char_after_cursor(char_after_cursor)
         .with_statement_labels(statement_labels)
         .with_active_lambda_param_names(active_lambda_param_names)
+        .with_functional_target_hint(functional_target_hint)
         .with_flow_type_overrides(flow_type_overrides)
         .with_extension(type_ctx)
 }
@@ -177,83 +210,10 @@ fn fetch_static_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str>> {
         .collect()
 }
 
-fn detect_java_class_member_position(db: &dyn Db, file: SourceFile, cursor_offset: usize) -> bool {
-    let content = file.content(db);
-    let before = &content[..cursor_offset.min(content.len())];
-    let line = before.rsplit('\n').next().unwrap_or("").trim();
-    if line.is_empty() {
-        return true;
-    }
-    !(line.contains('=') || line.contains('(') || line.contains("return") || line.contains("if "))
-}
-
-fn detect_java_enclosing_member(
-    db: &dyn Db,
-    file: SourceFile,
-    cursor_offset: usize,
-    type_ctx: &Arc<SourceTypeCtx>,
-) -> Option<CurrentClassMember> {
-    let content = file.content(db);
-    let before = &content[..cursor_offset.min(content.len())];
-    let method_name = before.lines().rev().find_map(|line| {
-        let line = line.trim();
-        if !line.contains('(') || line.ends_with(';') {
-            return None;
-        }
-        let prefix = line.split('(').next()?.split_whitespace().last()?;
-        if prefix
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            Some(prefix.to_string())
-        } else {
-            None
-        }
-    })?;
-
-    Some(CurrentClassMember::Method(Arc::new(MethodSummary {
-        name: Arc::from(method_name),
-        params: MethodParams::empty(),
-        annotations: Vec::new(),
-        access_flags: 0,
-        is_synthetic: false,
-        generic_signature: None,
-        return_type: Some(Arc::from(type_ctx.resolve_simple("void"))),
-    })))
-}
-
 fn compute_char_after_cursor(content: &str, cursor_offset: usize) -> Option<char> {
     content[cursor_offset.min(content.len())..]
         .chars()
         .find(|c| !(c.is_alphanumeric() || *c == '_'))
-}
-
-fn infer_statement_labels(location: &CursorLocation) -> Vec<StatementLabel> {
-    match location {
-        CursorLocation::StatementLabel { kind, prefix } if !prefix.is_empty() => {
-            vec![StatementLabel {
-                name: Arc::from(prefix.as_str()),
-                target_kind: match kind {
-                    crate::semantic::context::StatementLabelCompletionKind::Break => {
-                        StatementLabelTargetKind::Block
-                    }
-                    crate::semantic::context::StatementLabelCompletionKind::Continue => {
-                        StatementLabelTargetKind::For
-                    }
-                },
-            }]
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn infer_lambda_params(location: &CursorLocation) -> Vec<Arc<str>> {
-    match location {
-        CursorLocation::MethodArgument { prefix } if !prefix.is_empty() => {
-            vec![Arc::from(prefix.as_str())]
-        }
-        _ => Vec::new(),
-    }
 }
 
 fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {
@@ -290,6 +250,31 @@ fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {
         },
         CursorLocationData::MethodArgument { prefix, .. } => CursorLocation::MethodArgument {
             prefix: prefix.to_string(),
+        },
+        CursorLocationData::ConstructorCall {
+            class_prefix,
+            expected_type,
+        } => CursorLocation::ConstructorCall {
+            class_prefix: class_prefix.to_string(),
+            expected_type: expected_type.as_ref().map(|s| s.to_string()),
+        },
+        CursorLocationData::TypeAnnotation { prefix } => CursorLocation::TypeAnnotation {
+            prefix: prefix.to_string(),
+        },
+        CursorLocationData::VariableName { type_name } => CursorLocation::VariableName {
+            type_name: type_name.to_string(),
+        },
+        CursorLocationData::StringLiteral { prefix } => CursorLocation::StringLiteral {
+            prefix: prefix.to_string(),
+        },
+        CursorLocationData::MethodReference {
+            qualifier_expr,
+            member_prefix,
+            is_constructor,
+        } => CursorLocation::MethodReference {
+            qualifier_expr: qualifier_expr.to_string(),
+            member_prefix: member_prefix.to_string(),
+            is_constructor: *is_constructor,
         },
         CursorLocationData::Annotation { prefix } => CursorLocation::Annotation {
             prefix: prefix.to_string(),

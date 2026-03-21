@@ -7,7 +7,6 @@ use super::Language;
 use super::ts_utils::{capture_text, run_query};
 use crate::completion::CompletionCandidate;
 use crate::completion::provider::CompletionProvider;
-use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::semantic::{CursorLocation, LocalVar, SemanticContext, types::type_name::TypeName};
 
 #[derive(Debug)]
@@ -30,25 +29,6 @@ impl Language for KotlinLanguage {
             .set_language(&tree_sitter_kotlin::LANGUAGE.into())
             .expect("failed to load kotlin grammar");
         parser
-    }
-
-    fn parse_completion_context(
-        &self,
-        source: &str,
-        line: u32,
-        character: u32,
-        trigger_char: Option<char>,
-    ) -> Option<SemanticContext> {
-        let rope = Rope::from_str(source);
-        let offset = rope_line_col_to_offset(&rope, line, character)?;
-        debug!(line, character, trigger = ?trigger_char, "kotlin: parsing context");
-
-        let mut parser = self.make_parser();
-        let tree = parser.parse(source, None)?;
-        let root = tree.root_node();
-        Some(
-            KotlinContextExtractor::new_with_rope(source, offset, rope).extract(root, trigger_char),
-        )
     }
 
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
@@ -125,6 +105,20 @@ impl Language for KotlinLanguage {
             range.end.character,
         ))
     }
+}
+
+pub(crate) fn extract_kotlin_semantic_context_for_test(
+    source: &str,
+    line: u32,
+    character: u32,
+    trigger_char: Option<char>,
+) -> Option<SemanticContext> {
+    let rope = Rope::from_str(source);
+    let offset = crate::language::rope_utils::rope_line_col_to_offset(&rope, line, character)?;
+    let mut parser = KotlinLanguage.make_parser();
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    Some(KotlinContextExtractor::new_with_rope(source, offset, rope).extract(root, trigger_char))
 }
 
 struct KotlinContextExtractor<'s> {
@@ -624,12 +618,11 @@ pub fn kotlin_type_to_internal(ty: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::language::test_helpers::completion_context_from_source;
     use crate::semantic::context::CursorLocation;
 
     fn at(src: &str, line: u32, col: u32) -> SemanticContext {
-        KotlinLanguage
-            .parse_completion_context(src, line, col, None)
-            .unwrap()
+        completion_context_from_source("kotlin", src, line, col, None)
     }
 
     #[test]

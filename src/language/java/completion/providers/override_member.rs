@@ -272,10 +272,9 @@ mod tests {
     use crate::index::{
         ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
     };
-    use crate::language::{Language, ParseEnv, java::JavaLanguage};
+    use crate::language::test_helpers::completion_context_from_marked_source;
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
-    use ropey::Rope;
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC};
     use std::sync::Arc;
 
@@ -373,38 +372,7 @@ mod tests {
     }
 
     fn ctx_from_marked_source(src_with_cursor: &str) -> SemanticContext {
-        let cursor_byte = src_with_cursor
-            .find('|')
-            .expect("expected | cursor marker in source");
-        let src = src_with_cursor.replacen('|', "", 1);
-        let rope = Rope::from_str(&src);
-        let cursor_char = rope.byte_to_char(cursor_byte);
-        let line = rope.char_to_line(cursor_char) as u32;
-        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
-
-        let mut parser = crate::language::java::make_java_parser();
-        let tree = parser.parse(&src, None).expect("failed to parse java");
-
-        JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src,
-                    Some(tree),
-                ),
-                line,
-                col,
-                None,
-                &ParseEnv {
-                    name_table: None,
-                    view: None,
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("context extraction should succeed")
+        completion_context_from_marked_source("java", src_with_cursor, None)
     }
 
     #[test]

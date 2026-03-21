@@ -183,39 +183,6 @@ class User {
             other => panic!("expected MemberAccess, got {other:?}"),
         }
     }
-
-    #[test]
-    fn test_extract_java_context_keeps_new_prefix_as_expression() {
-        let db = Database::default();
-        let uri = Url::parse("file:///test/InvalidationTest.java").unwrap();
-        let content = r#"
-class InvalidationTest {
-    void method() {
-        String v = new
-    }
-}
-"#;
-        let rope = Rope::from_str(content);
-        let byte_offset = content.rfind("new").unwrap() + "new".len();
-        let char_idx = rope.byte_to_char(byte_offset);
-        let line = rope.char_to_line(char_idx) as u32;
-        let character = (char_idx - rope.line_to_char(line as usize)) as u32;
-        let file = SourceFile::new(
-            &db,
-            FileId::new(uri),
-            content.to_string(),
-            Arc::from("java"),
-        );
-
-        let ctx = extract_java_completion_context(&db, file, line, character, None);
-
-        match &ctx.location {
-            CursorLocationData::Expression { prefix } => {
-                assert_eq!(prefix.as_ref(), "new");
-            }
-            other => panic!("expected Expression, got {other:?}"),
-        }
-    }
 }
 
 // ============================================================================
@@ -259,7 +226,12 @@ pub fn extract_java_completion_context(
     let package = super::parse::extract_package(db, file);
     let imports = super::parse::extract_imports(db, file);
     let enclosing_class = find_java_enclosing_class_name(db, file, offset);
-    let enclosing_internal_name = build_internal_name(&package, &enclosing_class);
+    let enclosing_internal_name = crate::language::java::scope::extract_enclosing_internal_name(
+        &extractor,
+        cursor_node,
+        package.as_ref(),
+    )
+    .or_else(|| build_internal_name(&package, &enclosing_class));
 
     // Count locals (cached)
     let local_var_count = count_java_locals_in_scope(db, file, offset);
@@ -318,40 +290,31 @@ fn convert_rich_location(location: &CursorLocation) -> CursorLocationData {
             method_name: None,
             arg_index: None,
         },
-        CursorLocation::ConstructorCall { class_prefix, .. } => CursorLocationData::Expression {
-            prefix: if class_prefix.is_empty() {
-                Arc::from("new")
-            } else {
-                Arc::from(class_prefix.as_str())
-            },
+        CursorLocation::ConstructorCall {
+            class_prefix,
+            expected_type,
+        } => CursorLocationData::ConstructorCall {
+            class_prefix: Arc::from(class_prefix.as_str()),
+            expected_type: expected_type.as_deref().map(Arc::from),
         },
-        CursorLocation::TypeAnnotation { prefix } => CursorLocationData::Expression {
+        CursorLocation::TypeAnnotation { prefix } => CursorLocationData::TypeAnnotation {
             prefix: Arc::from(prefix.as_str()),
         },
-        CursorLocation::VariableName { type_name } => CursorLocationData::Expression {
-            prefix: Arc::from(type_name.as_str()),
+        CursorLocation::VariableName { type_name } => CursorLocationData::VariableName {
+            type_name: Arc::from(type_name.as_str()),
         },
-        CursorLocation::StringLiteral { prefix } => CursorLocationData::Expression {
+        CursorLocation::StringLiteral { prefix } => CursorLocationData::StringLiteral {
             prefix: Arc::from(prefix.as_str()),
         },
         CursorLocation::MethodReference {
             qualifier_expr,
             member_prefix,
             is_constructor,
-        } => {
-            if *is_constructor {
-                CursorLocationData::Expression {
-                    prefix: Arc::from(qualifier_expr.as_str()),
-                }
-            } else {
-                CursorLocationData::MemberAccess {
-                    receiver_expr: Arc::from(qualifier_expr.as_str()),
-                    member_prefix: Arc::from(member_prefix.as_str()),
-                    receiver_type_hint: None,
-                    arguments: None,
-                }
-            }
-        }
+        } => CursorLocationData::MethodReference {
+            qualifier_expr: Arc::from(qualifier_expr.as_str()),
+            member_prefix: Arc::from(member_prefix.as_str()),
+            is_constructor: *is_constructor,
+        },
         CursorLocation::Annotation { prefix, .. } => CursorLocationData::Annotation {
             prefix: Arc::from(prefix.as_str()),
         },

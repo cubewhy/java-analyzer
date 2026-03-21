@@ -43,9 +43,8 @@ mod tests {
         ClassMetadata, ClassOrigin, IndexScope, MethodSummary, ModuleId, WorkspaceIndex,
     };
     use crate::language::java::completion_context::ContextEnricher;
-    use crate::language::java::make_java_parser;
     use crate::language::java::type_ctx::SourceTypeCtx;
-    use crate::language::{JavaLanguage, Language, ParseEnv};
+    use crate::language::test_helpers::completion_context_from_marked_source_with_view;
     use crate::semantic::context::CursorLocation;
     use std::sync::Arc;
 
@@ -127,36 +126,19 @@ mod tests {
     }
 
     fn complete(src: &str) -> (crate::semantic::SemanticContext, Vec<CompletionCandidate>) {
-        let marker = src.find('|').expect("marker");
-        let source = src.replacen('|', "", 1);
-        let rope = ropey::Rope::from_str(&source);
-        let mut parser = make_java_parser();
-        let tree = parser.parse(&source, None).expect("parse");
-        let line = rope.byte_to_line(marker);
-        let col = marker - rope.line_to_byte(line);
         let idx = make_index();
         let view = idx.view(root_scope());
         let name_table = view.build_name_table();
-        let mut ctx = JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    source,
-                    Some(tree),
-                ),
-                line as u32,
-                col as u32,
-                Some('.'),
-                &ParseEnv::default(),
+        let mut ctx =
+            completion_context_from_marked_source_with_view("java", src, Some('.'), &view);
+        ctx = ctx.with_extension(Arc::new(
+            SourceTypeCtx::new(
+                Some(Arc::from("pkg")),
+                vec!["java.lang.*".into(), "pkg.*".into()],
+                Some(name_table),
             )
-            .expect("completion context");
-        ctx = ctx.with_extension(Arc::new(SourceTypeCtx::new(
-            Some(Arc::from("pkg")),
-            vec!["java.lang.*".into(), "pkg.*".into()],
-            Some(name_table),
-        )));
+            .with_view(view.clone()),
+        ));
         ContextEnricher::new(&view).enrich(&mut ctx);
         let out = IntrinsicMemberProvider
             .provide(root_scope(), &ctx, &view, None)

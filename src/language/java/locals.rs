@@ -556,6 +556,17 @@ pub(crate) fn extract_active_lambda_param_names(
     vec![]
 }
 
+pub(crate) fn extract_active_lambda_params(
+    ctx: &JavaContextExtractor,
+    cursor_node: Option<Node>,
+    type_ctx: Option<&SourceTypeCtx>,
+) -> Vec<LocalVar> {
+    extract_lambda_params(ctx, cursor_node, type_ctx)
+        .into_iter()
+        .map(|ranked| ranked.local)
+        .collect()
+}
+
 fn extract_active_lambda_names_from_error_arrow(
     ctx: &JavaContextExtractor,
     container: Node,

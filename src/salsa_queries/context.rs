@@ -37,6 +37,10 @@ pub enum CursorLocationData {
     Expression {
         prefix: Arc<str>,
     },
+    ConstructorCall {
+        class_prefix: Arc<str>,
+        expected_type: Option<Arc<str>>,
+    },
     MemberAccess {
         receiver_expr: Arc<str>,
         member_prefix: Arc<str>,
@@ -58,6 +62,20 @@ pub enum CursorLocationData {
         prefix: Arc<str>,
         method_name: Option<Arc<str>>,
         arg_index: Option<usize>,
+    },
+    TypeAnnotation {
+        prefix: Arc<str>,
+    },
+    VariableName {
+        type_name: Arc<str>,
+    },
+    StringLiteral {
+        prefix: Arc<str>,
+    },
+    MethodReference {
+        qualifier_expr: Arc<str>,
+        member_prefix: Arc<str>,
+        is_constructor: bool,
     },
     Annotation {
         prefix: Arc<str>,

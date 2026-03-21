@@ -57,31 +57,6 @@ pub trait Language: Send + Sync + std::fmt::Debug {
         parser.parse(source, old_tree)
     }
 
-    #[deprecated]
-    fn parse_completion_context(
-        &self,
-        _source: &str,
-        _line: u32,
-        _character: u32,
-        _trigger_char: Option<char>,
-    ) -> Option<SemanticContext> {
-        None
-    }
-
-    #[allow(deprecated)]
-    /// build completion context using an existing syntax tree
-    fn parse_completion_context_with_tree(
-        &self,
-        file: &SourceFile,
-        line: u32,
-        character: u32,
-        trigger_char: Option<char>,
-        _env: &ParseEnv,
-    ) -> Option<SemanticContext> {
-        // Default fallback: reparse (keeps other languages working)
-        self.parse_completion_context(file.text(), line, character, trigger_char)
-    }
-
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
         &[]
     }
@@ -372,4 +347,165 @@ fn utf16_units_in_rope_char_range(rope: &Rope, start_char: usize, end_char: usiz
         .chars()
         .map(|c| if (c as u32) >= 0x10000 { 2 } else { 1 })
         .sum()
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use std::sync::Arc;
+
+    use tower_lsp::lsp_types::Url;
+
+    use crate::index::{ClassOrigin, IndexScope, IndexView, ModuleId};
+    use crate::language::java::type_ctx::SourceTypeCtx;
+    use crate::lsp::request_context::PreparedRequest;
+    use crate::semantic::SemanticContext;
+    use crate::workspace::document::Document;
+    use crate::workspace::{SourceFile, Workspace};
+
+    use super::{LanguageRegistry, ParseEnv};
+
+    pub(crate) fn completion_context_from_source(
+        language_id: &str,
+        source: &str,
+        line: u32,
+        character: u32,
+        trigger_char: Option<char>,
+    ) -> SemanticContext {
+        if language_id == "java" {
+            return crate::language::java::extract_java_semantic_context_for_test(
+                source,
+                line,
+                character,
+                trigger_char,
+                &ParseEnv {
+                    name_table: None,
+                    view: None,
+                    workspace: None,
+                    metrics: None,
+                },
+            )
+            .expect("java semantic context");
+        }
+        if language_id == "kotlin" {
+            return crate::language::kotlin::extract_kotlin_semantic_context_for_test(
+                source,
+                line,
+                character,
+                trigger_char,
+            )
+            .expect("kotlin semantic context");
+        }
+
+        let registry = LanguageRegistry::new();
+        let workspace = Arc::new(Workspace::new());
+        let uri = Url::parse(&format!("file:///test.{language_id}")).expect("test uri");
+        let lang = registry.find(language_id).expect("language registered");
+        let tree = lang.parse_tree(source, None);
+        if language_id == "java" {
+            let parsed = crate::language::java::class_parser::parse_java_source(
+                source,
+                ClassOrigin::SourceFile(Arc::from(uri.as_str())),
+                None,
+            );
+            workspace.index.write().add_classes(parsed);
+        }
+        workspace.documents.open(Document::new(SourceFile::new(
+            uri.clone(),
+            language_id,
+            1,
+            source.to_owned(),
+            tree,
+        )));
+
+        let request =
+            PreparedRequest::prepare(Arc::clone(&workspace), &registry, &uri, "test_completion")
+                .expect("prepared request");
+        request
+            .semantic_context(
+                tower_lsp::lsp_types::Position::new(line, character),
+                trigger_char,
+            )
+            .expect("semantic context")
+    }
+
+    pub(crate) fn completion_context_from_marked_source(
+        language_id: &str,
+        marked_source: &str,
+        trigger_char: Option<char>,
+    ) -> SemanticContext {
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = ropey::Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let col = (marker - rope.line_to_byte(line as usize)) as u32;
+        completion_context_from_source(language_id, &source, line, col, trigger_char)
+    }
+
+    pub(crate) fn completion_context_from_source_with_view(
+        language_id: &str,
+        source: &str,
+        line: u32,
+        character: u32,
+        trigger_char: Option<char>,
+        view: &IndexView,
+    ) -> SemanticContext {
+        if language_id == "java" {
+            return crate::language::java::extract_java_semantic_context_for_test(
+                source,
+                line,
+                character,
+                trigger_char,
+                &ParseEnv {
+                    name_table: Some(view.build_name_table()),
+                    view: Some(view.clone()),
+                    workspace: None,
+                    metrics: None,
+                },
+            )
+            .expect("java semantic context with view");
+        }
+
+        let registry = LanguageRegistry::new();
+        let mut ctx =
+            completion_context_from_source(language_id, source, line, character, trigger_char);
+        if language_id == "java" {
+            let lang = registry.find(language_id).expect("language registered");
+            let base_package = ctx.enclosing_package.clone();
+            let base_imports = ctx.existing_imports.clone();
+            let type_ctx = Arc::new(
+                SourceTypeCtx::new(base_package, base_imports, Some(view.build_name_table()))
+                    .with_view(view.clone()),
+            );
+            ctx = ctx.with_extension(type_ctx);
+            lang.enrich_completion_context(&mut ctx, root_scope(), view);
+        }
+        ctx
+    }
+
+    pub(crate) fn completion_context_from_marked_source_with_view(
+        language_id: &str,
+        marked_source: &str,
+        trigger_char: Option<char>,
+        view: &IndexView,
+    ) -> SemanticContext {
+        let marker = marked_source.find('|').expect("cursor marker");
+        let source = marked_source.replacen('|', "", 1);
+        let rope = ropey::Rope::from_str(&source);
+        let line = rope.byte_to_line(marker) as u32;
+        let col = (marker - rope.line_to_byte(line as usize)) as u32;
+        completion_context_from_source_with_view(
+            language_id,
+            &source,
+            line,
+            col,
+            trigger_char,
+            view,
+        )
+    }
+
+    pub(crate) fn root_scope() -> IndexScope {
+        IndexScope {
+            module: ModuleId::ROOT,
+        }
+    }
 }

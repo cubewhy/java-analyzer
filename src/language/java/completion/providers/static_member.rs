@@ -285,8 +285,7 @@ mod tests {
     use crate::index::{
         ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
     };
-    use crate::language::java::make_java_parser;
-    use crate::language::{JavaLanguage, Language, ParseEnv};
+    use crate::language::test_helpers::completion_context_from_source;
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
     use std::sync::Arc;
@@ -302,26 +301,7 @@ mod tests {
     }
 
     fn at_with_trigger(src: &str, line: u32, col: u32, trigger: Option<char>) -> SemanticContext {
-        let _rope = ropey::Rope::from_str(src);
-
-        let mut parser = make_java_parser();
-        let tree = parser.parse(src, None).expect("failed to parse java");
-
-        JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src,
-                    Some(tree),
-                ),
-                line,
-                col,
-                trigger,
-                &ParseEnv::default(),
-            )
-            .expect("parse_completion_context_with_tree returned None")
+        completion_context_from_source("java", src, line, col, trigger)
     }
 
     fn make_method(name: &str, descriptor: &str, flags: u16, is_synthetic: bool) -> MethodSummary {

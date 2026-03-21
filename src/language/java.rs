@@ -114,47 +114,6 @@ impl Language for JavaLanguage {
         make_java_parser()
     }
 
-    fn parse_completion_context_with_tree(
-        &self,
-        file: &SourceFile,
-        line: u32,
-        character: u32,
-        trigger_char: Option<char>,
-        env: &ParseEnv,
-    ) -> Option<SemanticContext> {
-        let offset = rope_line_col_to_offset(&file.rope, line, character)?;
-        tracing::debug!(line, character, trigger = ?trigger_char, "java: parsing context (cached tree)");
-        let mut extractor = JavaContextExtractor::with_rope(
-            file.text().to_string(),
-            offset,
-            (*file.rope).clone(),
-            env.name_table.clone(),
-        );
-        if let Some(view) = env.view.clone() {
-            extractor = extractor.with_view(view);
-        }
-
-        // Set workspace and file URI if available for incremental parsing
-        if let Some(workspace) = env.workspace.clone() {
-            extractor = extractor.with_workspace(workspace);
-        }
-        extractor = extractor.with_file_uri(Arc::from(file.uri.as_str()));
-
-        if extractor.is_in_comment() {
-            return Some(SemanticContext::new(
-                CursorLocation::Unknown,
-                "",
-                vec![],
-                None,
-                None,
-                None,
-                vec![],
-            ));
-        }
-        let root = file.root_node()?;
-        Some(extractor.extract(root, trigger_char))
-    }
-
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
         &JAVA_COMPLETION_PROVIDERS
     }
@@ -379,6 +338,52 @@ impl Language for JavaLanguage {
             range.end.character,
         ))
     }
+}
+
+pub(crate) fn extract_java_semantic_context_for_test(
+    source: &str,
+    line: u32,
+    character: u32,
+    trigger_char: Option<char>,
+    env: &ParseEnv,
+) -> Option<SemanticContext> {
+    let mut parser = make_java_parser();
+    let tree = parser.parse(source, None)?;
+    let rope = Rope::from_str(source);
+    let offset = rope_line_col_to_offset(&rope, line, character)?;
+    let file = crate::workspace::SourceFile::new(
+        tower_lsp::lsp_types::Url::parse("file:///test.java").ok()?,
+        "java",
+        0,
+        source.to_owned(),
+        Some(tree),
+    );
+    let mut extractor = JavaContextExtractor::with_rope(
+        file.text().to_string(),
+        offset,
+        (*file.rope).clone(),
+        env.name_table.clone(),
+    );
+    if let Some(view) = env.view.clone() {
+        extractor = extractor.with_view(view);
+    }
+    if let Some(workspace) = env.workspace.clone() {
+        extractor = extractor.with_workspace(workspace);
+    }
+    extractor = extractor.with_file_uri(Arc::from(file.uri.as_str()));
+    if extractor.is_in_comment() {
+        return Some(SemanticContext::new(
+            CursorLocation::Unknown,
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        ));
+    }
+    let root = file.root_node()?;
+    Some(extractor.extract(root, trigger_char))
 }
 
 fn is_annotation_name(node: Node) -> bool {
@@ -928,6 +933,10 @@ mod tests {
             ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
             WorkspaceIndex,
         },
+        language::test_helpers::{
+            completion_context_from_marked_source_with_view, completion_context_from_source,
+            completion_context_from_source_with_view,
+        },
         language::{java::class_parser::parse_java_source, rope_utils::line_col_to_offset},
         semantic::{
             LocalVar,
@@ -946,31 +955,7 @@ mod tests {
     }
 
     fn at_with_trigger(src: &str, line: u32, col: u32, trigger: Option<char>) -> SemanticContext {
-        let _rope = ropey::Rope::from_str(src);
-
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(src, None).expect("failed to parse java");
-
-        super::JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src,
-                    Some(tree),
-                ),
-                line,
-                col,
-                trigger,
-                &ParseEnv {
-                    name_table: None,
-                    view: None,
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("parse_completion_context_with_tree returned None")
+        completion_context_from_source("java", src, line, col, trigger)
     }
 
     fn end_of(src: &str) -> SemanticContext {
@@ -1193,29 +1178,7 @@ mod tests {
         let cursor_char = rope.byte_to_char(cursor_byte);
         let line = rope.char_to_line(cursor_char) as u32;
         let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
-
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(&src, None).expect("failed to parse java");
-        let ctx = super::JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src,
-                    Some(tree),
-                ),
-                line,
-                col,
-                None,
-                &ParseEnv {
-                    name_table: Some(view.build_name_table()),
-                    view: Some(view.clone()),
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("parse_completion_context_with_tree returned None");
+        let ctx = completion_context_from_source_with_view("java", &src, line, col, None, view);
         let engine = CompletionEngine::new();
         let candidates = engine.complete(root_scope(), ctx.clone(), &JavaLanguage, view);
         (ctx, candidates)
@@ -4128,30 +4091,7 @@ mod tests {
             },
         ]);
         let view = idx.view(root_scope());
-        let _name_table = view.build_name_table();
-        let _rope = ropey::Rope::from_str(src);
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(src, None).expect("failed to parse java");
-        let ctx = super::JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src,
-                    Some(tree),
-                ),
-                line,
-                col,
-                None,
-                &ParseEnv {
-                    name_table: Some(view.build_name_table()),
-                    view: Some(view.clone()),
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("parse_completion_context_with_tree returned None");
+        let ctx = completion_context_from_source_with_view("java", src, line, col, None, &view);
         let engine = CompletionEngine::new();
         let results = engine.complete(root_scope(), ctx, &JavaLanguage, &view);
         let labels: Vec<&str> = results.iter().map(|c| c.label.as_ref()).collect();
@@ -4237,34 +4177,7 @@ mod tests {
             }
         }
         "#};
-        let cursor_byte = src.find('|').expect("expected |");
-        let src_no_cursor = src.replacen('|', "", 1);
-        let rope = ropey::Rope::from_str(&src_no_cursor);
-        let cursor_char = rope.byte_to_char(cursor_byte);
-        let line = rope.char_to_line(cursor_char) as u32;
-        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
-        let ctx = super::JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src_no_cursor,
-                    Some(tree),
-                ),
-                line,
-                col,
-                None,
-                &ParseEnv {
-                    name_table: Some(view.build_name_table()),
-                    view: Some(view.clone()),
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("parse_completion_context_with_tree returned None");
+        let ctx = completion_context_from_marked_source_with_view("java", src, None, &view);
         let results = CompletionEngine::new().complete(root_scope(), ctx, &JavaLanguage, &view);
         let a = results
             .iter()
@@ -4359,34 +4272,7 @@ mod tests {
             }
         }
         "#};
-        let cursor_byte = src.find('|').expect("expected |");
-        let src_no_cursor = src.replacen('|', "", 1);
-        let rope = ropey::Rope::from_str(&src_no_cursor);
-        let cursor_char = rope.byte_to_char(cursor_byte);
-        let line = rope.char_to_line(cursor_char) as u32;
-        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
-        let ctx = super::JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src_no_cursor,
-                    Some(tree),
-                ),
-                line,
-                col,
-                None,
-                &ParseEnv {
-                    name_table: Some(view.build_name_table()),
-                    view: Some(view.clone()),
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("parse_completion_context_with_tree returned None");
+        let ctx = completion_context_from_marked_source_with_view("java", src, None, &view);
         let results = CompletionEngine::new().complete(root_scope(), ctx, &JavaLanguage, &view);
         let b = results
             .iter()
@@ -5078,34 +4964,15 @@ mod tests {
             },
         ]);
         let view = idx.view(root_scope());
-        let cursor_byte = src.find('|').expect("expected |");
-        let src_no_cursor = src.replacen('|', "", 1);
-        let rope = ropey::Rope::from_str(&src_no_cursor);
-        let cursor_char = rope.byte_to_char(cursor_byte);
-        let line = rope.char_to_line(cursor_char) as u32;
-        let col = (cursor_char - rope.line_to_char(line as usize)) as u32;
-        let mut parser = super::make_java_parser();
-        let tree = parser.parse(&src_no_cursor, None).expect("failed to parse");
-        let mut ctx = super::JavaLanguage
-            .parse_completion_context_with_tree(
-                &crate::workspace::SourceFile::new(
-                    tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                    "",
-                    0,
-                    src_no_cursor,
-                    Some(tree),
-                ),
-                line,
-                col,
-                None,
-                &ParseEnv {
-                    name_table: Some(view.build_name_table()),
-                    view: Some(view.clone()),
-                    workspace: None,
-                    metrics: None,
-                },
-            )
-            .expect("parse_completion_context_with_tree returned None");
+        let mut ctx =
+            crate::language::test_helpers::completion_context_from_marked_source("java", src, None);
+        let base_package = ctx.enclosing_package.clone();
+        let base_imports = ctx.existing_imports.clone();
+        ctx = ctx.with_extension(Arc::new(SourceTypeCtx::new(
+            base_package,
+            base_imports,
+            Some(view.build_name_table()),
+        )));
         crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
         let type_ctx = ctx
             .extension::<crate::language::java::type_ctx::SourceTypeCtx>()
@@ -5891,31 +5758,9 @@ mod tests {
             .enumerate()
             .find_map(|(i, l)| l.find("Bo>").map(|c| (i as u32, c as u32 + 2)))
             .expect("List<Bo> marker");
-        let type_ctx = {
-            let _rope = ropey::Rope::from_str(src_type);
-            let mut parser = super::make_java_parser();
-            let tree = parser.parse(src_type, None).expect("parse");
-            super::JavaLanguage
-                .parse_completion_context_with_tree(
-                    &crate::workspace::SourceFile::new(
-                        tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                        "",
-                        0,
-                        src_type,
-                        Some(tree),
-                    ),
-                    type_line,
-                    type_col,
-                    None,
-                    &ParseEnv {
-                        name_table: Some(view.build_name_table()),
-                        view: Some(view.clone()),
-                        workspace: None,
-                        metrics: None,
-                    },
-                )
-                .expect("type ctx")
-        };
+        let type_ctx = completion_context_from_source_with_view(
+            "java", src_type, type_line, type_col, None, &view,
+        );
         let type_location = format!("{:?}", type_ctx.location);
         let mut type_labels: Vec<String> = engine
             .complete(root_scope(), type_ctx, &JavaLanguage, &view)
@@ -5943,31 +5788,9 @@ mod tests {
                     .map(|c| (i as u32, c as u32 + "new Bo".len() as u32))
             })
             .expect("new Bo marker");
-        let ctor_ctx = {
-            let _rope = ropey::Rope::from_str(src_ctor);
-            let mut parser = super::make_java_parser();
-            let tree = parser.parse(src_ctor, None).expect("parse");
-            super::JavaLanguage
-                .parse_completion_context_with_tree(
-                    &crate::workspace::SourceFile::new(
-                        tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                        "",
-                        0,
-                        src_ctor,
-                        Some(tree),
-                    ),
-                    ctor_line,
-                    ctor_col,
-                    None,
-                    &ParseEnv {
-                        name_table: Some(view.build_name_table()),
-                        view: Some(view.clone()),
-                        workspace: None,
-                        metrics: None,
-                    },
-                )
-                .expect("ctor ctx")
-        };
+        let ctor_ctx = completion_context_from_source_with_view(
+            "java", src_ctor, ctor_line, ctor_col, None, &view,
+        );
         let ctor_location = format!("{:?}", ctor_ctx.location);
         let mut ctor_labels: Vec<String> = engine
             .complete(root_scope(), ctor_ctx, &JavaLanguage, &view)
@@ -5992,31 +5815,9 @@ mod tests {
             .enumerate()
             .find_map(|(i, l)| l.find("Box<String>").map(|c| (i as u32, c as u32 + 2)))
             .expect("Box<String> marker");
-        let decl_ctx = {
-            let _rope = ropey::Rope::from_str(src_decl);
-            let mut parser = super::make_java_parser();
-            let tree = parser.parse(src_decl, None).expect("parse");
-            super::JavaLanguage
-                .parse_completion_context_with_tree(
-                    &crate::workspace::SourceFile::new(
-                        tower_lsp::lsp_types::Url::parse("file:///test").unwrap(),
-                        "",
-                        0,
-                        src_decl,
-                        Some(tree),
-                    ),
-                    decl_line,
-                    decl_col,
-                    None,
-                    &ParseEnv {
-                        name_table: Some(view.build_name_table()),
-                        view: Some(view.clone()),
-                        workspace: None,
-                        metrics: None,
-                    },
-                )
-                .expect("decl ctx")
-        };
+        let decl_ctx = completion_context_from_source_with_view(
+            "java", src_decl, decl_line, decl_col, None, &view,
+        );
         let decl_location = format!("{:?}", decl_ctx.location);
         let mut decl_labels: Vec<String> = engine
             .complete(root_scope(), decl_ctx, &JavaLanguage, &view)
