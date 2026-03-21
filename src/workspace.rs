@@ -168,6 +168,7 @@ impl Workspace {
                 // Update the existing Salsa input to match the current document snapshot.
                 drop(files); // Release read lock
                 self.update_existing_salsa_file(file, content, language_id);
+                self.seed_salsa_parse_tree_from_document(uri, file);
                 return Some(file);
             }
         }
@@ -175,6 +176,7 @@ impl Workspace {
         // Create new file
         let file = self.create_salsa_file(uri.clone(), content, language_id);
         self.salsa_files.write().insert(uri.clone(), file);
+        self.seed_salsa_parse_tree_from_document(uri, file);
         Some(file)
     }
 
@@ -502,12 +504,14 @@ impl Workspace {
 
         if let Some(file) = files.get(uri) {
             self.update_existing_salsa_file(*file, content.to_string(), language_id.to_string());
+            self.seed_salsa_parse_tree_from_document(uri, *file);
             *file
         } else {
             // Create new file
             let file =
                 self.create_salsa_file(uri.clone(), content.to_string(), language_id.to_string());
             files.insert(uri.clone(), file);
+            self.seed_salsa_parse_tree_from_document(uri, file);
             file
         }
     }
@@ -521,7 +525,16 @@ impl Workspace {
     /// Remove a Salsa SourceFile (e.g., when file is deleted)
     pub fn remove_salsa_file(&self, uri: &Url) {
         let mut files = self.salsa_files.write();
-        files.remove(uri);
+        let removed = files.remove(uri);
+        drop(files);
+
+        let Some(file) = removed else {
+            return;
+        };
+
+        let db = self.salsa_db.lock();
+        let file_id = file.file_id(&*db);
+        crate::salsa_queries::Db::remove_parse_tree(&*db, &file_id);
     }
 
     fn create_salsa_file(
@@ -549,6 +562,25 @@ impl Workspace {
         if file.language_id(&*db).as_ref() != language_id {
             file.set_language_id(&mut *db).to(Arc::from(language_id));
         }
+    }
+
+    fn seed_salsa_parse_tree_from_document(&self, uri: &Url, file: crate::salsa_db::SourceFile) {
+        let db = self.salsa_db.lock();
+        let tree = self
+            .documents
+            .with_doc(uri, |doc| {
+                let source = doc.source();
+                (source.text() == file.content(&*db)
+                    && source.language_id.as_ref() == file.language_id(&*db).as_ref())
+                .then(|| source.tree.as_deref().cloned())
+                .flatten()
+            })
+            .flatten();
+        let Some(tree) = tree else {
+            return;
+        };
+
+        crate::salsa_queries::parse::seed_parse_tree(&*db, file, &tree);
     }
 }
 
@@ -623,6 +655,7 @@ mod tests {
         DetectedBuildToolKind, JavaToolchainInfo, ModelFidelity, ModelFreshness,
         WorkspaceModelProvenance, WorkspaceModule, WorkspaceRoot, WorkspaceSourceRoot,
     };
+    use crate::salsa_db::ParseTreeOrigin;
     use crate::workspace::document::Document;
 
     #[test]
@@ -761,6 +794,38 @@ mod tests {
         let db = workspace.salsa_db.lock();
         assert_eq!(same_file.content(&*db), "class Test");
         assert_eq!(same_file.language_id(&*db).as_ref(), "kotlin");
+    }
+
+    #[test]
+    fn get_or_update_salsa_file_seeds_parse_cache_from_document_tree() {
+        let workspace = Workspace::new();
+        let uri = Url::parse("file:///workspace/Test.java").expect("valid uri");
+        let text = "class Test { void demo() {} }";
+        let mut parser = crate::language::java::make_java_parser();
+        let tree = parser.parse(text, None).expect("tree");
+
+        workspace
+            .documents
+            .open(Document::new(crate::workspace::SourceFile::new(
+                uri.clone(),
+                "java",
+                1,
+                text,
+                Some(tree),
+            )));
+
+        let file = workspace
+            .get_or_update_salsa_file(&uri)
+            .expect("salsa file should exist");
+
+        let db = workspace.salsa_db.lock();
+        let file_id = file.file_id(&*db);
+        let snapshot = db
+            .cached_parse_tree(&file_id)
+            .expect("parse snapshot should be seeded");
+
+        assert_eq!(snapshot.origin, ParseTreeOrigin::Seeded);
+        assert_eq!(snapshot.content.as_ref(), text);
     }
 }
 pub mod source_file;

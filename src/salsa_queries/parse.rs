@@ -1,11 +1,11 @@
 use super::Db;
-use crate::salsa_db::SourceFile;
+use crate::salsa_db::{ParseTreeOrigin, ParseTreeSnapshot, SourceFile};
 /// Parse queries - handle syntax tree parsing and basic extraction
 ///
 /// These queries are the foundation of incremental parsing. When a file's
 /// content changes, only these queries (and their dependents) are invalidated.
 use std::sync::Arc;
-use tree_sitter::{Parser, Tree};
+use tree_sitter::{InputEdit, Parser, Point, Tree};
 
 /// Metadata about a parsed syntax tree
 ///
@@ -27,26 +27,15 @@ pub struct ParseResult {
 #[salsa::tracked]
 pub fn parse_file(db: &dyn Db, file: SourceFile) -> ParseResult {
     let content = file.content(db);
-    let lang_id = file.language_id(db);
-
-    // Get the language implementation
-    let registry = crate::language::LanguageRegistry::new();
-    let lang = registry.find(lang_id.as_ref());
-
-    let (root_kind, has_error, node_count) = if let Some(lang) = lang {
-        let tree = lang.parse_tree(content, None);
-        if let Some(tree) = tree {
-            let root = tree.root_node();
-            (
-                Arc::from(root.kind()),
-                root.has_error(),
-                root.descendant_count(),
-            )
-        } else {
-            (Arc::from("error"), true, 0)
-        }
+    let (root_kind, has_error, node_count) = if let Some(tree) = parse_tree(db, file) {
+        let root = tree.root_node();
+        (
+            Arc::from(root.kind()),
+            root.has_error(),
+            root.descendant_count(),
+        )
     } else {
-        (Arc::from("unknown"), true, 0)
+        (Arc::from("error"), true, 0)
     };
 
     // Simple hash for change detection
@@ -64,6 +53,57 @@ pub fn parse_file(db: &dyn Db, file: SourceFile) -> ParseResult {
         node_count,
         content_hash,
     }
+}
+
+/// Parse a Salsa source file using the last cached tree when available.
+///
+/// The cache is stored outside Salsa because `tree_sitter::Tree` is not hashable,
+/// but it is still keyed by the stable Salsa file identity and current content.
+pub fn parse_tree(db: &dyn Db, file: SourceFile) -> Option<Tree> {
+    let content = file.content(db);
+    let language_id = file.language_id(db);
+    let file_id = file.file_id(db).clone();
+    let cached = db.cached_parse_tree(&file_id);
+
+    if let Some(snapshot) = cached.as_ref()
+        && snapshot.content.as_ref() == content
+        && snapshot.language_id.as_ref() == language_id.as_ref()
+    {
+        return Some(snapshot.tree.clone());
+    }
+
+    let tree = parse_tree_from_snapshot(content, language_id.as_ref(), cached.as_ref());
+    match tree {
+        Some((tree, origin)) => {
+            db.store_parse_tree(
+                file_id,
+                ParseTreeSnapshot {
+                    content: Arc::from(content.as_str()),
+                    language_id: Arc::clone(&language_id),
+                    tree: tree.clone(),
+                    origin,
+                },
+            );
+            Some(tree)
+        }
+        None => {
+            db.remove_parse_tree(&file_id);
+            None
+        }
+    }
+}
+
+/// Seed the parse cache with an already-computed tree, typically from the LSP document path.
+pub fn seed_parse_tree(db: &dyn Db, file: SourceFile, tree: &Tree) {
+    db.store_parse_tree(
+        file.file_id(db).clone(),
+        ParseTreeSnapshot {
+            content: Arc::from(file.content(db).as_str()),
+            language_id: file.language_id(db),
+            tree: tree.clone(),
+            origin: ParseTreeOrigin::Seeded,
+        },
+    );
 }
 
 /// Extract package declaration from a source file
@@ -108,6 +148,36 @@ pub fn extract_imports(db: &dyn Db, file: SourceFile) -> Arc<Vec<Arc<str>>> {
 /// This is NOT a Salsa query because Tree doesn't implement the required traits.
 /// Instead, we parse on-demand when needed by Salsa queries.
 pub fn parse_tree_for_language(content: &str, language_id: &str) -> Option<Tree> {
+    let mut parser = parser_for_language(language_id)?;
+    parser.parse(content, None)
+}
+
+fn parse_tree_from_snapshot(
+    content: &str,
+    language_id: &str,
+    cached: Option<&ParseTreeSnapshot>,
+) -> Option<(Tree, ParseTreeOrigin)> {
+    let mut parser = parser_for_language(language_id)?;
+
+    if let Some(snapshot) = cached
+        && snapshot.language_id.as_ref() == language_id
+    {
+        let mut old_tree = snapshot.tree.clone();
+        if snapshot.content.as_ref() != content {
+            old_tree.edit(&compute_input_edit(snapshot.content.as_ref(), content));
+        }
+
+        if let Some(tree) = parser.parse(content, Some(&old_tree)) {
+            return Some((tree, ParseTreeOrigin::Incremental));
+        }
+    }
+
+    parser
+        .parse(content, None)
+        .map(|tree| (tree, ParseTreeOrigin::Full))
+}
+
+fn parser_for_language(language_id: &str) -> Option<Parser> {
     let mut parser = Parser::new();
 
     match language_id {
@@ -124,7 +194,54 @@ pub fn parse_tree_for_language(content: &str, language_id: &str) -> Option<Tree>
         _ => return None,
     }
 
-    parser.parse(content, None)
+    Some(parser)
+}
+
+fn compute_input_edit(old_content: &str, new_content: &str) -> InputEdit {
+    let prefix = common_prefix_len(old_content, new_content);
+    let old_suffix = common_suffix_len(&old_content[prefix..], &new_content[prefix..]);
+    let old_end_byte = old_content.len() - old_suffix;
+    let new_end_byte = new_content.len() - old_suffix;
+
+    InputEdit {
+        start_byte: prefix,
+        old_end_byte,
+        new_end_byte,
+        start_position: point_for_offset(old_content, prefix),
+        old_end_position: point_for_offset(old_content, old_end_byte),
+        new_end_position: point_for_offset(new_content, new_end_byte),
+    }
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    left.chars()
+        .zip(right.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(ch, _)| ch.len_utf8())
+        .sum()
+}
+
+fn common_suffix_len(left: &str, right: &str) -> usize {
+    left.chars()
+        .rev()
+        .zip(right.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(ch, _)| ch.len_utf8())
+        .sum()
+}
+
+fn point_for_offset(source: &str, offset: usize) -> Point {
+    let mut row = 0usize;
+    let mut column = 0usize;
+    for byte in source.as_bytes().iter().take(offset) {
+        if *byte == b'\n' {
+            row += 1;
+            column = 0;
+        } else {
+            column += 1;
+        }
+    }
+    Point::new(row, column)
 }
 
 #[cfg(test)]
@@ -179,6 +296,58 @@ mod tests {
         let hash2 = result2.content_hash;
 
         assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_parse_tree_reuses_unchanged_method_subtree() {
+        use salsa::Setter;
+
+        let mut db = Database::default();
+        let uri = Url::parse("file:///test/Test.java").unwrap();
+        let original = r#"
+public class Test {
+    void stable() {
+        int x = 1;
+    }
+
+    void edited() {
+        int y = 2;
+    }
+}
+"#;
+        let updated = r#"
+public class Test {
+    void stable() {
+        int x = 1;
+    }
+
+    void edited() {
+        int y = 2;
+        int z = 3;
+    }
+}
+"#;
+        let file = SourceFile::new(
+            &db,
+            FileId::new(uri),
+            original.to_string(),
+            Arc::from("java"),
+        );
+
+        let _tree1 = parse_tree(&db, file).unwrap();
+        let file_id = file.file_id(&db);
+        let snapshot1 = db.cached_parse_tree(&file_id).unwrap();
+        assert_eq!(snapshot1.origin, ParseTreeOrigin::Full);
+
+        file.set_content(&mut db).to(updated.to_string());
+
+        let tree2 = parse_tree(&db, file).unwrap();
+        let snapshot2 = db.cached_parse_tree(&file_id).unwrap();
+
+        assert_eq!(snapshot2.origin, ParseTreeOrigin::Incremental);
+        assert!(
+            tree2.root_node().descendant_count() > snapshot1.tree.root_node().descendant_count()
+        );
     }
 
     #[test]

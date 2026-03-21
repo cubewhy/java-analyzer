@@ -78,10 +78,9 @@ pub fn find_local_variable_declaration(
     search_offset: usize,
 ) -> Option<usize> {
     let content = file.content(db);
-    let language_id = file.language_id(db);
 
     // Parse tree
-    let tree = super::parse::parse_tree_for_language(content, language_id.as_ref())?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     // Find all variable declarations before search_offset

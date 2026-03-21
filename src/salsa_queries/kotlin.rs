@@ -29,7 +29,7 @@ pub fn parse_kotlin_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata>
 /// Extract Kotlin package declaration
 pub fn extract_kotlin_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>> {
     let content = file.content(db);
-    let tree = super::parse::parse_tree_for_language(content, "kotlin")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
     let q = Query::new(
         &tree_sitter_kotlin::LANGUAGE.into(),
@@ -47,7 +47,7 @@ pub fn extract_kotlin_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>>
 /// Extract Kotlin imports
 pub fn extract_kotlin_imports(db: &dyn Db, file: SourceFile) -> Vec<Arc<str>> {
     let content = file.content(db);
-    let Some(tree) = super::parse::parse_tree_for_language(content, "kotlin") else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return vec![];
     };
     let root = tree.root_node();
@@ -98,7 +98,7 @@ pub fn extract_kotlin_completion_context(
     }
 
     // Parse tree
-    let Some(tree) = super::parse::parse_tree_for_language(content, "kotlin") else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return Arc::new(empty_context(db, file));
     };
 
@@ -364,7 +364,7 @@ pub fn find_kotlin_enclosing_class_name(
     offset: usize,
 ) -> Option<Arc<str>> {
     let content = file.content(db);
-    let tree = super::parse::parse_tree_for_language(content, "kotlin")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     // Find node at offset
@@ -401,8 +401,7 @@ pub fn count_kotlin_locals_in_scope(db: &dyn Db, file: SourceFile, offset: usize
     };
 
     // Count locals in range
-    let content = file.content(db);
-    let tree = super::parse::parse_tree_for_language(content, "kotlin");
+    let tree = super::parse::parse_tree(db, file);
     let Some(tree) = tree else {
         return 0;
     };
@@ -416,8 +415,7 @@ fn find_kotlin_enclosing_function_bounds(
     file: SourceFile,
     offset: usize,
 ) -> Option<(usize, usize)> {
-    let content = file.content(db);
-    let tree = super::parse::parse_tree_for_language(content, "kotlin")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     // Find node at offset
@@ -694,7 +692,7 @@ pub fn compute_kotlin_inlay_hints(
         }
     }
 
-    let Some(tree) = super::parse::parse_tree_for_language(content, "kotlin") else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return Arc::new(hints);
     };
 
@@ -729,7 +727,7 @@ pub fn infer_kotlin_variable_type(
     let content = file.content(db);
 
     // Parse tree
-    let tree = super::parse::parse_tree_for_language(content, "kotlin")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     // Find the property declaration at this offset
@@ -1115,7 +1113,7 @@ fn top_level_kotlin_function_param_names(
     arg_count: usize,
 ) -> Option<Vec<Arc<str>>> {
     let content = file.content(db);
-    let tree = super::parse::parse_tree_for_language(content, "kotlin")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     let mut cursor = root.walk();

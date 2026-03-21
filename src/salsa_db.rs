@@ -3,8 +3,10 @@
 /// This module provides the foundation for incremental parsing and analysis
 /// using the Salsa framework. It's designed to integrate with the existing
 /// Language trait and workspace infrastructure.
+use std::collections::HashMap;
 use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
+use tree_sitter::Tree;
 
 /// File identifier - wraps a URI for type safety
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -70,6 +72,23 @@ pub struct Module {
 pub struct JarFile {
     /// Path to the JAR file
     pub path: Arc<str>,
+}
+
+/// Latest parse snapshot retained for incremental tree-sitter reparses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseTreeOrigin {
+    Seeded,
+    Full,
+    Incremental,
+}
+
+/// Latest parse snapshot retained for incremental tree-sitter reparses.
+#[derive(Clone)]
+pub struct ParseTreeSnapshot {
+    pub content: Arc<str>,
+    pub language_id: Arc<str>,
+    pub tree: Tree,
+    pub origin: ParseTreeOrigin,
 }
 
 /// Tracked: Parsed syntax tree metadata for a source file
@@ -141,6 +160,7 @@ pub struct Database {
     storage: salsa::Storage<Self>,
     /// Reference to the workspace index for queries
     workspace_index: Option<Arc<parking_lot::RwLock<crate::index::WorkspaceIndex>>>,
+    parse_trees: parking_lot::RwLock<HashMap<FileId, ParseTreeSnapshot>>,
 }
 
 impl Database {
@@ -151,7 +171,20 @@ impl Database {
         Self {
             storage: Default::default(),
             workspace_index: Some(workspace_index),
+            parse_trees: Default::default(),
         }
+    }
+
+    pub fn cached_parse_tree(&self, file_id: &FileId) -> Option<ParseTreeSnapshot> {
+        self.parse_trees.read().get(file_id).cloned()
+    }
+
+    pub fn store_parse_tree(&self, file_id: FileId, snapshot: ParseTreeSnapshot) {
+        self.parse_trees.write().insert(file_id, snapshot);
+    }
+
+    pub fn remove_parse_tree(&self, file_id: &FileId) {
+        self.parse_trees.write().remove(file_id);
     }
 }
 
@@ -167,6 +200,18 @@ impl crate::salsa_queries::Db for Database {
             // This should only happen in tests
             Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()))
         })
+    }
+
+    fn cached_parse_tree(&self, file_id: &FileId) -> Option<ParseTreeSnapshot> {
+        Database::cached_parse_tree(self, file_id)
+    }
+
+    fn store_parse_tree(&self, file_id: FileId, snapshot: ParseTreeSnapshot) {
+        Database::store_parse_tree(self, file_id, snapshot);
+    }
+
+    fn remove_parse_tree(&self, file_id: &FileId) {
+        Database::remove_parse_tree(self, file_id);
     }
 }
 

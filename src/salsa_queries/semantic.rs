@@ -15,7 +15,7 @@ use crate::language::ts_utils::run_query;
 use crate::salsa_db::SourceFile;
 use crate::semantic::{LocalVar, types::type_name::TypeName};
 use std::{collections::HashSet, sync::Arc};
-use tree_sitter::{Node, Parser, Query, Tree};
+use tree_sitter::{Node, Query, Tree};
 use tree_sitter_utils::traversal::{
     ancestor_of_kind, ancestor_of_kinds, any_child_of_kind, first_child_of_kind,
     first_child_of_kinds,
@@ -34,28 +34,12 @@ pub struct CachedMethodLocal {
     visibility_scope: ScopeRange,
 }
 
-/// Helper to parse a tree from source content
-///
-/// This is NOT a Salsa query because Tree doesn't implement the required traits.
-/// Instead, we parse on-demand when needed by Salsa queries.
-fn parse_tree(content: &str, language_id: &str) -> Option<Tree> {
-    let mut parser = Parser::new();
+fn parse_source_tree(content: &str, language_id: &str) -> Option<Tree> {
+    crate::salsa_queries::parse::parse_tree_for_language(content, language_id)
+}
 
-    match language_id {
-        "java" => {
-            parser
-                .set_language(&tree_sitter_java::LANGUAGE.into())
-                .ok()?;
-        }
-        "kotlin" => {
-            parser
-                .set_language(&tree_sitter_kotlin::LANGUAGE.into())
-                .ok()?;
-        }
-        _ => return None,
-    }
-
-    parser.parse(content, None)
+fn parse_file_tree(db: &dyn crate::salsa_queries::Db, file: SourceFile) -> Option<Tree> {
+    crate::salsa_queries::parse::parse_tree(db, file)
 }
 
 /// Extract parsed method locals from a method (uses cache).
@@ -113,7 +97,7 @@ pub fn extract_visible_method_locals_from_source(
     cursor_offset: usize,
     type_ctx: Option<&SourceTypeCtx>,
 ) -> Vec<LocalVar> {
-    let Some(tree) = parse_tree(source, "java") else {
+    let Some(tree) = parse_source_tree(source, "java") else {
         return vec![];
     };
     let root = tree.root_node();
@@ -152,7 +136,7 @@ pub fn extract_active_lambda_param_names_from_source(
     source: &str,
     cursor_offset: usize,
 ) -> Vec<Arc<str>> {
-    let Some(tree) = parse_tree(source, "java") else {
+    let Some(tree) = parse_source_tree(source, "java") else {
         return vec![];
     };
     let root = tree.root_node();
@@ -234,7 +218,7 @@ fn extract_root_recovery_locals(
         return vec![];
     }
 
-    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
+    let Some(tree) = parse_file_tree(db, file) else {
         return vec![];
     };
     let root = tree.root_node();
@@ -283,7 +267,7 @@ fn parse_method_locals(
     }
 
     // Parse tree
-    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
+    let Some(tree) = parse_file_tree(db, file) else {
         return Vec::new();
     };
 
@@ -759,7 +743,7 @@ fn extract_active_lambda_params_incremental(
         return vec![];
     }
 
-    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
+    let Some(tree) = parse_file_tree(db, file) else {
         return vec![];
     };
     let root = tree.root_node();
@@ -1301,14 +1285,13 @@ pub fn extract_file_structure(
     let package = crate::salsa_queries::extract_package(db, file);
     let imports = crate::salsa_queries::extract_imports(db, file);
     let language_id = file.language_id(db);
-    let content = file.content(db);
 
     let static_import_count = match language_id.as_ref() {
         "java" => crate::salsa_queries::java::extract_java_static_imports(db, file).len(),
         _ => 0,
     };
 
-    let class_count = if let Some(tree) = parse_tree(content, language_id.as_ref()) {
+    let class_count = if let Some(tree) = parse_file_tree(db, file) {
         count_top_level_type_declarations(tree.root_node(), language_id.as_ref())
     } else {
         0
@@ -1379,7 +1362,6 @@ pub fn extract_method_locals_metadata(
     use std::hash::{Hash, Hasher};
 
     let content = file.content(db);
-    let language_id = file.language_id(db);
 
     // Hash the method content for change detection
     let method_content = if method_end <= content.len() {
@@ -1393,7 +1375,7 @@ pub fn extract_method_locals_metadata(
     let content_hash = hasher.finish();
 
     // Parse the tree and count the same cursor-agnostic locals we cache for completions.
-    let local_count = if let Some(tree) = parse_tree(content, language_id.as_ref()) {
+    let local_count = if let Some(tree) = parse_file_tree(db, file) {
         count_method_locals(tree.root_node(), content, method_start, method_end)
     } else {
         0
@@ -1471,7 +1453,6 @@ pub fn extract_class_members_metadata(
     use std::hash::{Hash, Hasher};
 
     let content = file.content(db);
-    let language_id = file.language_id(db);
 
     // Hash the class content for change detection
     let class_content = if class_end <= content.len() {
@@ -1485,8 +1466,7 @@ pub fn extract_class_members_metadata(
     let content_hash = hasher.finish();
 
     // Parse the tree and count methods/fields
-    let (method_count, field_count) = if let Some(tree) = parse_tree(content, language_id.as_ref())
-    {
+    let (method_count, field_count) = if let Some(tree) = parse_file_tree(db, file) {
         count_members_in_range(tree.root_node(), class_start, class_end)
     } else {
         (0, 0)
@@ -1598,11 +1578,8 @@ pub fn find_enclosing_method_bounds(
     file: SourceFile,
     cursor_offset: usize,
 ) -> Option<(usize, usize)> {
-    let content = file.content(db);
-    let language_id = file.language_id(db);
-
     // Parse the tree
-    let tree = parse_tree(content, language_id.as_ref())?;
+    let tree = parse_file_tree(db, file)?;
     let root = tree.root_node();
 
     let method_node = find_enclosing_method_node_in_tree(root, cursor_offset)?;
@@ -1703,10 +1680,9 @@ pub fn find_enclosing_class_bounds(
     use tree_sitter_utils::traversal::{ancestor_of_kinds, find_node_by_offset};
 
     let content = file.content(db);
-    let language_id = file.language_id(db);
 
     // Parse the tree
-    let tree = parse_tree(content, language_id.as_ref())?;
+    let tree = parse_file_tree(db, file)?;
     let root = tree.root_node();
 
     // Find any node at the cursor position first
@@ -1816,7 +1792,7 @@ fn parse_class_members(
     }
 
     // Parse tree
-    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
+    let Some(tree) = parse_file_tree(db, file) else {
         return HashMap::new();
     };
 

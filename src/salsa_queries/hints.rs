@@ -87,10 +87,9 @@ pub fn find_variable_declarations_in_range(
     end_offset: usize,
 ) -> Arc<Vec<VarDeclMetadata>> {
     let content = file.content(db);
-    let language_id = file.language_id(db);
 
     // Parse tree
-    let Some(tree) = super::parse::parse_tree_for_language(content, language_id.as_ref()) else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return Arc::new(Vec::new());
     };
 
@@ -122,7 +121,7 @@ pub fn find_method_calls_in_range(
     let language_id = file.language_id(db);
 
     // Parse tree
-    let Some(tree) = super::parse::parse_tree_for_language(content, language_id.as_ref()) else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return Arc::new(Vec::new());
     };
 

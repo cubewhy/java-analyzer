@@ -26,6 +26,22 @@ pub trait Db: salsa::Database {
     /// Get reference to the workspace index
     /// This allows queries to access the global index state
     fn workspace_index(&self) -> Arc<RwLock<WorkspaceIndex>>;
+
+    /// Latest parse snapshot for a file, used to drive incremental tree-sitter reparses.
+    fn cached_parse_tree(
+        &self,
+        file_id: &crate::salsa_db::FileId,
+    ) -> Option<crate::salsa_db::ParseTreeSnapshot>;
+
+    /// Store the most recent parse snapshot for a file.
+    fn store_parse_tree(
+        &self,
+        file_id: crate::salsa_db::FileId,
+        snapshot: crate::salsa_db::ParseTreeSnapshot,
+    );
+
+    /// Clear a file's parse snapshot when the file leaves the Salsa workspace.
+    fn remove_parse_tree(&self, file_id: &crate::salsa_db::FileId);
 }
 
 // Re-export commonly used types and functions

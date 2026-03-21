@@ -172,10 +172,9 @@ pub fn find_node_at_position(
     offset: usize,
 ) -> Option<Arc<NodeMetadata>> {
     let content = file.content(db);
-    let language_id = file.language_id(db);
 
     // Parse tree
-    let tree = super::parse::parse_tree_for_language(content, language_id.as_ref())?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     // Find deepest node at offset

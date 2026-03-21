@@ -229,7 +229,7 @@ pub fn extract_java_completion_context(
     }
 
     // Parse tree
-    let Some(tree) = super::parse::parse_tree_for_language(content, "java") else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return Arc::new(empty_context(db, file));
     };
 
@@ -580,7 +580,7 @@ pub fn compute_java_inlay_hints(
         return Arc::new(Vec::new());
     };
 
-    let Some(tree) = super::parse::parse_tree_for_language(content, "java") else {
+    let Some(tree) = super::parse::parse_tree(db, file) else {
         return Arc::new(Vec::new());
     };
 
@@ -621,7 +621,7 @@ pub fn infer_java_variable_type(
     let content = file.content(db);
 
     // Parse tree
-    let tree = super::parse::parse_tree_for_language(content, "java")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
 
     // Find the variable declarator at this offset
@@ -695,7 +695,7 @@ fn resolve_java_symbol_with_resolver(
     location_override: Option<CursorLocation>,
 ) -> Option<Arc<ResolvedSymbolData>> {
     let content = file.content(db);
-    let tree = super::parse::parse_tree_for_language(content, "java")?;
+    let tree = super::parse::parse_tree(db, file)?;
     let root = tree.root_node();
     let rope = Rope::from_str(content);
     let view = root_index_view(db);
