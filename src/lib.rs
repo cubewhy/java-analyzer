@@ -8,5 +8,4 @@ pub mod lsp;
 pub mod salsa_db;
 pub mod salsa_queries;
 pub mod semantic;
-pub mod syntax;
 pub mod workspace;
