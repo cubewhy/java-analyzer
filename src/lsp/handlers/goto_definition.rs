@@ -9,8 +9,6 @@ use crate::semantic::types::symbol_resolver::{ResolvedSymbol, SymbolResolver};
 use tower_lsp::lsp_types::*;
 use tracing::instrument;
 
-use super::syntax_access::{ensure_parsed_source, java_file_for_uri};
-
 #[instrument(skip(backend, params), fields(uri = %params.text_document_position_params.text_document.uri))]
 pub async fn handle_goto_definition(
     backend: &Backend,
@@ -26,18 +24,12 @@ pub async fn handle_goto_definition(
 
     let lang = backend.registry.find(&lang_id)?;
 
-    if let Some((_source, java_file)) =
-        java_file_for_uri(&backend.workspace, &backend.registry, uri)
-    {
-        tracing::trace!(
-            uri = %uri,
-            has_package = java_file.package().is_some(),
-            import_count = java_file.imports().count(),
-            "goto: rowan java file available"
-        );
-    }
-
-    let _source = ensure_parsed_source(&backend.workspace, uri, lang)?;
+    backend.workspace.documents.with_doc_mut(uri, |doc| {
+        if !doc.source().has_unified_syntax() {
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
+        }
+    })?;
 
     let analysis = backend.workspace.analysis_context_for_uri(uri);
     let scope = analysis.scope();

@@ -12,7 +12,6 @@ use crate::index::{ClassMetadata, ClassOrigin};
 use crate::jvm::descriptor::consume_one_descriptor_type;
 use crate::language::java::type_ctx::{SourceTypeCtx, build_java_descriptor};
 use crate::language::java::utils::extract_generic_signature;
-use crate::syntax::java::AstNode;
 use crate::{
     index::{IndexView, intern_str},
     language::{
@@ -1855,30 +1854,23 @@ fn test_nested_class_with_dollar_in_name() {
 ///
 /// This is a convenience wrapper for Salsa queries.
 pub fn extract_package_from_source(source: &str) -> Option<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
     let mut parser = make_java_parser();
     let tree = parser.parse(source, None)?;
-    let snapshot = crate::syntax::SyntaxSnapshot::from_tree("java", source, &tree);
-    let file = crate::syntax::java::JavaFile::cast(snapshot.root())?;
-    file.package()
-        .and_then(|pkg| pkg.path_text().map(Arc::<str>::from))
+    let root = tree.root_node();
+    extract_package(&ctx, root)
 }
 
 /// Extract import declarations from Java source code
 ///
 /// This is a convenience wrapper for Salsa queries.
 pub fn extract_imports_from_source(source: &str) -> Vec<Arc<str>> {
+    let ctx = JavaContextExtractor::for_indexing(source, None);
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => return vec![],
     };
-    let snapshot = crate::syntax::SyntaxSnapshot::from_tree("java", source, &tree);
-    let Some(file) = crate::syntax::java::JavaFile::cast(snapshot.root()) else {
-        return vec![];
-    };
-
-    file.imports()
-        .filter(|import| !import.is_static())
-        .filter_map(|import| import.path_text().map(Arc::<str>::from))
-        .collect()
+    let root = tree.root_node();
+    crate::language::java::scope::extract_imports(&ctx, root)
 }

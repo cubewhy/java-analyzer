@@ -154,7 +154,7 @@ fn enrich_java_semantic_context(
     let static_imports = fetch_static_imports(db, file);
     let is_class_member_position = detect_java_class_member_position(db, file, data.cursor_offset);
     let enclosing_class_member =
-        detect_java_enclosing_member(db, file, workspace, data.cursor_offset, &type_ctx);
+        detect_java_enclosing_member(db, file, data.cursor_offset, &type_ctx);
     let char_after_cursor = compute_char_after_cursor(file.content(db), data.cursor_offset);
     let statement_labels = infer_statement_labels(&ctx.location);
     let active_lambda_param_names = infer_lambda_params(&ctx.location);
@@ -214,35 +214,10 @@ fn detect_java_class_member_position(db: &dyn Db, file: SourceFile, cursor_offse
 fn detect_java_enclosing_member(
     db: &dyn Db,
     file: SourceFile,
-    workspace: Option<&crate::workspace::Workspace>,
     cursor_offset: usize,
     type_ctx: &Arc<SourceTypeCtx>,
 ) -> Option<CurrentClassMember> {
-    if let Some(workspace) = workspace {
-        let content = file.content(db);
-        let language_id = file.language_id(db);
-        if let Some(syntax) = workspace.get_or_build_syntax_snapshot(content, language_id.as_ref())
-        {
-            return crate::language::java::rowan_analysis::extract_enclosing_member(
-                &syntax,
-                cursor_offset,
-                type_ctx,
-            );
-        }
-    }
-
     let content = file.content(db);
-    let language_id = file.language_id(db);
-    let tree = crate::salsa_queries::parse::parse_tree_for_language(content, language_id.as_ref())?;
-    let syntax = crate::syntax::SyntaxSnapshot::from_tree(language_id.as_ref(), content, &tree);
-    if let Some(member) = crate::language::java::rowan_analysis::extract_enclosing_member(
-        &syntax,
-        cursor_offset,
-        type_ctx,
-    ) {
-        return Some(member);
-    }
-
     let before = &content[..cursor_offset.min(content.len())];
     let method_name = before.lines().rev().find_map(|line| {
         let line = line.trim();

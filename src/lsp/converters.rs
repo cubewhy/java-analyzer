@@ -8,8 +8,6 @@ use crate::{
         },
     },
     language::rope_utils::line_col_to_offset,
-    syntax::TextRange,
-    workspace::SourceFile,
 };
 
 /// Convert internal completion candidates to LSP CompletionItem
@@ -149,34 +147,6 @@ pub fn ts_node_to_range(node: &tree_sitter::Node) -> Range {
         end: Position {
             line: node.end_position().row as u32,
             character: node.end_position().column as u32,
-        },
-    }
-}
-
-pub fn text_range_to_lsp_range(file: &SourceFile, range: TextRange) -> Range {
-    let start_byte = u32::from(range.start()) as usize;
-    let end_byte = u32::from(range.end()) as usize;
-
-    let start_char = file.rope.byte_to_char(start_byte);
-    let end_char = file.rope.byte_to_char(end_byte);
-
-    let start_line = file.rope.char_to_line(start_char);
-    let end_line = file.rope.char_to_line(end_char);
-
-    let start_line_char = file.rope.line_to_char(start_line);
-    let end_line_char = file.rope.line_to_char(end_line);
-
-    let start_col = start_char.saturating_sub(start_line_char) as u32;
-    let end_col = end_char.saturating_sub(end_line_char) as u32;
-
-    Range {
-        start: Position {
-            line: start_line as u32,
-            character: start_col,
-        },
-        end: Position {
-            line: end_line as u32,
-            character: end_col,
         },
     }
 }

@@ -14,7 +14,6 @@ use crate::index::codebase::{index_codebase, index_codebase_paths};
 use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex};
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
 use crate::semantic::{LocalVar, context::CurrentClassMember};
-use crate::syntax::SyntaxSnapshot;
 use document::DocumentStore;
 
 pub mod document;
@@ -25,8 +24,6 @@ pub mod document;
 /// When file content changes, the hash changes and cache is automatically invalidated.
 #[derive(Default)]
 struct SemanticCache {
-    /// Cached rowan syntax snapshots per file content hash.
-    syntax_snapshots: HashMap<u64, Arc<SyntaxSnapshot>>,
     /// Cached local variables per method, keyed by content hash
     method_locals: HashMap<u64, Vec<LocalVar>>,
     /// Cached class members per class, keyed by content hash
@@ -92,37 +89,6 @@ impl Workspace {
             .method_locals
             .get(&content_hash)
             .cloned()
-    }
-
-    pub fn get_cached_syntax_snapshot(&self, content_hash: u64) -> Option<Arc<SyntaxSnapshot>> {
-        self.semantic_cache
-            .read()
-            .syntax_snapshots
-            .get(&content_hash)
-            .cloned()
-    }
-
-    pub fn cache_syntax_snapshot(&self, content_hash: u64, syntax: Arc<SyntaxSnapshot>) {
-        self.semantic_cache
-            .write()
-            .syntax_snapshots
-            .insert(content_hash, syntax);
-    }
-
-    pub fn get_or_build_syntax_snapshot(
-        &self,
-        content: &str,
-        language_id: &str,
-    ) -> Option<Arc<SyntaxSnapshot>> {
-        let content_hash = content_hash(content);
-        if let Some(snapshot) = self.get_cached_syntax_snapshot(content_hash) {
-            return Some(snapshot);
-        }
-
-        let tree = crate::salsa_queries::parse::parse_tree_for_language(content, language_id)?;
-        let snapshot = Arc::new(SyntaxSnapshot::from_tree(language_id, content, &tree));
-        self.cache_syntax_snapshot(content_hash, Arc::clone(&snapshot));
-        Some(snapshot)
     }
 
     /// Cache method locals by content hash
@@ -664,15 +630,6 @@ impl Workspace {
     }
 }
 
-fn content_hash(content: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    hasher.finish()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -776,21 +733,6 @@ mod tests {
             .expect("package");
 
         assert_eq!(inferred.as_ref(), "org.example.foo");
-    }
-
-    #[test]
-    fn syntax_snapshot_cache_reuses_same_arc_for_same_content() {
-        let workspace = Workspace::new();
-        let src = "package demo; class Test {}";
-
-        let first = workspace
-            .get_or_build_syntax_snapshot(src, "java")
-            .expect("syntax snapshot");
-        let second = workspace
-            .get_or_build_syntax_snapshot(src, "java")
-            .expect("syntax snapshot");
-
-        assert!(Arc::ptr_eq(&first, &second));
     }
 }
 pub mod source_file;

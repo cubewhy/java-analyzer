@@ -41,9 +41,6 @@ pub mod location;
 pub mod lombok;
 pub mod members;
 pub mod render;
-pub mod rowan_analysis;
-pub mod rowan_locals;
-pub mod rowan_symbols;
 pub mod scope;
 pub mod symbols;
 pub mod synthetic;
@@ -151,32 +148,7 @@ impl Language for JavaLanguage {
             ));
         }
         let root = file.root_node()?;
-        let mut context = extractor.extract(root, trigger_char);
-
-        if let Some(syntax) = file.syntax()
-            && let Some(type_ctx) = context.extension_arc::<SourceTypeCtx>()
-        {
-            let rowan_locals =
-                rowan_locals::extract_visible_locals(syntax, offset, Some(&type_ctx));
-            if context.local_variables.is_empty() && !rowan_locals.is_empty() {
-                context.local_variables = merge_rowan_locals(context.local_variables, rowan_locals);
-            }
-            let rowan_members =
-                rowan_analysis::extract_current_class_members(syntax, offset, &type_ctx);
-            if !rowan_members.is_empty() {
-                let existing_members = context.current_class_members.values().cloned().collect();
-                context = context
-                    .with_class_members(merge_rowan_members(existing_members, rowan_members));
-            }
-
-            if context.enclosing_class_member.is_none() {
-                let rowan_enclosing =
-                    rowan_analysis::extract_enclosing_member(syntax, offset, &type_ctx);
-                context = context.with_enclosing_member(rowan_enclosing);
-            }
-        }
-
-        Some(context)
+        Some(extractor.extract(root, trigger_char))
     }
 
     fn completion_providers(&self) -> &[&'static dyn CompletionProvider] {
@@ -839,41 +811,6 @@ fn extract_lambda_params_from_error_arrow(
         }
         _ => vec![],
     }
-}
-
-fn merge_rowan_locals(
-    existing: Vec<crate::semantic::LocalVar>,
-    rowan: Vec<crate::semantic::LocalVar>,
-) -> Vec<crate::semantic::LocalVar> {
-    use std::collections::HashSet;
-
-    let mut seen: HashSet<Arc<str>> = existing
-        .iter()
-        .map(|local| Arc::clone(&local.name))
-        .collect();
-    let mut merged = existing;
-    for local in rowan {
-        if seen.insert(Arc::clone(&local.name)) {
-            merged.push(local);
-        }
-    }
-    merged
-}
-
-fn merge_rowan_members(
-    existing: Vec<crate::semantic::context::CurrentClassMember>,
-    rowan: Vec<crate::semantic::context::CurrentClassMember>,
-) -> Vec<crate::semantic::context::CurrentClassMember> {
-    use std::collections::HashSet;
-
-    let mut seen: HashSet<Arc<str>> = existing.iter().map(|member| member.name()).collect();
-    let mut merged = existing;
-    for member in rowan {
-        if seen.insert(member.name()) {
-            merged.push(member);
-        }
-    }
-    merged
 }
 
 #[cfg(test)]

@@ -70,7 +70,7 @@ pub fn extract_method_locals_incremental(
         "extract_method_locals_incremental: cache miss, parsing..."
     );
 
-    let locals = parse_method_locals(db, file, method_start, method_end, workspace);
+    let locals = parse_method_locals(db, file, method_start, method_end);
 
     // Step 5: Cache the result
     workspace.cache_method_locals(metadata.content_hash, locals.clone());
@@ -84,9 +84,10 @@ fn parse_method_locals(
     file: SourceFile,
     _method_start: usize,
     method_end: usize,
-    workspace: &crate::workspace::Workspace,
 ) -> Vec<LocalVar> {
+    use crate::language::java::locals::extract_locals_with_type_ctx;
     use crate::language::java::type_ctx::SourceTypeCtx;
+    use crate::language::java::{JavaContextExtractor, scope};
 
     let content = file.content(db);
     let language_id = file.language_id(db);
@@ -96,20 +97,29 @@ fn parse_method_locals(
         return Vec::new();
     }
 
-    let Some(syntax) = workspace.get_or_build_syntax_snapshot(content, language_id.as_ref()) else {
+    // Parse tree
+    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
         return Vec::new();
     };
 
+    let root = tree.root_node();
+
     let name_table = resolve_name_table_for_file(db, file);
-    let package = crate::language::java::class_parser::extract_package_from_source(content);
-    let imports = crate::language::java::class_parser::extract_imports_from_source(content);
+
+    // Create a context extractor with cursor at the end of the method
+    // Use method_end - 1 to ensure we're inside the method (not at the closing brace)
+    // This ensures we extract all locals declared in the method
+    let cursor_pos = method_end.saturating_sub(1);
+    let ctx = JavaContextExtractor::new(content.to_string(), cursor_pos, name_table.clone());
+
+    // Extract package and imports for type resolution
+    let package = scope::extract_package(&ctx, root);
+    let imports = scope::extract_imports(&ctx, root);
     let type_ctx = SourceTypeCtx::new(package, imports, name_table);
 
-    crate::language::java::rowan_locals::extract_visible_locals(
-        &syntax,
-        method_end.saturating_sub(1),
-        Some(&type_ctx),
-    )
+    // Pass None as cursor_node and let extract_locals_with_type_ctx find the method by offset
+    // This is simpler and more reliable than trying to pass the right node
+    extract_locals_with_type_ctx(&ctx, root, None, Some(&type_ctx))
 }
 
 /// Metadata about a file's structure (cached by Salsa)
@@ -603,6 +613,30 @@ fn find_deepest_node_at_offset<'a>(
     }
 }
 
+/// Find a node of specific kinds at a given offset
+fn find_node_at_offset<'a>(
+    root: tree_sitter::Node<'a>,
+    offset: usize,
+    kinds: &[&str],
+) -> Option<tree_sitter::Node<'a>> {
+    use tree_sitter_utils::traversal::find_node_by_offset;
+
+    // Try each kind directly
+    for kind in kinds {
+        if let Some(node) = find_node_by_offset(root, kind, offset) {
+            return Some(node);
+        }
+    }
+
+    // Fallback: find any node at offset and walk up
+    use tree_sitter_utils::traversal::ancestor_of_kinds;
+    let node_at_offset = find_node_by_offset(root, "identifier", offset)
+        .or_else(|| find_node_by_offset(root, "block", offset))
+        .or_else(|| find_deepest_node_at_offset(root, offset))?;
+
+    ancestor_of_kinds(node_at_offset, kinds)
+}
+
 /// Find the enclosing class bounds for a cursor position (cached by Salsa)
 ///
 /// Returns (class_name, class_start, class_end) if cursor is inside a class.
@@ -700,7 +734,7 @@ pub fn extract_class_members_incremental(
         "extract_class_members_incremental: cache miss, parsing..."
     );
 
-    let members = parse_class_members(db, file, class_start, class_end, workspace);
+    let members = parse_class_members(db, file, class_start, class_end);
 
     // Step 5: Cache the result
     workspace.cache_class_members(metadata.content_hash, members.clone());
@@ -714,9 +748,10 @@ fn parse_class_members(
     file: SourceFile,
     class_start: usize,
     _class_end: usize,
-    workspace: &crate::workspace::Workspace,
 ) -> std::collections::HashMap<Arc<str>, crate::semantic::context::CurrentClassMember> {
+    use crate::language::java::synthetic::extract_type_members_with_synthetics;
     use crate::language::java::type_ctx::SourceTypeCtx;
+    use crate::language::java::{JavaContextExtractor, scope};
     use std::collections::HashMap;
 
     let content = file.content(db);
@@ -728,20 +763,40 @@ fn parse_class_members(
     }
 
     // Parse tree
-    let Some(syntax) = workspace.get_or_build_syntax_snapshot(content, language_id.as_ref()) else {
+    let Some(tree) = parse_tree(content, language_id.as_ref()) else {
         return HashMap::new();
     };
 
+    let root = tree.root_node();
+
     let name_table = resolve_name_table_for_file(db, file);
-    let package = crate::language::java::class_parser::extract_package_from_source(content);
-    let imports = crate::language::java::class_parser::extract_imports_from_source(content);
+
+    // Create a minimal context extractor for parsing
+    let ctx = JavaContextExtractor::for_indexing(content, name_table.clone());
+
+    // Extract package and imports for type resolution
+    let package = scope::extract_package(&ctx, root);
+    let imports = scope::extract_imports(&ctx, root);
     let type_ctx = SourceTypeCtx::new(package, imports, name_table);
 
-    let members = crate::language::java::rowan_analysis::extract_current_class_members(
-        &syntax,
+    // Find the class node at class_start
+    let class_node = find_node_at_offset(
+        root,
         class_start,
-        &type_ctx,
+        &[
+            "class_declaration",
+            "interface_declaration",
+            "enum_declaration",
+            "record_declaration",
+        ],
     );
+
+    let Some(class_node) = class_node else {
+        return HashMap::new();
+    };
+
+    // Extract members with synthetics (Lombok, etc.)
+    let members = extract_type_members_with_synthetics(&ctx, class_node, &type_ctx, None);
 
     // Convert Vec to HashMap keyed by member name
     members.into_iter().map(|m| (m.name(), m)).collect()
@@ -757,54 +812,4 @@ fn resolve_name_table_for_file(
     Some(index.build_name_table(crate::index::IndexScope {
         module: crate::index::ModuleId::ROOT,
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::salsa_db::{Database, FileId};
-    use crate::workspace::Workspace;
-    use tower_lsp::lsp_types::Url;
-
-    #[test]
-    fn incremental_class_members_use_rowan_syntax_on_malformed_java() {
-        let db = Database::default();
-        let workspace = Workspace::new();
-        let uri = Url::parse("file:///test/Test.java").unwrap();
-        let content = "class Test { void run() {} ??? }";
-        let file = SourceFile::new(
-            &db,
-            FileId::new(uri),
-            content.to_string(),
-            Arc::from("java"),
-        );
-
-        let members = parse_class_members(&db, file, content.find("run").unwrap(), 0, &workspace);
-
-        assert!(members.contains_key("run"));
-    }
-
-    #[test]
-    fn incremental_method_locals_use_rowan_syntax() {
-        let db = Database::default();
-        let workspace = Workspace::new();
-        let uri = Url::parse("file:///test/Test.java").unwrap();
-        let content = "class Test { void run(String name) { int count = 1; cou } }";
-        let file = SourceFile::new(
-            &db,
-            FileId::new(uri),
-            content.to_string(),
-            Arc::from("java"),
-        );
-
-        let locals = extract_method_locals_incremental(
-            &db,
-            file,
-            content.find("cou").unwrap() + 3,
-            &workspace,
-        );
-
-        assert!(locals.iter().any(|local| local.name.as_ref() == "name"));
-        assert!(locals.iter().any(|local| local.name.as_ref() == "count"));
-    }
 }

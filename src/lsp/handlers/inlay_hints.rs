@@ -5,8 +5,6 @@ use tower_lsp::lsp_types::{InlayHint, InlayHintParams};
 use crate::language::{LanguageRegistry, ParseEnv};
 use crate::workspace::Workspace;
 
-use super::syntax_access::ensure_parsed_source;
-
 pub async fn handle_inlay_hints(
     workspace: Arc<Workspace>,
     registry: Arc<LanguageRegistry>,
@@ -29,7 +27,20 @@ pub async fn handle_inlay_hints(
         return None;
     }
 
-    let _source = ensure_parsed_source(&workspace, uri, lang)?;
+    // Ensure tree is parsed.
+    let has_tree = workspace
+        .documents
+        .with_doc(uri, |doc| doc.source().has_unified_syntax())
+        .unwrap_or(false);
+    if !has_tree {
+        workspace.documents.with_doc_mut(uri, |doc| {
+            if doc.source().has_unified_syntax() {
+                return;
+            }
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
+        });
+    }
 
     let has_candidates = workspace.documents.with_doc(uri, |doc| {
         lang.may_have_inlay_hints_in_range(doc.source(), params.range)

@@ -4,8 +4,6 @@ use tower_lsp::lsp_types::*;
 use crate::language::LanguageRegistry;
 use crate::workspace::Workspace;
 
-use super::syntax_access::ensure_parsed_source;
-
 pub async fn handle_document_symbol(
     registry: Arc<LanguageRegistry>,
     workspace: Arc<Workspace>,
@@ -19,12 +17,19 @@ pub async fn handle_document_symbol(
 
     let lang = registry.find(&lang_id)?;
 
-    let source = ensure_parsed_source(&workspace, &uri, lang)?;
-
-    if lang.id() == "java"
-        && let Some(symbols) = crate::language::java::rowan_symbols::collect_java_symbols(&source)
-    {
-        return Some(DocumentSymbolResponse::Nested(symbols));
+    // Ensure tree is parsed.
+    let has_tree = workspace
+        .documents
+        .with_doc(&uri, |doc| doc.source().has_unified_syntax())
+        .unwrap_or(false);
+    if !has_tree {
+        workspace.documents.with_doc_mut(&uri, |doc| {
+            if doc.source().has_unified_syntax() {
+                return;
+            }
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
+        });
     }
 
     let symbols = workspace.documents.with_doc(&uri, |doc| {

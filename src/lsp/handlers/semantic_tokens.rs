@@ -3,13 +3,39 @@ use tower_lsp::lsp_types::*;
 
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::{LanguageRegistry, TokenCollector};
-use crate::workspace::Workspace;
-
-use super::syntax_access::ensure_parsed_source;
+use crate::workspace::{SourceFile, Workspace};
 
 /// Generate a unique but stable result_id for this document version.
 fn make_result_id(version: i32) -> String {
     version.to_string()
+}
+
+/// Ensure the document has a parsed tree, returning an `Arc<SourceFile>` with
+/// a tree attached.  If the file already has a tree this is a no-op clone.
+fn ensure_tree(
+    workspace: &Workspace,
+    uri: &Url,
+    lang: &dyn crate::language::Language,
+) -> Option<Arc<SourceFile>> {
+    // First pass: check if tree already exists (read-only).
+    let has_tree = workspace
+        .documents
+        .with_doc(uri, |doc| doc.source().has_unified_syntax())
+        .unwrap_or(false);
+
+    if !has_tree {
+        workspace.documents.with_doc_mut(uri, |doc| {
+            if doc.source().has_unified_syntax() {
+                return; // already set by a concurrent call
+            }
+            let tree = lang.parse_tree(doc.source().text(), None);
+            doc.set_tree(tree);
+        });
+    }
+
+    workspace
+        .documents
+        .with_doc(uri, |doc| Arc::clone(doc.source()))
 }
 
 pub async fn handle_semantic_tokens_full(
@@ -24,7 +50,7 @@ pub async fn handle_semantic_tokens_full(
         .with_doc(&uri, |doc| doc.language_id().to_owned())?;
 
     let lang = registry.find(&lang_id)?;
-    let file = ensure_parsed_source(&workspace, &uri, lang)?;
+    let file = ensure_tree(&workspace, &uri, lang)?;
 
     let root = file.root_node()?;
     let mut collector = TokenCollector::new(&file, lang);
@@ -66,7 +92,7 @@ pub async fn handle_semantic_tokens_range(
         .with_doc(&uri, |doc| doc.language_id().to_owned())?;
 
     let lang = registry.find(&lang_id)?;
-    let file = ensure_parsed_source(&workspace, &uri, lang)?;
+    let file = ensure_tree(&workspace, &uri, lang)?;
 
     let root = file.root_node()?;
     let start_byte =
@@ -97,7 +123,7 @@ pub async fn handle_semantic_tokens_full_delta(
         .with_doc(&uri, |doc| doc.language_id().to_owned())?;
 
     let lang = registry.find(&lang_id)?;
-    let file = ensure_parsed_source(&workspace, &uri, lang)?;
+    let file = ensure_tree(&workspace, &uri, lang)?;
 
     let root = file.root_node()?;
     let mut collector = TokenCollector::new(&file, lang);
