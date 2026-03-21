@@ -552,7 +552,7 @@ mod tests {
             panic!("expected method");
         };
         assert!(
-            summary.desc().as_ref().contains("[LString;"),
+            summary.desc().as_ref().contains("[Ljava/lang/String;"),
             "expected varargs descriptor shape, got {}",
             summary.desc()
         );

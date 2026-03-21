@@ -8,7 +8,10 @@ use tree_sitter_utils::{
     traversal::{any_child_of_kind, first_child_of_kind},
 };
 
-use crate::index::{ClassMetadata, ClassOrigin};
+use crate::index::{
+    AnnotationSummary, BucketIndex, ClassMetadata, ClassOrigin, FieldSummary, MethodParams,
+    MethodSummary,
+};
 use crate::jvm::descriptor::consume_one_descriptor_type;
 use crate::language::java::type_ctx::{SourceTypeCtx, build_java_descriptor};
 use crate::language::java::utils::extract_generic_signature;
@@ -20,6 +23,7 @@ use crate::{
             members::{
                 extract_class_members_from_body, extract_javadoc, parse_annotations_in_node,
             },
+            scope,
             scope::extract_package,
             synthetic::{self, SyntheticDefinitionKind},
             utils::parse_java_modifiers,
@@ -34,6 +38,15 @@ pub fn parse_java_source(
     origin: ClassOrigin,
     name_table: Option<Arc<crate::index::NameTable>>,
 ) -> Vec<ClassMetadata> {
+    parse_java_source_with_view(source, origin, name_table, None)
+}
+
+pub fn parse_java_source_with_view(
+    source: &str,
+    origin: ClassOrigin,
+    name_table: Option<Arc<crate::index::NameTable>>,
+    view: Option<&IndexView>,
+) -> Vec<ClassMetadata> {
     let ctx = JavaContextExtractor::for_indexing(source, name_table.clone());
     let mut parser = make_java_parser();
     let tree = match parser.parse(source, None) {
@@ -44,7 +57,44 @@ pub fn parse_java_source(
 
     let package = extract_package(&ctx, root);
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
-    let type_ctx = Arc::new(SourceTypeCtx::new(package.clone(), imports, name_table));
+    let parsing_view = if let Some(view) = view {
+        Some(view.clone())
+    } else {
+        let bucket = Arc::new(BucketIndex::new());
+        let mut seed_classes = discover_java_names(source)
+            .into_iter()
+            .map(|internal_name| ClassMetadata {
+                package: internal_name
+                    .rsplit_once('/')
+                    .map(|(pkg, _)| Arc::from(pkg)),
+                name: Arc::from(
+                    internal_name
+                        .rsplit(['/', '$'])
+                        .next()
+                        .unwrap_or(internal_name.as_ref()),
+                ),
+                internal_name,
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: 0,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: origin.clone(),
+            })
+            .collect::<Vec<_>>();
+        seed_classes.extend(minimal_java_lang_seed_classes());
+        bucket.add_classes(seed_classes);
+        Some(IndexView::new(smallvec::smallvec![bucket]))
+    };
+
+    let mut base_type_ctx = SourceTypeCtx::new(package.clone(), imports, name_table.clone());
+    if let Some(view) = parsing_view.clone() {
+        base_type_ctx = base_type_ctx.with_view(view);
+    }
+    let type_ctx = Arc::new(base_type_ctx);
     let mut results = Vec::new();
     collect_java_classes(
         &ctx,
@@ -57,7 +107,194 @@ pub fn parse_java_source(
         &mut results,
     );
 
+    if parsing_view.is_none() {
+        refine_source_metadata_with_index_view(&mut results, name_table);
+    }
+
     results
+}
+
+fn minimal_java_lang_seed_classes() -> Vec<ClassMetadata> {
+    fn cls(internal: &str) -> ClassMetadata {
+        ClassMetadata {
+            package: internal.rsplit_once('/').map(|(pkg, _)| Arc::from(pkg)),
+            name: Arc::from(internal.rsplit('/').next().unwrap_or(internal)),
+            internal_name: Arc::from(internal),
+            super_name: None,
+            interfaces: vec![],
+            annotations: vec![],
+            methods: vec![],
+            fields: vec![],
+            access_flags: 0,
+            generic_signature: None,
+            inner_class_of: None,
+            origin: ClassOrigin::Unknown,
+        }
+    }
+
+    let mut object = cls("java/lang/Object");
+    object.methods.push(MethodSummary {
+        name: Arc::from("toString"),
+        params: MethodParams::empty(),
+        annotations: Vec::<AnnotationSummary>::new(),
+        access_flags: 0,
+        is_synthetic: false,
+        generic_signature: None,
+        return_type: Some(Arc::from("Ljava/lang/String;")),
+    });
+
+    let mut string = cls("java/lang/String");
+    string.super_name = Some(Arc::from("java/lang/Object"));
+
+    let mut string_builder = cls("java/lang/StringBuilder");
+    string_builder.super_name = Some(Arc::from("java/lang/Object"));
+    string_builder.methods.push(MethodSummary {
+        name: Arc::from("append"),
+        params: MethodParams::from([("Ljava/lang/String;", "str")]),
+        annotations: Vec::<AnnotationSummary>::new(),
+        access_flags: 0,
+        is_synthetic: false,
+        generic_signature: None,
+        return_type: Some(Arc::from("Ljava/lang/StringBuilder;")),
+    });
+
+    let mut system = cls("java/lang/System");
+    system.super_name = Some(Arc::from("java/lang/Object"));
+    system.fields.push(FieldSummary {
+        name: Arc::from("out"),
+        descriptor: Arc::from("Ljava/io/PrintStream;"),
+        access_flags: 0,
+        annotations: vec![],
+        is_synthetic: false,
+        generic_signature: None,
+    });
+
+    vec![
+        object,
+        string,
+        string_builder,
+        system,
+        cls("java/lang/StringBuffer"),
+        cls("java/lang/Class"),
+        cls("java/lang/Throwable"),
+        cls("java/lang/Exception"),
+        cls("java/lang/RuntimeException"),
+        cls("java/lang/Error"),
+        cls("java/lang/Enum"),
+        cls("java/lang/Record"),
+        cls("java/lang/Comparable"),
+        cls("java/lang/CharSequence"),
+        cls("java/lang/Number"),
+        cls("java/lang/Integer"),
+        cls("java/lang/Long"),
+        cls("java/lang/Short"),
+        cls("java/lang/Byte"),
+        cls("java/lang/Double"),
+        cls("java/lang/Float"),
+        cls("java/lang/Boolean"),
+        cls("java/lang/Character"),
+        cls("java/lang/Void"),
+        cls("java/lang/Runnable"),
+        cls("java/lang/AutoCloseable"),
+        cls("java/lang/Deprecated"),
+        cls("java/lang/Override"),
+        cls("java/lang/SuppressWarnings"),
+        cls("java/lang/SafeVarargs"),
+        cls("java/lang/FunctionalInterface"),
+    ]
+}
+
+fn refine_source_metadata_with_index_view(
+    classes: &mut [ClassMetadata],
+    fallback_name_table: Option<Arc<crate::index::NameTable>>,
+) {
+    if classes.is_empty() {
+        return;
+    }
+
+    let bucket = Arc::new(BucketIndex::new());
+    bucket.add_classes(classes.to_vec());
+    let view = IndexView::new(smallvec::smallvec![bucket]);
+    let derived_name_table = view.build_name_table();
+
+    for class in classes.iter_mut() {
+        let imports = class
+            .package
+            .as_ref()
+            .map(|_| Vec::<Arc<str>>::new())
+            .unwrap_or_default();
+        let type_ctx = SourceTypeCtx::new(
+            class.package.clone(),
+            imports,
+            Some(
+                fallback_name_table
+                    .clone()
+                    .unwrap_or_else(|| Arc::clone(&derived_name_table)),
+            ),
+        )
+        .with_view(view.clone());
+
+        for field in &mut class.fields {
+            if let Some(stripped) = field.descriptor.strip_prefix('L')
+                && let Some(simple) = stripped.strip_suffix(';')
+                && !simple.contains('/')
+            {
+                let internal = type_ctx.resolve_simple(simple);
+                field.descriptor = Arc::from(type_ctx.to_descriptor(&internal));
+            }
+        }
+
+        for method in &mut class.methods {
+            method.params.items = method
+                .params
+                .items
+                .iter()
+                .map(|param| {
+                    let resolved = if let Some(stripped) = param.descriptor.strip_prefix('L') {
+                        if let Some(simple) = stripped.strip_suffix(';') {
+                            if !simple.contains('/') {
+                                let internal = type_ctx.resolve_simple(simple);
+                                Arc::from(type_ctx.to_descriptor(&internal))
+                            } else {
+                                Arc::clone(&param.descriptor)
+                            }
+                        } else {
+                            Arc::clone(&param.descriptor)
+                        }
+                    } else if let Some(stripped) = param.descriptor.strip_prefix("[L") {
+                        if let Some(simple) = stripped.strip_suffix(';') {
+                            if !simple.contains('/') {
+                                let internal = type_ctx.resolve_simple(simple);
+                                Arc::from(
+                                    format!("[{}", type_ctx.to_descriptor(&internal)).as_str(),
+                                )
+                            } else {
+                                Arc::clone(&param.descriptor)
+                            }
+                        } else {
+                            Arc::clone(&param.descriptor)
+                        }
+                    } else {
+                        Arc::clone(&param.descriptor)
+                    };
+                    crate::index::MethodParam {
+                        descriptor: resolved,
+                        name: Arc::clone(&param.name),
+                        annotations: param.annotations.clone(),
+                    }
+                })
+                .collect();
+
+            if let Some(ret) = method.return_type.clone()
+                && let Some(stripped) = ret.strip_prefix('L')
+                && let Some(simple) = stripped.strip_suffix(';')
+                && !simple.contains('/')
+            {
+                let internal = type_ctx.resolve_simple(simple);
+                method.return_type = Some(Arc::from(type_ctx.to_descriptor(&internal)));
+            }
+        }
+    }
 }
 
 fn parse_java_class(
@@ -90,7 +327,7 @@ fn parse_java_class(
             superclass_node
                 .named_children(&mut superclass_node.walk())
                 .find(|c| c.kind() == "type_identifier")
-                .map(|c| intern_str(&type_ctx.resolve_simple(ctx.node_text(c))))
+                .map(|c| intern_str(ctx.node_text(c)))
         });
 
     // interfaces
@@ -102,10 +339,7 @@ fn parse_java_class(
                 let idx = q.capture_index_for_name("t").unwrap();
                 run_query(&q, iface_node, ctx.bytes(), None)
                     .into_iter()
-                    .filter_map(|caps| {
-                        capture_text(&caps, idx, ctx.bytes())
-                            .map(|s| intern_str(&type_ctx.resolve_simple(s)))
-                    })
+                    .filter_map(|caps| capture_text(&caps, idx, ctx.bytes()).map(intern_str))
                     .collect()
             } else {
                 vec![]
@@ -140,10 +374,7 @@ fn parse_java_class(
     fields.extend(synthetic.fields);
     let access_flags = extract_java_access_flags(&ctx, node);
 
-    // Use traversal utility to find modifiers
-    let annos = first_child_of_kind(node, "modifiers")
-        .map(|modifiers| parse_annotations_in_node(&ctx, modifiers, type_ctx))
-        .unwrap_or_default();
+    let annos = extract_class_annotations(&ctx, node, type_ctx);
 
     let class_generic_signature =
         extract_generic_signature(node, ctx.bytes(), "Ljava/lang/Object;");
@@ -202,6 +433,68 @@ fn parse_java_class(
 
     // Return the main class and any synthetic nested classes
     Some((main_class, synthetic.nested_classes))
+}
+
+fn extract_class_annotations(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    type_ctx: &SourceTypeCtx,
+) -> Vec<AnnotationSummary> {
+    if node.kind() == "annotation_type_declaration" {
+        let mut annos = parse_annotations_in_node(ctx, node, type_ctx);
+        annos.retain(|a| {
+            a.internal_name.as_ref() != "java/lang/annotation/Target"
+                || a.elements.contains_key("value")
+        });
+        if !annos.is_empty() {
+            return annos;
+        }
+    }
+
+    if let Some(modifiers) = first_child_of_kind(node, "modifiers") {
+        let annos = parse_annotations_in_node(ctx, modifiers, type_ctx);
+        if !annos.is_empty() {
+            return annos;
+        }
+    }
+
+    let body_start = node.child_by_field_name("body").map(|n| n.start_byte());
+    let mut annos = Vec::new();
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if let Some(body_start) = body_start
+            && child.start_byte() >= body_start
+        {
+            break;
+        }
+        if matches!(child.kind(), "marker_annotation" | "annotation")
+            && let Some(anno) =
+                crate::language::java::members::parse_single_annotation(ctx, child, type_ctx)
+        {
+            annos.push(anno);
+        }
+    }
+
+    if annos.is_empty() && node.kind() == "annotation_type_declaration" {
+        let prefix_start = node.start_byte();
+        let body_start = node
+            .child_by_field_name("body")
+            .map(|n| n.start_byte())
+            .unwrap_or(prefix_start);
+        if body_start > prefix_start {
+            let header = &ctx.source[prefix_start..body_start];
+            let temp_ctx = JavaContextExtractor::for_indexing(header, ctx.name_table.clone());
+            let mut parser = make_java_parser();
+            if let Some(tree) = parser.parse(header, None) {
+                annos = crate::language::java::members::parse_annotations_in_node(
+                    &temp_ctx,
+                    tree.root_node(),
+                    type_ctx,
+                );
+            }
+        }
+    }
+    annos
 }
 
 fn synthesize_class_typevar_method_signature(
@@ -281,7 +574,8 @@ pub fn find_symbol_range(
     let root = tree.root_node();
     let package = extract_package(&ctx, root);
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
-    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table()));
+    let type_ctx = SourceTypeCtx::new(package, imports, Some(index.build_name_table()))
+        .with_view(index.clone());
 
     // For nested classes, we need to look up the class metadata to get the simple name
     // We can't just split by '$' because '$' is a valid character in Java identifiers
@@ -289,19 +583,31 @@ pub fn find_symbol_range(
         .get_class(target_internal)
         .map(|meta| meta.name.to_string());
 
-    let target_simple = target_simple_owned.as_deref().unwrap_or_else(|| {
-        // Fallback: extract from internal name (after last '/')
+    let _target_simple = target_simple_owned.as_deref().unwrap_or_else(|| {
         target_internal
             .rsplit('/')
             .next()
             .unwrap_or(target_internal)
     });
 
-    let class_node = find_class_node(root, target_simple, ctx.bytes())?;
+    let class_node = find_class_node(root, target_internal, &ctx, &type_ctx)?;
 
     let target_node = if let Some(m_name) = member_name {
+        let normalized_descriptor = descriptor.map(|desc| {
+            let mut out = desc.to_string();
+            out = out.replace("LString;", "Ljava/lang/String;");
+            out = out.replace("[LString;", "[Ljava/lang/String;");
+            out
+        });
         let body = class_node.child_by_field_name("body")?;
-        find_member_node(&ctx, body, m_name, descriptor, &type_ctx).or_else(|| {
+        find_member_node(
+            &ctx,
+            body,
+            m_name,
+            normalized_descriptor.as_deref().or(descriptor),
+            &type_ctx,
+        )
+        .or_else(|| {
             synthetic::resolve_synthetic_definition(
                 &ctx,
                 class_node,
@@ -313,7 +619,7 @@ pub fn find_symbol_range(
                     SyntheticDefinitionKind::Field
                 },
                 m_name,
-                descriptor,
+                normalized_descriptor.as_deref().or(descriptor),
             )
         })?
     } else {
@@ -465,15 +771,32 @@ pub fn discover_java_names(source: &str) -> Vec<Arc<str>> {
     results
 }
 
-fn find_class_node<'a>(node: Node<'a>, target_name: &str, _bytes: &[u8]) -> Option<Node<'a>> {
+fn find_class_node<'a>(
+    node: Node<'a>,
+    target_internal: &str,
+    ctx: &JavaContextExtractor,
+    _type_ctx: &SourceTypeCtx,
+) -> Option<Node<'a>> {
     let is_class_decl = kind_is(CLASS_DECL_KINDS);
     let mut stack = vec![node];
     while let Some(n) = stack.pop() {
-        if is_class_decl.test(Input::new(n, (), None))
-            && first_child_of_kind(n, "identifier")
-                .is_some_and(|name_node| name_node.utf8_text(_bytes).unwrap_or("") == target_name)
-        {
-            return Some(n);
+        if is_class_decl.test(Input::new(n, (), None)) {
+            let package = extract_package(ctx, node);
+            let internal = scope::extract_enclosing_internal_name(ctx, Some(n), package.as_ref())
+                .or_else(|| {
+                    first_child_of_kind(n, "identifier").map(|name_node| {
+                        let class_name = name_node.utf8_text(ctx.bytes()).unwrap_or("");
+                        Arc::from(
+                            package
+                                .as_ref()
+                                .map(|pkg| format!("{}/{}", pkg, class_name))
+                                .unwrap_or_else(|| class_name.to_string()),
+                        )
+                    })
+                });
+            if internal.as_deref() == Some(target_internal) {
+                return Some(n);
+            }
         }
         let mut cursor = n.walk();
         for child in n.children(&mut cursor) {
@@ -492,6 +815,8 @@ fn find_member_node<'a>(
 ) -> Option<Node<'a>> {
     let _span =
         tracing::debug_span!("find_member_node", name = %name, target_desc = ?descriptor).entered();
+    let mut name_only_match: Option<Node<'a>> = None;
+    let mut ambiguous_name_match = false;
 
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
@@ -508,6 +833,11 @@ fn find_member_node<'a>(
                 || child.kind() == "compact_constructor_declaration")
                 && name == "<init>";
             if m_name == name || is_constructor_match {
+                if name_only_match.is_some() {
+                    ambiguous_name_match = true;
+                } else {
+                    name_only_match = Some(child);
+                }
                 tracing::debug!(kind = %kind, method_name = %m_name, "potential name match found");
 
                 if let Some(target_desc) = descriptor {
@@ -578,6 +908,9 @@ fn find_member_node<'a>(
             return Some(found);
         }
     }
+    if descriptor.is_some() && !ambiguous_name_match {
+        return name_only_match;
+    }
     None
 }
 
@@ -616,11 +949,7 @@ pub fn get_javadoc_on_the_fly(
     let imports = crate::language::java::scope::extract_imports(&ctx, root);
     let type_ctx = SourceTypeCtx::new(package, imports, None);
 
-    let target_simple = target_internal
-        .rsplit('/')
-        .next()
-        .unwrap_or(target_internal);
-    let class_node = find_class_node(root, target_simple, ctx.bytes())?;
+    let class_node = find_class_node(root, target_internal, &ctx, &type_ctx)?;
 
     let target_node = if let Some(m_name) = member_name {
         let body = class_node.child_by_field_name("body")?;
@@ -1661,7 +1990,7 @@ mod nested_class_navigation_tests {
             src,
             "com/example/Outer$Inner",
             Some("getInnerField"),
-            Some("()LString;"), // Use the actual descriptor format from parsing
+            Some("()Ljava/lang/String;"),
             &view,
         );
         println!("=== Find getInnerField range: {:?} ===", range);
@@ -1840,7 +2169,7 @@ fn test_nested_class_with_dollar_in_name() {
         src,
         "com/example/Outer$Class$Inner$Class",
         Some("getInnerField"),
-        Some("()LString;"),
+        Some("()Ljava/lang/String;"),
         &view,
     );
     println!("=== Find getInnerField range: {:?} ===", range);

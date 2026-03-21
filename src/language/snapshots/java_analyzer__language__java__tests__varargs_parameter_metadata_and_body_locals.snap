@@ -3,7 +3,7 @@ source: src/language/java.rs
 expression: snapshot
 ---
 methods=
-join|flags=137|params=["LString;", "[LString;"]|param_names=["separator", "parts"]
+join|flags=137|params=["Ljava/lang/String;", "[Ljava/lang/String;"]|param_names=["separator", "parts"]
 printNumbers|flags=137|params=["[I"]|param_names=["numbers"]
 locals=
 a:var

@@ -20,9 +20,9 @@ stage_parse_java_source_class_metadata:
 class_internal=org/example/Demo
 class_generic_signature=Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
 class_origin=SourceFile("file:///tmp/provenance/Demo.java")
-map_desc=(LFunction;)LDemo;
-map_generic_signature=Some("<R:Ljava/lang/Object;>(LFunction<-TT;+TR;>;)LDemo<TR;>;")
-map_return_type=Some("LDemo;")
+map_desc=(LFunction;)Lorg/example/Demo;
+map_generic_signature=Some("<R:Ljava/lang/Object;>(LFunction<-TT;+TR;>;)Lorg/example/Demo<TR;>;")
+map_return_type=Some("Lorg/example/Demo;")
 map_param_names=["fn"]
 map_param_descs=["LFunction;"]
 
@@ -30,9 +30,9 @@ stage_workspace_index_visible:
 class_internal=org/example/Demo
 class_generic_signature=Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
 class_origin=SourceFile("file:///tmp/provenance/Demo.java")
-indexed_map_desc=(LFunction;)LDemo;
-indexed_map_generic_signature=Some("<R:Ljava/lang/Object;>(LFunction<-TT;+TR;>;)LDemo<TR;>;")
-indexed_map_return_type=Some("LDemo;")
-visible_map_desc=(LFunction;)LDemo;
-visible_map_generic_signature=Some("<R:Ljava/lang/Object;>(LFunction<-TT;+TR;>;)LDemo<TR;>;")
-visible_map_return_type=Some("LDemo;")
+indexed_map_desc=(LFunction;)Lorg/example/Demo;
+indexed_map_generic_signature=Some("<R:Ljava/lang/Object;>(LFunction<-TT;+TR;>;)Lorg/example/Demo<TR;>;")
+indexed_map_return_type=Some("Lorg/example/Demo;")
+visible_map_desc=(LFunction;)Lorg/example/Demo;
+visible_map_generic_signature=Some("<R:Ljava/lang/Object;>(LFunction<-TT;+TR;>;)Lorg/example/Demo<TR;>;")
+visible_map_return_type=Some("Lorg/example/Demo;")

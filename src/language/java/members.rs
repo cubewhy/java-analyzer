@@ -993,7 +993,7 @@ pub fn parse_annotations_in_node(
     out
 }
 
-fn parse_single_annotation(
+pub(crate) fn parse_single_annotation(
     ctx: &JavaContextExtractor,
     node: Node,
     type_ctx: &SourceTypeCtx,
@@ -1011,7 +1011,11 @@ fn parse_single_annotation(
         .first()
         .and_then(|caps| capture_text(caps, n_idx, ctx.bytes()))?;
 
-    let resolved = type_ctx.resolve_simple(name);
+    let resolved = if name.contains('.') {
+        name.replace('.', "/")
+    } else {
+        type_ctx.resolve_simple(name)
+    };
     let internal = resolved.replace('.', "/");
 
     let mut elements = rustc_hash::FxHashMap::default();
@@ -1093,8 +1097,19 @@ fn parse_element_value_node(
                 .map(|n| ctx.node_text(n))
                 .unwrap_or("?");
             AnnotationValue::Enum {
-                type_name: Arc::from(object),
+                type_name: Arc::from(type_ctx.resolve_simple(object)),
                 const_name: Arc::from(field),
+            }
+        }
+        "scoped_identifier" => {
+            let text = ctx.node_text(node);
+            if let Some((qualifier, field)) = text.rsplit_once('.') {
+                AnnotationValue::Enum {
+                    type_name: Arc::from(type_ctx.resolve_simple(qualifier)),
+                    const_name: Arc::from(field),
+                }
+            } else {
+                AnnotationValue::Unknown
             }
         }
         // @Target({...}) 里的数组用的是 element_value_array_initializer，不是 array_initializer
@@ -1720,15 +1735,9 @@ mod tests {
 
     #[test]
     fn test_annotation_targets_via_source() {
-        use crate::index::NameTable;
-        use crate::index::codebase::index_source_text;
+        use crate::index::BucketIndex;
 
-        let name_table = NameTable::from_names(vec![
-            Arc::from("java/lang/annotation/Target"),
-            Arc::from("java/lang/annotation/Retention"),
-            Arc::from("java/lang/annotation/ElementType"),
-            Arc::from("java/lang/annotation/RetentionPolicy"),
-        ]);
+        use crate::index::{ClassMetadata, ClassOrigin, IndexView};
 
         let src = r#"
 import java.lang.annotation.*;
@@ -1736,7 +1745,73 @@ import java.lang.annotation.*;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface MyAnno {}
 "#;
-        let classes = index_source_text("file:///MyAnno.java", src, "java", Some(name_table));
+
+        let bucket = Arc::new(BucketIndex::new());
+        bucket.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang/annotation")),
+                name: Arc::from("Target"),
+                internal_name: Arc::from("java/lang/annotation/Target"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: 0,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang/annotation")),
+                name: Arc::from("Retention"),
+                internal_name: Arc::from("java/lang/annotation/Retention"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: 0,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang/annotation")),
+                name: Arc::from("ElementType"),
+                internal_name: Arc::from("java/lang/annotation/ElementType"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: 0,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang/annotation")),
+                name: Arc::from("RetentionPolicy"),
+                internal_name: Arc::from("java/lang/annotation/RetentionPolicy"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: 0,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let view = IndexView::new(smallvec::smallvec![bucket]);
+        let classes = crate::language::java::class_parser::parse_java_source_with_view(
+            src,
+            ClassOrigin::SourceFile(Arc::from("file:///MyAnno.java")),
+            Some(view.build_name_table()),
+            Some(&view),
+        );
         let meta = classes
             .iter()
             .find(|c| c.name.as_ref() == "MyAnno")

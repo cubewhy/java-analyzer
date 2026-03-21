@@ -319,7 +319,7 @@ pub fn substitute_type_vars(ty: &JvmType, bindings: &HashMap<String, JvmType>) -
     }
 }
 
-/// Perform type substitution. If receiver_internal contains generics (such as List<LString;>), then attempt to replace target_jvm_type (such as TE;) with String.
+/// Perform type substitution. If receiver_internal contains generics (such as List<Ljava/lang/String;>), then attempt to replace target_jvm_type (such as TE;) with String.
 pub fn substitute_type(
     receiver_internal: &str,
     class_generic_signature: Option<&str>,

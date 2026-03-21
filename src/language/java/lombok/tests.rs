@@ -208,7 +208,7 @@ mod getter_tests {
         // Verify return type (accept both qualified and unqualified forms)
         let return_type = method.return_type.as_ref().map(|t| t.as_ref());
         assert!(
-            return_type == Some("Ljava/lang/String;") || return_type == Some("LString;"),
+            return_type == Some("Ljava/lang/String;"),
             "Should return String, got: {:?}",
             return_type
         );
