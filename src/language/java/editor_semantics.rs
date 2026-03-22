@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn semantic_context_preserves_member_access_location_from_salsa_source_bridge() {
         let workspace = Workspace::new();
-        let view = workspace.index.read().view(IndexScope {
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = r#"
@@ -890,7 +890,7 @@ class Test {
     #[test]
     fn semantic_context_preserves_enclosing_static_member_from_salsa_source_bridge() {
         let workspace = Workspace::new();
-        let view = workspace.index.read().view(IndexScope {
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = r#"
@@ -921,7 +921,7 @@ class Test {
     #[test]
     fn semantic_context_returns_none_inside_line_comment() {
         let workspace = Workspace::new();
-        let view = workspace.index.read().view(IndexScope {
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = "class Test { void demo() { // comment\n} }";
@@ -977,11 +977,13 @@ class Test {
     #[test]
     fn inlay_context_uses_salsa_flow_type_overrides() {
         let workspace = Workspace::new();
-        workspace.index.write().add_jdk_classes(vec![
-            minimal_class("java/lang/Object"),
-            minimal_class("java/lang/StringBuilder"),
-        ]);
-        let view = workspace.index.read().view(IndexScope {
+        workspace.index.update(|index| {
+            index.add_jdk_classes(vec![
+                minimal_class("java/lang/Object"),
+                minimal_class("java/lang/StringBuilder"),
+            ]);
+        });
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = r#"
@@ -1025,7 +1027,7 @@ class Test {
     #[test]
     fn inlay_context_filters_constructor_members_from_salsa_members() {
         let workspace = Workspace::new();
-        let view = workspace.index.read().view(IndexScope {
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = r#"
@@ -1067,7 +1069,7 @@ class Test {
     #[test]
     fn inlay_context_preserves_member_access_location_from_salsa() {
         let workspace = Workspace::new();
-        let view = workspace.index.read().view(IndexScope {
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = r#"
@@ -1116,7 +1118,7 @@ class Test {
     #[test]
     fn inlay_context_preserves_enclosing_static_member_from_salsa() {
         let workspace = Workspace::new();
-        let view = workspace.index.read().view(IndexScope {
+        let view = workspace.index.load().view(IndexScope {
             module: ModuleId::ROOT,
         });
         let source = r#"

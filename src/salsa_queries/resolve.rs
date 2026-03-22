@@ -49,8 +49,7 @@ fn lookup_class_by_internal_name(
     db: &dyn Db,
     internal_name: Arc<str>,
 ) -> Option<Arc<ClassMetadata>> {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
 
     // Search in the root module's view
     let scope = crate::index::IndexScope {

@@ -26,16 +26,7 @@ pub(super) fn get_name_table_for_java_file(
     db: &dyn Db,
     file: SourceFile,
 ) -> Option<Arc<NameTable>> {
-    let workspace_index = db.workspace_index();
-    let Some(index) = workspace_index.try_read() else {
-        tracing::warn!(
-            phase = "indexing",
-            file = %file.file_id(db).as_str(),
-            purpose = "java source indexing parse",
-            "workspace index busy while Salsa held the DB lock; skipping NameTable build to avoid lock inversion"
-        );
-        return None;
-    };
+    let index = db.workspace_index();
     let _ = file;
     tracing::debug!(
         phase = "indexing",

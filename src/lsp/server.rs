@@ -195,12 +195,9 @@ impl Backend {
             language = language_id.as_str(),
             "document indexing with Salsa"
         );
-        self.workspace.index.write().update_source_in_context(
-            analysis.module,
-            analysis.source_root,
-            origin,
-            classes,
-        );
+        self.workspace.index.update(|index| {
+            index.update_source_in_context(analysis.module, analysis.source_root, origin, classes);
+        });
 
         Some(())
     }

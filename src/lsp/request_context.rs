@@ -381,7 +381,7 @@ mod tests {
             ClassOrigin::SourceFile(Arc::from(uri.as_str())),
             None,
         );
-        workspace.index.write().add_classes(parsed);
+        workspace.index.update(|index| index.add_classes(parsed));
         workspace.documents.open(Document::new(SourceFile::new(
             uri.clone(),
             "java",

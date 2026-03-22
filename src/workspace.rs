@@ -11,7 +11,10 @@ use tracing::info;
 use crate::build_integration::{SourceRootId, WorkspaceModelSnapshot, WorkspaceRootKind};
 use crate::index::codebase::{collect_source_files, load_source_inputs};
 use crate::index::incremental::SourceTextInput;
-use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex};
+use crate::index::{
+    ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex,
+    WorkspaceIndexHandle,
+};
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
 use crate::salsa_queries::semantic::CachedMethodLocal;
 use crate::semantic::context::CurrentClassMember;
@@ -49,9 +52,8 @@ impl AnalysisContext {
 
 pub struct Workspace {
     pub documents: DocumentStore,
-    /// Workspace index shared between async code and Salsa
-    /// Uses parking_lot::RwLock for sync access (required by Salsa)
-    pub index: Arc<parking_lot::RwLock<WorkspaceIndex>>,
+    /// Workspace index shared between request-time readers and write-side rebuilds.
+    pub index: WorkspaceIndexHandle,
     /// Salsa database for incremental computation
     pub salsa_db: Arc<parking_lot::Mutex<SalsaDatabase>>,
     /// Mapping from URI to Salsa SourceFile input
@@ -67,12 +69,11 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new() -> Self {
-        // Create a single WorkspaceIndex shared by both async code and Salsa
-        // Use parking_lot::RwLock for sync access (required by Salsa)
-        let index = Arc::new(parking_lot::RwLock::new(WorkspaceIndex::new()));
+        // Create a single WorkspaceIndex handle shared by both async code and Salsa.
+        let index = WorkspaceIndexHandle::new(WorkspaceIndex::new());
 
         // Create Salsa database with the same workspace index reference
-        let salsa_db = SalsaDatabase::with_workspace_index(Arc::clone(&index));
+        let salsa_db = SalsaDatabase::with_workspace_index(index.clone());
 
         Self {
             documents: DocumentStore::new(),
@@ -272,7 +273,7 @@ impl Workspace {
 
     pub async fn set_jdk_classes(&self, classes: Vec<ClassMetadata>) {
         *self.jdk_classes.write().await = classes.clone();
-        self.index.write().add_jdk_classes(classes);
+        self.index.update(|index| index.add_jdk_classes(classes));
     }
 
     pub async fn apply_workspace_model(&self, snapshot: WorkspaceModelSnapshot) -> Result<()> {
@@ -425,17 +426,13 @@ impl Workspace {
                 new_index.update_source_in_context(module_id, Some(root_id), origin, classes);
             }
         }
-        self.prune_indexed_salsa_files(&current_indexed_uris);
-
-        {
-            let mut guard = self.index.write();
-            *guard = new_index;
-        }
-        *self.model.write() = Some(snapshot.clone());
 
         let open_docs = self.documents.snapshot_documents();
         for (uri, language_id, content) in open_docs {
-            let context = self.analysis_context_for_uri(&uri);
+            let context = Self::resolve_analysis_context_for_snapshot(
+                Some(&snapshot),
+                uri.to_file_path().ok().as_deref(),
+            );
 
             // Get or create Salsa file for this document
             let salsa_file = self.get_or_create_salsa_file(&uri, &content, &language_id);
@@ -460,13 +457,17 @@ impl Workspace {
                 class_count = classes.len(),
                 "reindexing open document against workspace model (using Salsa)"
             );
-            self.index.write().update_source_in_context(
+            new_index.update_source_in_context(
                 context.module,
                 context.source_root,
                 origin,
                 classes,
             );
         }
+
+        self.prune_indexed_salsa_files(&current_indexed_uris);
+        self.index.replace(new_index);
+        *self.model.write() = Some(snapshot.clone());
 
         info!(
             generation = snapshot.generation,
@@ -520,7 +521,7 @@ impl Workspace {
             index.update_source(scope, origin, classes);
         }
         self.prune_indexed_salsa_files(&current_indexed_uris);
-        *self.index.write() = index;
+        self.index.replace(index);
         *self.model.write() = None;
         Ok(())
     }
@@ -533,17 +534,18 @@ impl Workspace {
         content: &str,
         language_id: &str,
     ) -> crate::salsa_db::SourceFile {
-        let mut files = self.salsa_files.write();
-
-        if let Some(file) = files.get(uri) {
-            self.update_existing_salsa_file(*file, content.to_string(), language_id.to_string());
-            self.seed_salsa_parse_tree_from_document(uri, *file);
-            *file
+        if let Some(file) = self.get_salsa_file(uri) {
+            self.update_existing_salsa_file(file, content.to_string(), language_id.to_string());
+            self.seed_salsa_parse_tree_from_document(uri, file);
+            file
         } else {
-            // Create new file
-            let file =
+            let created =
                 self.create_salsa_file(uri.clone(), content.to_string(), language_id.to_string());
-            files.insert(uri.clone(), file);
+            let file = {
+                let mut files = self.salsa_files.write();
+                *files.entry(uri.clone()).or_insert(created)
+            };
+            self.update_existing_salsa_file(file, content.to_string(), language_id.to_string());
             self.seed_salsa_parse_tree_from_document(uri, file);
             file
         }
@@ -598,20 +600,27 @@ impl Workspace {
     }
 
     fn seed_salsa_parse_tree_from_document(&self, uri: &Url, file: crate::salsa_db::SourceFile) {
-        let db = self.salsa_db.lock();
-        let tree = self
+        let snapshot = self
             .documents
             .with_doc(uri, |doc| {
                 let source = doc.source();
-                (source.text() == file.content(&*db)
-                    && source.language_id.as_ref() == file.language_id(&*db).as_ref())
-                .then(|| source.tree.as_deref().cloned())
-                .flatten()
+                source
+                    .tree
+                    .as_deref()
+                    .cloned()
+                    .map(|tree| (source.text().to_string(), source.language_id.clone(), tree))
             })
             .flatten();
-        let Some(tree) = tree else {
+        let Some((content, language_id, tree)) = snapshot else {
             return;
         };
+
+        let db = self.salsa_db.lock();
+        if file.content(&*db).as_str() != content.as_str()
+            || file.language_id(&*db).as_ref() != language_id.as_ref()
+        {
+            return;
+        }
 
         crate::salsa_queries::parse::seed_parse_tree(&*db, file, &tree);
     }
@@ -770,8 +779,15 @@ fn overlay_open_document_inputs(
 
 impl Workspace {
     fn resolve_analysis_context_for_path(&self, path: Option<&Path>) -> AnalysisContext {
+        Self::resolve_analysis_context_for_snapshot(self.model.read().as_ref(), path)
+    }
+
+    fn resolve_analysis_context_for_snapshot(
+        model: Option<&WorkspaceModelSnapshot>,
+        path: Option<&Path>,
+    ) -> AnalysisContext {
         if let Some(path) = path
-            && let Some(model) = self.model.read().as_ref()
+            && let Some(model) = model
         {
             let best_root = model
                 .modules

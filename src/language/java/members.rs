@@ -1266,11 +1266,13 @@ mod tests {
 
     fn current_members(source: &str) -> Vec<CurrentClassMember> {
         let workspace_index =
-            Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()));
-        workspace_index.write().add_jdk_classes(vec![
-            test_fixture_class("java/lang/Object"),
-            test_fixture_class("java/lang/String"),
-        ]);
+            crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
+        workspace_index.update(|index| {
+            index.add_jdk_classes(vec![
+                test_fixture_class("java/lang/Object"),
+                test_fixture_class("java/lang/String"),
+            ]);
+        });
         let db = Database::with_workspace_index(workspace_index);
         let file = SourceFile::new(
             &db,

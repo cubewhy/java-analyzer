@@ -72,7 +72,7 @@ fn handle_completion_blocking(
 
     let request_analysis_t0 = std::time::Instant::now();
 
-    let index = workspace.index.read();
+    let index = workspace.index.load();
     let visible_classpath = index.module_classpath_jars(scope.module, analysis.classpath);
 
     tracing::debug!(

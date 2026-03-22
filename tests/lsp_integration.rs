@@ -62,12 +62,9 @@ async fn open_document(workspace: &Arc<Workspace>, uri: &str, content: &str) {
         analysis.source_root.map(|id| id.0)
     );
 
-    workspace.index.write().update_source_in_context(
-        analysis.module,
-        analysis.source_root,
-        origin,
-        classes,
-    );
+    workspace.index.update(|index| {
+        index.update_source_in_context(analysis.module, analysis.source_root, origin, classes);
+    });
 }
 
 fn completion_request(uri: &Url) -> Arc<RequestContext> {
@@ -292,7 +289,7 @@ public class User {
     );
 
     // Check the index directly
-    let index = workspace.index.read();
+    let index = workspace.index.load();
     let view =
         index.view_for_analysis_context(analysis.module, analysis.classpath, analysis.source_root);
     eprintln!("IndexView layers: {}", view.layer_count());
@@ -333,7 +330,7 @@ public class User {
 
     // Check workspace version
     let workspace_version = {
-        let index = workspace.index.read();
+        let index = workspace.index.load();
         index.version()
     };
     eprintln!("Workspace version: {}", workspace_version);

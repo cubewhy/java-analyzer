@@ -18,6 +18,7 @@ use crate::semantic::types::{SymbolProvider, parse_return_type_from_descriptor};
 pub mod bucket;
 pub mod cache;
 pub mod codebase;
+pub mod handle;
 pub mod incremental;
 pub mod jdk;
 pub mod module_graph;
@@ -28,6 +29,7 @@ pub mod view;
 pub mod workspace_index;
 
 pub use bucket::BucketIndex;
+pub use handle::WorkspaceIndexHandle;
 pub use module_graph::ModuleGraph;
 pub use module_index::{ClasspathIndex, ModuleIndex, ModuleQueryCache};
 pub use scope::{ClasspathId, IndexScope, ModuleId};

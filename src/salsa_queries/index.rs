@@ -100,8 +100,7 @@ pub fn cached_index_view_metadata(
     source_root: Option<SourceRootId>,
     _workspace_version: u64,
 ) -> IndexViewMetadata {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
 
     let view = index.view_for_analysis_context(module_id, classpath, source_root);
     let jars = index.module_classpath_jars(module_id, classpath);
@@ -143,8 +142,7 @@ pub fn cached_name_table(
     source_root: Option<SourceRootId>,
     _workspace_version: u64,
 ) -> NameTableMetadata {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
 
     let name_table = index.build_name_table_for_analysis_context(module_id, classpath, source_root);
 
@@ -186,8 +184,7 @@ pub fn get_index_view_for_context(
     let started = std::time::Instant::now();
     // Get workspace version for cache invalidation
     let workspace_version = {
-        let workspace_index = db.workspace_index();
-        let index = workspace_index.read();
+        let index = db.workspace_index();
         index.version()
     };
 
@@ -196,8 +193,7 @@ pub fn get_index_view_for_context(
         cached_index_view_metadata(db, module_id, classpath, source_root, workspace_version);
 
     // Get actual IndexView (fast)
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
     let view = index.view_for_analysis_context(module_id, classpath, source_root);
     tracing::debug!(
         module = module_id.0,
@@ -241,8 +237,7 @@ pub fn get_name_table_for_context(
     );
     // Get workspace version for cache invalidation
     let workspace_version = {
-        let workspace_index = db.workspace_index();
-        let index = workspace_index.read();
+        let index = db.workspace_index();
         index.version()
     };
 
@@ -250,8 +245,7 @@ pub fn get_name_table_for_context(
     let _metadata = cached_name_table(db, module_id, classpath, source_root, workspace_version);
 
     // Get actual name table (fast)
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
 
     let view = index.view_for_analysis_context(module_id, classpath, source_root);
     view.build_name_table()
@@ -265,8 +259,7 @@ pub fn visible_classpath_for_context(
     module_id: ModuleId,
     classpath: ClasspathId,
 ) -> Arc<Vec<Arc<str>>> {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
 
     Arc::new(index.module_classpath_jars(module_id, classpath))
 }

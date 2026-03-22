@@ -685,12 +685,14 @@ mod tests {
     #[test]
     fn test_java_completion_context_conversion_preserves_flow_type_overrides() {
         let workspace_index =
-            Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()));
-        workspace_index.write().add_jdk_classes(vec![
-            minimal_class("java/lang/Object"),
-            minimal_class("java/lang/StringBuilder"),
-        ]);
-        let db = Database::with_workspace_index(Arc::clone(&workspace_index));
+            crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
+        workspace_index.update(|index| {
+            index.add_jdk_classes(vec![
+                minimal_class("java/lang/Object"),
+                minimal_class("java/lang/StringBuilder"),
+            ]);
+        });
+        let db = Database::with_workspace_index(workspace_index);
         let uri = Url::parse("file:///test/Test.java").unwrap();
         let marked_source = indoc::indoc! {r#"
             class Test {

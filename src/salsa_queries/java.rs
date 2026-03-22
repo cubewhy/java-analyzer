@@ -194,7 +194,7 @@ class User {
 
     #[test]
     fn test_extract_java_semantic_context_at_offset_materializes_var_receiver() {
-        let workspace_index = Arc::new(parking_lot::RwLock::new(WorkspaceIndex::new()));
+        let workspace_index = crate::index::WorkspaceIndexHandle::new(WorkspaceIndex::new());
         let source = indoc::indoc! {r#"
             package org.example;
 
@@ -217,13 +217,13 @@ class User {
             ClassOrigin::Unknown,
             None,
         );
-        workspace_index.write().add_classes(parsed);
+        workspace_index.update(|index| index.add_classes(parsed));
 
-        let db = Database::with_workspace_index(Arc::clone(&workspace_index));
+        let db = Database::with_workspace_index(workspace_index.clone());
         let uri = Url::parse("file:///test/Main.java").unwrap();
         let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
         let offset = source.find("a.").expect("member access") + 2;
-        let view = workspace_index.read().view(crate::index::IndexScope {
+        let view = workspace_index.load().view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         });
 

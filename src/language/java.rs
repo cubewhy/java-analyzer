@@ -358,16 +358,19 @@ pub(crate) fn extract_java_semantic_context_for_test(
     let workspace_index = env
         .workspace
         .as_ref()
-        .map(|workspace| Arc::clone(&workspace.index))
+        .map(|workspace| workspace.index.clone())
         .or_else(|| {
             env.view.as_ref().map(|view| {
-                let index = Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()));
-                index.write().add_classes(
-                    view.iter_all_classes()
-                        .into_iter()
-                        .map(|class| (*class).clone())
-                        .collect(),
-                );
+                let index =
+                    crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
+                index.update(|current| {
+                    current.add_classes(
+                        view.iter_all_classes()
+                            .into_iter()
+                            .map(|class| (*class).clone())
+                            .collect(),
+                    );
+                });
                 index
             })
         });
@@ -387,7 +390,7 @@ pub(crate) fn extract_java_semantic_context_for_test(
     );
     let view = env.view.clone().unwrap_or_else(|| {
         let workspace = crate::workspace::Workspace::new();
-        workspace.index.read().view(crate::index::IndexScope {
+        workspace.index.load().view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         })
     });

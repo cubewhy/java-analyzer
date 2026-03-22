@@ -339,12 +339,14 @@ mod tests {
             (src_with_cursor.replacen('|', "", 1), idx)
         };
         let workspace_index =
-            Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()));
-        workspace_index.write().add_jdk_classes(vec![
-            minimal_class("java/lang/Object"),
-            minimal_class("java/lang/StringBuilder"),
-            minimal_class("java/lang/String"),
-        ]);
+            crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
+        workspace_index.update(|index| {
+            index.add_jdk_classes(vec![
+                minimal_class("java/lang/Object"),
+                minimal_class("java/lang/StringBuilder"),
+                minimal_class("java/lang/String"),
+            ]);
+        });
         let db = Database::with_workspace_index(workspace_index);
         let file = SourceFile::new(
             &db,

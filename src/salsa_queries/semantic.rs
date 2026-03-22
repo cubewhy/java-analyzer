@@ -2057,16 +2057,7 @@ fn resolve_name_table_for_file(
     db: &dyn crate::salsa_queries::Db,
     file: SourceFile,
 ) -> Option<Arc<crate::index::NameTable>> {
-    let workspace_index = db.workspace_index();
-    let Some(index) = workspace_index.try_read() else {
-        tracing::warn!(
-            phase = "indexing",
-            file = %file.file_id(db).as_str(),
-            purpose = "incremental source parse/discovery",
-            "workspace index busy while Salsa semantic extraction held the DB lock; skipping NameTable build to avoid lock inversion"
-        );
-        return None;
-    };
+    let index = db.workspace_index();
     let _ = file;
     tracing::debug!(
         phase = "indexing",
@@ -2648,12 +2639,14 @@ mod tests {
         let offset = source.find("/*caret*/").expect("caret marker");
         let source = source.replacen("/*caret*/", "", 1);
         let workspace_index =
-            Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()));
-        workspace_index.write().add_jdk_classes(vec![
-            minimal_class("java/lang/Object"),
-            minimal_class("java/lang/StringBuilder"),
-        ]);
-        let db = Database::with_workspace_index(Arc::clone(&workspace_index));
+            crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
+        workspace_index.update(|index| {
+            index.add_jdk_classes(vec![
+                minimal_class("java/lang/Object"),
+                minimal_class("java/lang/StringBuilder"),
+            ]);
+        });
+        let db = Database::with_workspace_index(workspace_index);
         let uri = Url::parse("file:///test/Test.java").unwrap();
         let file = SourceFile::new(&db, FileId::new(uri), source.clone(), Arc::from("java"));
         let name_table = resolve_name_table_for_file(&db, file).expect("name table");
@@ -2680,10 +2673,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_name_table_for_file_returns_none_when_workspace_index_is_write_locked() {
+    fn resolve_name_table_for_file_reads_current_snapshot_without_outer_workspace_lock() {
         let workspace_index =
-            Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()));
-        let db = Database::with_workspace_index(Arc::clone(&workspace_index));
+            crate::index::WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new());
+        let db = Database::with_workspace_index(workspace_index.clone());
         let uri = Url::parse("file:///test/Test.java").unwrap();
         let file = SourceFile::new(
             &db,
@@ -2692,11 +2685,9 @@ mod tests {
             Arc::from("java"),
         );
 
-        let _write_guard = workspace_index.write();
-
         assert!(
-            resolve_name_table_for_file(&db, file).is_none(),
-            "NameTable lookup should fail fast instead of blocking behind a workspace-index write lock",
+            resolve_name_table_for_file(&db, file).is_some(),
+            "NameTable lookup should read the current snapshot without an outer workspace lock",
         );
     }
 }

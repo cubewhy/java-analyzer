@@ -15,7 +15,6 @@ pub mod resolve;
 pub mod semantic;
 pub mod symbols;
 
-use parking_lot::RwLock;
 use std::sync::Arc;
 
 use crate::index::WorkspaceIndex;
@@ -25,7 +24,7 @@ use crate::index::WorkspaceIndex;
 pub trait Db: salsa::Database {
     /// Get reference to the workspace index
     /// This allows queries to access the global index state
-    fn workspace_index(&self) -> Arc<RwLock<WorkspaceIndex>>;
+    fn workspace_index(&self) -> Arc<WorkspaceIndex>;
 
     /// Latest parse snapshot for a file, used to drive incremental tree-sitter reparses.
     fn cached_parse_tree(

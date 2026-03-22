@@ -8,6 +8,8 @@ use std::sync::Arc;
 use tower_lsp::lsp_types::Url;
 use tree_sitter::Tree;
 
+use crate::index::WorkspaceIndexHandle;
+
 /// File identifier - wraps a URI for type safety
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileId(Arc<Url>);
@@ -159,15 +161,13 @@ pub struct ModuleClassIndex<'db> {
 pub struct Database {
     storage: salsa::Storage<Self>,
     /// Reference to the workspace index for queries
-    workspace_index: Option<Arc<parking_lot::RwLock<crate::index::WorkspaceIndex>>>,
+    workspace_index: Option<WorkspaceIndexHandle>,
     parse_trees: parking_lot::RwLock<HashMap<FileId, ParseTreeSnapshot>>,
 }
 
 impl Database {
     /// Create a new database with a workspace index reference
-    pub fn with_workspace_index(
-        workspace_index: Arc<parking_lot::RwLock<crate::index::WorkspaceIndex>>,
-    ) -> Self {
+    pub fn with_workspace_index(workspace_index: WorkspaceIndexHandle) -> Self {
         Self {
             storage: Default::default(),
             workspace_index: Some(workspace_index),
@@ -194,12 +194,15 @@ impl salsa::Database for Database {}
 /// Implement the Db trait for query access to workspace index
 #[salsa::db]
 impl crate::salsa_queries::Db for Database {
-    fn workspace_index(&self) -> Arc<parking_lot::RwLock<crate::index::WorkspaceIndex>> {
-        self.workspace_index.clone().unwrap_or_else(|| {
-            // Fallback: create a temporary empty index
-            // This should only happen in tests
-            Arc::new(parking_lot::RwLock::new(crate::index::WorkspaceIndex::new()))
-        })
+    fn workspace_index(&self) -> Arc<crate::index::WorkspaceIndex> {
+        self.workspace_index
+            .clone()
+            .unwrap_or_else(|| {
+                // Fallback: create a temporary empty index
+                // This should only happen in tests
+                WorkspaceIndexHandle::new(crate::index::WorkspaceIndex::new())
+            })
+            .load()
     }
 
     fn cached_parse_tree(&self, file_id: &FileId) -> Option<ParseTreeSnapshot> {

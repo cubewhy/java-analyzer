@@ -49,12 +49,9 @@ async fn open_document(workspace: &Arc<Workspace>, uri: &Url, content: &str) {
     };
     let analysis = workspace.analysis_context_for_uri(uri);
     let origin = java_analyzer::index::ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-    workspace.index.write().update_source_in_context(
-        analysis.module,
-        analysis.source_root,
-        origin,
-        classes,
-    );
+    workspace.index.update(|index| {
+        index.update_source_in_context(analysis.module, analysis.source_root, origin, classes);
+    });
 }
 
 fn completion_params(uri: Url) -> CompletionParams {

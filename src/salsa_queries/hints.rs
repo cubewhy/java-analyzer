@@ -388,8 +388,7 @@ fn infer_java_receiver_type_for_call(
 }
 
 fn root_index_view(db: &dyn Db) -> IndexView {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
     index.view(IndexScope {
         module: ModuleId::ROOT,
     })

@@ -28,8 +28,7 @@ pub(super) fn find_ancestor_of_kind<'a>(mut node: Node<'a>, kind: &str) -> Optio
 }
 
 pub(super) fn root_index_view(db: &dyn Db) -> crate::index::IndexView {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
     index.view(IndexScope {
         module: ModuleId::ROOT,
     })

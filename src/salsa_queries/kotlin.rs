@@ -781,8 +781,7 @@ fn infer_kotlin_type_from_expression(expr: tree_sitter::Node, source: &[u8]) -> 
 }
 
 fn root_index_view(db: &dyn Db) -> crate::index::IndexView {
-    let workspace_index = db.workspace_index();
-    let index = workspace_index.read();
+    let index = db.workspace_index();
     index.view(IndexScope {
         module: ModuleId::ROOT,
     })
