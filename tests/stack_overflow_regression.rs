@@ -2,10 +2,14 @@
 ///
 /// This test suite verifies that the parser doesn't stack overflow
 /// when processing incomplete code in Lombok-annotated classes.
-use java_analyzer::{index::ClassOrigin, language::java::class_parser::parse_java_source};
+use java_analyzer::{
+    index::ClassOrigin, language::java::class_parser::extract_java_classes_from_tree,
+    salsa_queries::parse::parse_tree_for_language,
+};
 
 fn parse_first_class(source: &str) -> java_analyzer::index::ClassMetadata {
-    parse_java_source(source, ClassOrigin::Unknown, None)
+    let tree = parse_tree_for_language(source, "java").expect("Should parse Java source");
+    extract_java_classes_from_tree(source, &tree, &ClassOrigin::Unknown, None, None)
         .into_iter()
         .find(|class| !class.name.is_empty())
         .expect("Should parse at least one class")

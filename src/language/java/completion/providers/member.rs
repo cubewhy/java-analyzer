@@ -2239,11 +2239,13 @@ mod tests {
     #[test]
     fn test_record_accessors_appear_in_member_completion() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(crate::language::java::class_parser::parse_java_source(
-            "record Point(int x, int y) {}",
-            ClassOrigin::Unknown,
-            None,
-        ));
+        idx.add_classes(
+            crate::language::java::class_parser::parse_java_source_via_tree_for_test(
+                "record Point(int x, int y) {}",
+                ClassOrigin::Unknown,
+                None,
+            ),
+        );
 
         let ctx = ctx_with_type("Point", "");
         let results = MemberProvider
@@ -2260,11 +2262,13 @@ mod tests {
     #[test]
     fn test_enum_constants_do_not_leak_into_instance_member_completion() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(crate::language::java::class_parser::parse_java_source(
-            "enum Color { RED, GREEN }",
-            ClassOrigin::Unknown,
-            None,
-        ));
+        idx.add_classes(
+            crate::language::java::class_parser::parse_java_source_via_tree_for_test(
+                "enum Color { RED, GREEN }",
+                ClassOrigin::Unknown,
+                None,
+            ),
+        );
 
         let ctx = ctx_with_type("Color", "");
         let labels: Vec<String> = MemberProvider

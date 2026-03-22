@@ -1056,11 +1056,13 @@ mod tests {
     #[test]
     fn test_enum_constants_appear_in_static_member_completion() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(crate::language::java::class_parser::parse_java_source(
-            "enum Color { RED, GREEN, BLUE }",
-            ClassOrigin::Unknown,
-            None,
-        ));
+        idx.add_classes(
+            crate::language::java::class_parser::parse_java_source_via_tree_for_test(
+                "enum Color { RED, GREEN, BLUE }",
+                ClassOrigin::Unknown,
+                None,
+            ),
+        );
 
         let ctx = SemanticContext::new(
             CursorLocation::StaticAccess {

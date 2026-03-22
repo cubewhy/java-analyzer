@@ -403,7 +403,7 @@ pub(crate) mod test_helpers {
         let lang = registry.find(language_id).expect("language registered");
         let tree = lang.parse_tree(source, None);
         if language_id == "java" {
-            let parsed = crate::language::java::class_parser::parse_java_source(
+            let parsed = crate::language::java::class_parser::parse_java_source_via_tree_for_test(
                 source,
                 ClassOrigin::SourceFile(Arc::from(uri.as_str())),
                 None,

@@ -579,7 +579,9 @@ mod tests {
         },
         language::test_helpers::completion_context_from_source,
         language::{
-            java::class_parser::{parse_java_source, parse_java_source_with_test_jdk},
+            java::class_parser::{
+                parse_java_source_via_tree_for_test, parse_java_source_with_test_jdk,
+            },
             rope_utils::line_col_to_offset,
         },
         semantic::{
@@ -604,6 +606,10 @@ mod tests {
         let line = (lines.len().saturating_sub(1)) as u32;
         let col = lines.last().map(|l| l.len()).unwrap_or(0) as u32;
         at(src, line, col)
+    }
+
+    fn parse_test_classes(src: &str) -> Vec<ClassMetadata> {
+        parse_java_source_via_tree_for_test(src, ClassOrigin::Unknown, None)
     }
 
     fn completion_ctx_with_view(
@@ -904,7 +910,7 @@ mod tests {
                 <R> Box<R> map(Function<? super T, ? extends R> fn) { return null; }
             }
         "#};
-        let parsed = parse_java_source(src, ClassOrigin::Unknown, None);
+        let parsed = parse_test_classes(src);
 
         let idx = WorkspaceIndex::new();
         idx.add_classes(parsed);
@@ -4011,7 +4017,7 @@ mod tests {
         }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![make_class("java/lang", "Object")]);
         let view = idx.view(root_scope());
         let (ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
@@ -4172,16 +4178,12 @@ mod tests {
     #[test]
     fn test_method_call_arithmetic_var_materialization_surfaces_double_in_completion() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(
-            indoc::indoc! {r#"
+        idx.add_classes(parse_test_classes(indoc::indoc! {r#"
             class Demo {
                 int getInt() { return 1; }
                 void f() {}
             }
-            "#},
-            ClassOrigin::Unknown,
-            None,
-        ));
+            "#}));
         idx.add_classes(vec![make_class("java/lang", "Object")]);
         let view = idx.view(root_scope());
 
@@ -4210,16 +4212,12 @@ mod tests {
     #[test]
     fn test_bitwise_expression_var_materialization_surfaces_integral_in_completion() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(
-            indoc::indoc! {r#"
+        idx.add_classes(parse_test_classes(indoc::indoc! {r#"
             class Demo {
                 int getInt() { return 1; }
                 void f() {}
             }
-            "#},
-            ClassOrigin::Unknown,
-            None,
-        ));
+            "#}));
         idx.add_classes(vec![make_class("java/lang", "Object")]);
         let view = idx.view(root_scope());
 
@@ -4261,7 +4259,7 @@ mod tests {
         }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![
             make_class("java/lang", "Object"),
             make_class("java/lang", "String"),
@@ -4298,7 +4296,7 @@ mod tests {
         }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![
             make_class("java/lang", "Object"),
             make_class("java/lang", "String"),
@@ -4353,7 +4351,7 @@ mod tests {
         }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![
             make_class("java/lang", "Object"),
             make_class("java/lang", "String"),
@@ -4532,7 +4530,7 @@ mod tests {
         }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![make_class("java/lang", "Object")]);
         let view = idx.view(root_scope());
         let (ctx, candidates) = ctx_and_candidates_from_marked_source(src, &view);
@@ -4600,7 +4598,7 @@ mod tests {
         }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![
             make_class("java/lang", "Object"),
             make_class("java/lang", "String"),
@@ -5055,7 +5053,7 @@ mod tests {
             }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![
             make_class("java/lang", "Class"),
             make_class("java/lang", "Integer"),
@@ -5087,7 +5085,7 @@ mod tests {
             }
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx.add_classes(vec![
             make_class("java/lang", "Object"),
             make_class("java/lang", "String"),
@@ -5109,7 +5107,7 @@ mod tests {
             }
         "#};
         let idx_nested = WorkspaceIndex::new();
-        idx_nested.add_classes(parse_java_source(src_nested, ClassOrigin::Unknown, None));
+        idx_nested.add_classes(parse_test_classes(src_nested));
         idx_nested.add_classes(vec![
             make_class("java/lang", "Object"),
             make_class("java/lang", "Class"),
@@ -5400,7 +5398,7 @@ mod tests {
         }
         "#};
 
-        let parsed = parse_java_source(src_base, ClassOrigin::Unknown, None);
+        let parsed = parse_test_classes(src_base);
         let mut parsed_classes: Vec<String> = parsed
             .iter()
             .map(|c| {
@@ -6975,7 +6973,7 @@ mod tests {
             .collect();
         insta::assert_snapshot!("error_children", children_info.join("\n"));
 
-        let parsed = parse_java_source(src, ClassOrigin::Unknown, None);
+        let parsed = parse_test_classes(src);
         let agent = parsed
             .iter()
             .find(|class| class.name.as_ref() == "Agent")
@@ -7977,7 +7975,7 @@ mod tests {
             class Top {}
         "#};
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         idx
     }
 
@@ -8165,17 +8163,13 @@ mod tests {
     #[test]
     fn test_incomplete_enum_constant_trailing_dot_completion_recovers_members() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(
-            indoc::indoc! {r#"
+        idx.add_classes(parse_test_classes(indoc::indoc! {r#"
                 enum RandomEnum {
                     B;
 
                     public void test() {}
                 }
-            "#},
-            ClassOrigin::Unknown,
-            None,
-        ));
+            "#}));
         let view = idx.view(root_scope());
         let (ctx, labels) = ctx_and_labels_from_marked_source(
             indoc::indoc! {r#"
@@ -8202,10 +8196,8 @@ mod tests {
     #[test]
     fn test_incomplete_record_local_trailing_dot_completion_recovers_members() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(
+        idx.add_classes(parse_test_classes(
             "record RandomRecord(int value) { void test() {} }",
-            ClassOrigin::Unknown,
-            None,
         ));
         let view = idx.view(root_scope());
         let (ctx, labels) = ctx_and_labels_from_marked_source(
@@ -8235,21 +8227,15 @@ mod tests {
     #[test]
     fn test_broken_enum_member_access_does_not_corrupt_following_record_local() {
         let idx = WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(
-            indoc::indoc! {r#"
+        idx.add_classes(parse_test_classes(indoc::indoc! {r#"
                 enum RandomEnum {
                     B;
 
                     public void test() {}
                 }
-            "#},
-            ClassOrigin::Unknown,
-            None,
-        ));
-        idx.add_classes(parse_java_source(
+            "#}));
+        idx.add_classes(parse_test_classes(
             "record RandomRecord(int value) { void test() {} }",
-            ClassOrigin::Unknown,
-            None,
         ));
         let view = idx.view(root_scope());
         let (ctx, labels) = ctx_and_labels_from_marked_source(

@@ -3106,7 +3106,7 @@ mod tests {
     #[test]
     fn test_source_derived_map_signature_keeps_bindable_r_for_chain_resolution() {
         use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
-        use crate::language::java::class_parser::parse_java_source;
+        use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
         use rust_asm::constants::ACC_PUBLIC;
 
         let idx = WorkspaceIndex::new();
@@ -3119,7 +3119,7 @@ mod tests {
             }
         "#};
         let origin = ClassOrigin::SourceFile(Arc::from("file:///tmp/provenance/Demo.java"));
-        let classes = parse_java_source(src, origin.clone(), None);
+        let classes = parse_java_source_via_tree_for_test(src, origin.clone(), None);
         idx.update_source(scope, origin, classes);
         idx.add_classes(vec![ClassMetadata {
             package: None,

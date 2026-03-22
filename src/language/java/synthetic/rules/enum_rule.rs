@@ -103,12 +103,12 @@ fn enum_constant_name_node(node: Node) -> Option<Node> {
 #[cfg(test)]
 mod tests {
     use crate::index::ClassOrigin;
-    use crate::language::java::class_parser::parse_java_source;
+    use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
 
     #[test]
     fn enum_rule_produces_semantic_constants() {
         let src = "enum Color { RED, GREEN, BLUE }";
-        let synthetic = parse_java_source(src, ClassOrigin::Unknown, None)
+        let synthetic = parse_java_source_via_tree_for_test(src, ClassOrigin::Unknown, None)
             .into_iter()
             .find(|class| class.name.as_ref() == "Color")
             .expect("Color enum");

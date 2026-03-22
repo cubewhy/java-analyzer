@@ -1257,7 +1257,10 @@ fn has_spread_parameter(formals_node: Node) -> bool {
 mod tests {
     use super::*;
     use crate::index::ClassOrigin;
-    use crate::language::java::class_parser::{parse_java_source, test_fixture_class};
+    use crate::language::java::class_parser::{
+        parse_java_source_via_tree_for_test, parse_java_source_with_view_via_tree_for_test,
+        test_fixture_class,
+    };
     use crate::salsa_db::{Database, FileId, SourceFile};
     use tower_lsp::lsp_types::Url;
 
@@ -1292,7 +1295,7 @@ mod tests {
     }
 
     fn first_class(source: &str) -> crate::index::ClassMetadata {
-        parse_java_source(source, ClassOrigin::Unknown, None)
+        parse_java_source_via_tree_for_test(source, ClassOrigin::Unknown, None)
             .into_iter()
             .next()
             .expect("at least one parsed type")
@@ -1788,7 +1791,7 @@ public @interface MyAnno {}
             },
         ]);
         let view = IndexView::new(smallvec::smallvec![bucket]);
-        let classes = crate::language::java::class_parser::parse_java_source_with_view(
+        let classes = parse_java_source_with_view_via_tree_for_test(
             src,
             ClassOrigin::SourceFile(Arc::from("file:///MyAnno.java")),
             Some(view.build_name_table()),

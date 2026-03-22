@@ -165,6 +165,27 @@ pub fn extract_static_imports_from_root(source: &str, root: Node<'_>) -> Vec<Arc
 }
 
 #[cfg(test)]
+pub(crate) fn parse_java_source_via_tree_for_test(
+    source: &str,
+    origin: ClassOrigin,
+    name_table: Option<Arc<crate::index::NameTable>>,
+) -> Vec<ClassMetadata> {
+    parse_java_source_with_view_via_tree_for_test(source, origin, name_table, None)
+}
+
+#[cfg(test)]
+pub(crate) fn parse_java_source_with_view_via_tree_for_test(
+    source: &str,
+    origin: ClassOrigin,
+    name_table: Option<Arc<crate::index::NameTable>>,
+    view: Option<&IndexView>,
+) -> Vec<ClassMetadata> {
+    let tree = crate::salsa_queries::parse::parse_tree_for_language(source, "java")
+        .expect("Java test source should parse");
+    extract_java_classes_from_tree(source, &tree, &origin, name_table, view)
+}
+
+#[cfg(test)]
 pub(crate) fn test_fixture_class(internal_name: &str) -> ClassMetadata {
     let package = internal_name
         .rsplit_once('/')
@@ -209,7 +230,17 @@ pub(crate) fn parse_java_source_with_test_jdk(
     let view = idx.view(IndexScope {
         module: ModuleId::ROOT,
     });
-    parse_java_source_with_view(source, origin, Some(view.build_name_table()), Some(&view))
+    parse_java_source_with_view_via_tree_for_test(
+        source,
+        origin,
+        Some(view.build_name_table()),
+        Some(&view),
+    )
+}
+
+#[cfg(test)]
+fn parse_test_classes(source: &str) -> Vec<ClassMetadata> {
+    parse_java_source_via_tree_for_test(source, ClassOrigin::Unknown, None)
 }
 
 fn recover_error_type_decl(
@@ -1092,9 +1123,10 @@ fn clean_javadoc(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{parse_java_source_via_tree_for_test, parse_test_classes};
     use crate::{
         index::{ClassOrigin, IndexScope, ModuleId, WorkspaceIndex},
-        language::java::{class_parser::parse_java_source, render},
+        language::java::render,
         semantic::types::{
             SymbolProvider, descriptor_to_source_type,
             generics::{JvmType, substitute_type},
@@ -1123,7 +1155,7 @@ public class Main {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let nested = classes
             .iter()
             .find(|c| c.name.as_ref() == "NestedClass")
@@ -1145,7 +1177,7 @@ public class Main {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let nested = classes
             .iter()
             .find(|c| c.name.as_ref() == "NestedClass")
@@ -1163,7 +1195,7 @@ public class Main {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let nested = classes
             .iter()
             .find(|c| c.name.as_ref() == "NestedClass")
@@ -1187,7 +1219,7 @@ public class Main {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let leaf = classes.iter().find(|c| c.name.as_ref() == "Leaf").unwrap();
         assert_eq!(
             leaf.internal_name.as_ref(),
@@ -1209,7 +1241,7 @@ public class Main {
             }
         "#};
 
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let outer = classes.iter().find(|c| c.name.as_ref() == "Outer").unwrap();
         let nested = classes
             .iter()
@@ -1244,7 +1276,7 @@ public class Main {
     #[test]
     fn test_super_name_no_extends_keyword() {
         let src = "public class Child extends Parent implements Runnable, Serializable {}";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let child = classes.iter().find(|c| c.name.as_ref() == "Child").unwrap();
         assert_eq!(
             child.super_name.as_deref(),
@@ -1264,7 +1296,7 @@ public class Main {
     #[test]
     fn test_super_name_strips_extends_keyword() {
         let src = "public class Child extends Parent implements Runnable {}";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let child = classes.iter().find(|c| c.name.as_ref() == "Child").unwrap();
         assert_eq!(
             child.super_name.as_deref(),
@@ -1278,7 +1310,7 @@ public class Main {
     #[test]
     fn test_extract_java_class_generic_signature() {
         let src = "public class MyMap<K, V> { }";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let meta = classes.first().unwrap();
 
         assert_eq!(
@@ -1290,7 +1322,7 @@ public class Main {
     #[test]
     fn test_extract_java_method_generic_signature() {
         let src = "public class Utils { public <T> T getFirst(List<T> list) { return null; } }";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let method = classes.first().unwrap().methods.first().unwrap();
 
         // 验证方法上的泛型 T 被正确抓取，并且携带了后续的 descriptor
@@ -1307,7 +1339,7 @@ public class Main {
                 public <R> Demo<R> map(Function<? super T, ? extends R> fn) { return null; }
             }
         "#};
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let demo = classes
             .iter()
             .find(|c| c.internal_name.as_ref() == "org/example/Demo")
@@ -1344,7 +1376,7 @@ public class Main {
                 public void add(int index, E element) {}
             }
         "#};
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let cls = classes
             .iter()
             .find(|c| c.name.as_ref() == "MyList")
@@ -1379,7 +1411,7 @@ public class Main {
                 public boolean add(E e) { return true; }
             }
         "#};
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let cls = classes
             .iter()
             .find(|c| c.internal_name.as_ref() == "org/example/MyList")
@@ -1413,7 +1445,7 @@ public class Main {
         let expected_ideal = "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TT;+TR;>;)Lorg/example/Demo<TR;>;";
 
         let origin = ClassOrigin::SourceFile(Arc::from("file:///tmp/provenance/Demo.java"));
-        let parsed_classes = parse_java_source(src, origin.clone(), None);
+        let parsed_classes = parse_java_source_via_tree_for_test(src, origin.clone(), None);
         let parsed_demo = parsed_classes
             .iter()
             .find(|c| c.internal_name.as_ref() == "org/example/Demo")
@@ -1522,7 +1554,7 @@ public class Main {
             }
         "#};
 
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let cls = classes
             .iter()
             .find(|c| c.internal_name.as_ref() == "org/example/Box")
@@ -1640,7 +1672,7 @@ public class Main {
                 ) { return null; }
             }
         "#};
-        let parsed = parse_java_source(src, ClassOrigin::Unknown, None);
+        let parsed = parse_test_classes(src);
         let source_cls = parsed
             .iter()
             .find(|c| c.internal_name.as_ref() == "org/example/Box")
@@ -1691,7 +1723,7 @@ public class Foo {
     public void bar() {}
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let foo = classes.iter().find(|c| c.name.as_ref() == "Foo").unwrap();
 
         assert!(
@@ -1730,7 +1762,7 @@ public class Foo {
     #[test]
     fn test_access_flags_interface() {
         let src = "public interface I { void f(); }";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let i = classes.iter().find(|c| c.name.as_ref() == "I").unwrap();
         assert!(i.access_flags & rust_asm::constants::ACC_INTERFACE != 0);
     }
@@ -1738,7 +1770,7 @@ public class Foo {
     #[test]
     fn test_access_flags_enum() {
         let src = "public enum E { A, B }";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let e = classes.iter().find(|c| c.name.as_ref() == "E").unwrap();
         assert!(e.access_flags & rust_asm::constants::ACC_ENUM != 0);
     }
@@ -1746,7 +1778,7 @@ public class Foo {
     #[test]
     fn test_access_flags_annotation_type() {
         let src = "public @interface Ann { }";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let a = classes.iter().find(|c| c.name.as_ref() == "Ann").unwrap();
         assert!(a.access_flags & rust_asm::constants::ACC_ANNOTATION != 0);
         assert!(a.access_flags & rust_asm::constants::ACC_INTERFACE != 0);
@@ -1761,7 +1793,7 @@ public record R(int x) {}
 public interface I {}
 public @interface Ann {}
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
 
         let c = classes.iter().find(|x| x.name.as_ref() == "C").unwrap();
         assert!(c.access_flags & rust_asm::constants::ACC_SUPER != 0);
@@ -1782,7 +1814,7 @@ public @interface Ann {}
     #[test]
     fn test_record_synthetic_members_are_indexed() {
         let src = "record Point(int x, int y) {}";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let point = classes.iter().find(|c| c.name.as_ref() == "Point").unwrap();
         assert!(
             point
@@ -1811,7 +1843,7 @@ record Point(int x, int y) {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let point = classes.iter().find(|c| c.name.as_ref() == "Point").unwrap();
 
         // Should have the canonical constructor with correct signature
@@ -1845,7 +1877,7 @@ record Point(int x, int y) {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let point = classes.iter().find(|c| c.name.as_ref() == "Point").unwrap();
 
         // Should have both the canonical constructor (synthetic) and the custom one
@@ -1891,7 +1923,7 @@ record Point(int x, int y) {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let point = classes.iter().find(|c| c.name.as_ref() == "Point").unwrap();
 
         // Should have exactly one canonical constructor (compact overrides synthetic)
@@ -1927,7 +1959,7 @@ record Point(int x, int y) {
     }
 }
 "#;
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let point = classes.iter().find(|c| c.name.as_ref() == "Point").unwrap();
 
         let constructors: Vec<_> = point
@@ -1952,7 +1984,7 @@ record Point(int x, int y) {
     #[test]
     fn test_enum_constants_are_indexed_as_fields() {
         let src = "enum Color { RED, GREEN, BLUE }";
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         let color = classes.iter().find(|c| c.name.as_ref() == "Color").unwrap();
         let names: Vec<&str> = color
             .fields
@@ -1966,7 +1998,7 @@ record Point(int x, int y) {
     fn test_find_symbol_range_resolves_record_accessor_to_component() {
         let src = "record Point(int x, int y) {}";
         let idx = crate::index::WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         let view = idx.view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         });
@@ -1979,7 +2011,7 @@ record Point(int x, int y) {
     fn test_find_symbol_range_resolves_enum_constant_to_constant_declaration() {
         let src = "enum Color { RED, GREEN, BLUE }";
         let idx = crate::index::WorkspaceIndex::new();
-        idx.add_classes(parse_java_source(src, ClassOrigin::Unknown, None));
+        idx.add_classes(parse_test_classes(src));
         let view = idx.view(crate::index::IndexScope {
             module: crate::index::ModuleId::ROOT,
         });
@@ -1992,7 +2024,7 @@ record Point(int x, int y) {
 #[cfg(test)]
 mod nested_class_navigation_tests {
     use super::*;
-    use crate::index::{ClassOrigin, IndexScope, ModuleId, WorkspaceIndex};
+    use crate::index::{IndexScope, ModuleId, WorkspaceIndex};
 
     #[test]
     fn test_find_nested_class_by_internal_name() {
@@ -2012,7 +2044,7 @@ mod nested_class_navigation_tests {
             }
         "};
 
-        let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+        let classes = parse_test_classes(src);
         println!("\n=== Parsed {} classes ===", classes.len());
         for class in &classes {
             println!(
@@ -2105,7 +2137,7 @@ fn test_nested_class_completion_scenarios() {
             }
         "};
 
-    let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+    let classes = parse_test_classes(src);
     println!("\n=== Parsed {} classes ===", classes.len());
     for class in &classes {
         println!(
@@ -2181,7 +2213,7 @@ fn test_nested_class_with_dollar_in_name() {
             }
         "};
 
-    let classes = parse_java_source(src, ClassOrigin::Unknown, None);
+    let classes = parse_test_classes(src);
     println!("\n=== Parsed {} classes ===", classes.len());
     for class in &classes {
         println!(
