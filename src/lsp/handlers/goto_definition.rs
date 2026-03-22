@@ -45,6 +45,7 @@ fn handle_goto_definition_blocking(
     params: GotoDefinitionParams,
     request: Arc<RequestContext>,
 ) -> crate::lsp::request_cancellation::RequestResult<GotoPrepared> {
+    let started = std::time::Instant::now();
     let uri = &params.text_document_position_params.text_document.uri;
     let pos = params.text_document_position_params.position;
 
@@ -61,6 +62,14 @@ fn handle_goto_definition_blocking(
     let analysis = prepared.analysis();
     let scope = prepared.scope();
     let view = prepared.view().clone();
+    let log_summary = || {
+        prepared.metrics().log_summary(
+            analysis.module.0,
+            analysis.classpath,
+            analysis.source_root.map(|id| id.0),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
 
     let request_analysis_t0 = std::time::Instant::now();
 
@@ -75,6 +84,7 @@ fn handle_goto_definition_blocking(
     );
 
     let Some(ctx) = prepared.semantic_context(lookup_pos, None)? else {
+        log_summary();
         return Ok(GotoPrepared::Ready(None));
     };
 
@@ -107,25 +117,30 @@ fn handle_goto_definition_blocking(
             find_local_var_decl(doc.source().text(), lv.name.as_ref())
         });
 
-        return Ok(GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(
+        let result = Ok(GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(
             Location {
                 uri: uri.clone(),
                 range: range.flatten().unwrap_or_default(),
             },
         ))));
+        log_summary();
+        return result;
     }
 
     if let CursorLocation::Import { prefix } = &ctx.location {
         let raw = prefix.trim().trim_end_matches(".*").trim();
         let internal = raw.replace('.', "/");
         if view.get_class(&internal).is_some() {
-            return goto_resolved_symbol_blocking(
+            let result = goto_resolved_symbol_blocking(
                 Arc::clone(&workspace),
                 &view,
                 ResolvedSymbol::Class(Arc::from(internal)),
                 &request,
             );
+            log_summary();
+            return result;
         }
+        log_summary();
         return Ok(GotoPrepared::Ready(None));
     }
 
@@ -134,12 +149,14 @@ fn handle_goto_definition_blocking(
         Some(s) => s,
         None => {
             tracing::debug!(location = ?ctx.location, "goto: resolver returned None");
+            log_summary();
             return Ok(GotoPrepared::Ready(None));
         }
     };
     tracing::debug!(symbol = ?symbol, "goto: resolved symbol");
-
-    goto_resolved_symbol_blocking(workspace, &view, symbol, &request)
+    let result = goto_resolved_symbol_blocking(workspace, &view, symbol, &request);
+    log_summary();
+    result
 }
 
 async fn finish_goto_definition(

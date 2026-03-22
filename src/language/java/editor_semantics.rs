@@ -247,6 +247,12 @@ impl<'a> JavaSemanticRequestContext<'a> {
             metrics.record_semantic_context_lookup("inlay_scope_context", offset);
         }
         let db = workspace.salsa_db.lock();
+        if let Some(metrics) = self.metrics() {
+            metrics.record_parse_snapshot(
+                "inlay.salsa_context",
+                crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file),
+            );
+        }
         let started = std::time::Instant::now();
         let Some(mut ctx) = crate::salsa_queries::java::extract_java_semantic_context_at_offset(
             &*db,

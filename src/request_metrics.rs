@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use tower_lsp::lsp_types::Url;
 
+use crate::salsa_db::ParseTreeOrigin;
+
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct RequestMetrics {
@@ -16,6 +18,7 @@ pub struct RequestMetrics {
     semantic_context_lookups: AtomicUsize,
     phase_stats: Mutex<HashMap<&'static str, PhaseStat>>,
     hot_spots: Mutex<Vec<HotSpot>>,
+    parse_snapshots: Mutex<HashMap<(&'static str, &'static str), usize>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -41,6 +44,7 @@ impl RequestMetrics {
             semantic_context_lookups: AtomicUsize::new(0),
             phase_stats: Mutex::new(HashMap::new()),
             hot_spots: Mutex::new(Vec::new()),
+            parse_snapshots: Mutex::new(HashMap::new()),
         })
     }
 
@@ -101,6 +105,26 @@ impl RequestMetrics {
 
     pub fn semantic_context_lookup_count(&self) -> usize {
         self.semantic_context_lookups.load(Ordering::Relaxed)
+    }
+
+    pub fn record_parse_snapshot(&self, callsite: &'static str, origin: Option<ParseTreeOrigin>) {
+        let origin = origin.map(ParseTreeOrigin::as_str).unwrap_or("missing");
+        {
+            let mut parse_snapshots = self
+                .parse_snapshots
+                .lock()
+                .expect("parse snapshots poisoned");
+            *parse_snapshots.entry((callsite, origin)).or_insert(0) += 1;
+        }
+
+        tracing::debug!(
+            request_id = self.request_id,
+            request_kind = self.request_kind,
+            uri = %self.uri,
+            callsite,
+            parse_origin = origin,
+            "request parse snapshot"
+        );
     }
 
     pub fn record_phase_duration(&self, phase: &'static str, elapsed: Duration) {
@@ -174,6 +198,19 @@ impl RequestMetrics {
                 .join(",")
         };
 
+        let parse_snapshots = {
+            let parse_snapshots = self
+                .parse_snapshots
+                .lock()
+                .expect("parse snapshots poisoned");
+            let mut items: Vec<String> = parse_snapshots
+                .iter()
+                .map(|((callsite, origin), count)| format!("{callsite}:{origin}={count}"))
+                .collect();
+            items.sort();
+            items.join(",")
+        };
+
         tracing::debug!(
             request_id = self.request_id,
             request_kind = self.request_kind,
@@ -185,6 +222,7 @@ impl RequestMetrics {
             semantic_context_lookups = self.semantic_context_lookup_count(),
             phase_breakdown,
             hottest,
+            parse_snapshots,
             elapsed_ms,
             "request analysis summary"
         );

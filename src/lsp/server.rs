@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -168,23 +169,48 @@ impl Backend {
     }
 
     fn reindex_document_from_salsa(&self, uri: &Url, reason: &'static str) -> Option<()> {
-        let salsa_file = self.workspace.get_or_update_salsa_file(uri)?;
-        let language_id = self
+        let started = Instant::now();
+        let source = self.workspace.document_snapshot(uri)?;
+        let salsa_file = self
             .workspace
-            .documents
-            .with_doc(uri, |doc| doc.language_id().to_owned())?;
+            .get_or_update_salsa_file_for_snapshot(source.as_ref());
+        let sync_elapsed = started.elapsed();
         let analysis = self.workspace.analysis_context_for_uri(uri);
         let uri_str = uri.to_string();
 
-        let classes = {
+        let (
+            classes,
+            parse_origin_before,
+            parse_origin_after,
+            extract_tracked_elapsed,
+            extract_materialize_elapsed,
+            extraction_result,
+        ) = {
             let db = self.workspace.salsa_db.lock();
+            let parse_origin_before =
+                crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file);
+            let tracked_started = Instant::now();
 
             // Trigger the tracked extraction so dependent Salsa queries observe content changes.
-            let _result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
-            crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file)
+            let extraction_result = crate::salsa_queries::index::extract_classes(&*db, salsa_file);
+            let extract_tracked_elapsed = tracked_started.elapsed();
+            let parse_origin_after =
+                crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file);
+            let materialize_started = Instant::now();
+            let classes = crate::salsa_queries::index::get_extracted_classes(&*db, salsa_file);
+            let extract_materialize_elapsed = materialize_started.elapsed();
+            (
+                classes,
+                parse_origin_before,
+                parse_origin_after,
+                extract_tracked_elapsed,
+                extract_materialize_elapsed,
+                extraction_result,
+            )
         };
 
         let origin = ClassOrigin::SourceFile(Arc::from(uri_str.as_str()));
+        let index_update_started = Instant::now();
         tracing::debug!(
             uri = %uri,
             reason,
@@ -192,12 +218,30 @@ impl Backend {
             classpath = ?analysis.classpath,
             source_root = ?analysis.source_root.map(|id| id.0),
             class_count = classes.len(),
-            language = language_id.as_str(),
+            language = source.language_id.as_ref(),
+            parse_origin_before = parse_origin_before.map(|origin| origin.as_str()),
+            parse_origin_after = parse_origin_after.map(|origin| origin.as_str()),
+            tracked_class_count = extraction_result.class_count,
+            tracked_content_hash = extraction_result.content_hash,
+            sync_document_ms = sync_elapsed.as_secs_f64() * 1000.0,
+            tracked_extract_ms = extract_tracked_elapsed.as_secs_f64() * 1000.0,
+            materialize_classes_ms = extract_materialize_elapsed.as_secs_f64() * 1000.0,
             "document indexing with Salsa"
         );
+
         self.workspace.index.update(|index| {
             index.update_source_in_context(analysis.module, analysis.source_root, origin, classes);
         });
+        tracing::debug!(
+            uri = %uri,
+            reason,
+            module = analysis.module.0,
+            classpath = ?analysis.classpath,
+            source_root = ?analysis.source_root.map(|id| id.0),
+            index_update_ms = index_update_started.elapsed().as_secs_f64() * 1000.0,
+            total_reindex_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "document indexing timing"
+        );
 
         Some(())
     }
@@ -331,7 +375,7 @@ impl LanguageServer for Backend {
             None => return,
         };
 
-        let mut changed_text_for_index: Option<String> = None;
+        let mut changed_text_for_index = false;
 
         let ok = self.workspace.documents.with_doc_mut(uri, |doc| {
             let new_version = params.text_document.version;
@@ -363,7 +407,7 @@ impl LanguageServer for Backend {
                         text.as_str(),
                         new_tree,
                     ));
-                    changed_text_for_index = Some(doc.source().text().to_owned());
+                    changed_text_for_index = true;
                     return;
                 };
 
@@ -420,13 +464,13 @@ impl LanguageServer for Backend {
                 text.as_str(),
                 new_tree,
             ));
-            changed_text_for_index = Some(doc.source().text().to_owned());
+            changed_text_for_index = true;
         });
         if ok.is_none() {
             return;
         }
 
-        if changed_text_for_index.is_none() {
+        if !changed_text_for_index {
             return;
         }
 
@@ -452,7 +496,7 @@ impl LanguageServer for Backend {
             None => return,
         };
 
-        let mut content_for_index: Option<String> = None;
+        let mut content_for_index = false;
 
         self.workspace.documents.with_doc_mut(uri, |doc| {
             if let Some(text) = params.text.as_ref() {
@@ -470,7 +514,7 @@ impl LanguageServer for Backend {
                     text.as_str(),
                     new_tree,
                 ));
-                content_for_index = Some(doc.source().text().to_owned());
+                content_for_index = true;
                 return;
             }
 
@@ -479,10 +523,10 @@ impl LanguageServer for Backend {
             let mut parser = lang.make_parser();
             let new_tree = parser.parse(&cur_text, None);
             doc.set_tree(new_tree);
-            content_for_index = Some(cur_text);
+            content_for_index = true;
         });
 
-        if content_for_index.is_none() {
+        if !content_for_index {
             return;
         }
         self.reindex_document_from_salsa(uri, "did_save");

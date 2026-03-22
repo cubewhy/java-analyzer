@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tower_lsp::lsp_types::{Position, Url};
 
@@ -97,8 +98,8 @@ impl<'a> PreparedRequest<'a> {
         request: Arc<RequestContext>,
     ) -> RequestResult<Option<Self>> {
         let lang_id = workspace
-            .documents
-            .with_doc(uri, |doc| doc.language_id().to_owned());
+            .document_snapshot(uri)
+            .map(|file| file.language_id.to_string());
         let Some(lang_id) = lang_id else {
             return Ok(None);
         };
@@ -106,7 +107,7 @@ impl<'a> PreparedRequest<'a> {
             return Ok(None);
         };
         request.check_cancelled("request_setup.before_ensure_tree")?;
-        let Some(file) = ensure_tree(&workspace, uri, lang) else {
+        let Some(file) = workspace.ensure_tree(uri, lang) else {
             return Ok(None);
         };
         request.check_cancelled("request_setup.after_ensure_tree")?;
@@ -137,9 +138,14 @@ impl<'a> PreparedRequest<'a> {
             view: view.clone(),
         };
 
-        let Some(salsa_file) = workspace.get_or_update_salsa_file(uri) else {
-            return Ok(None);
-        };
+        let salsa_file = workspace.get_or_update_salsa_file_for_snapshot(file.as_ref());
+        {
+            let db = workspace.salsa_db.lock();
+            request.metrics().record_parse_snapshot(
+                "request_setup.salsa_file",
+                crate::salsa_queries::parse::cached_parse_tree_origin(&*db, salsa_file),
+            );
+        }
 
         Ok(Some(Self {
             workspace,
@@ -226,8 +232,13 @@ impl<'a> PreparedRequest<'a> {
         );
         self.request
             .check_cancelled("semantic_context.before_extract")?;
+        let extract_started = Instant::now();
         let Some(context_data) = ({
             let db = self.workspace.salsa_db.lock();
+            self.request.metrics().record_parse_snapshot(
+                "semantic_context.before_extract",
+                crate::salsa_queries::parse::cached_parse_tree_origin(&*db, self.salsa_file),
+            );
             if self.lang.id() == "java" {
                 Some(crate::salsa_queries::java::extract_java_completion_context(
                     &*db,
@@ -249,9 +260,17 @@ impl<'a> PreparedRequest<'a> {
             return Ok(None);
         };
         self.request
+            .metrics()
+            .record_phase_duration("semantic_context.extract", extract_started.elapsed());
+        self.request
             .check_cancelled("semantic_context.after_extract")?;
 
+        let build_started = Instant::now();
         let db = self.workspace.salsa_db.lock();
+        self.request.metrics().record_parse_snapshot(
+            "semantic_context.before_build",
+            crate::salsa_queries::parse::cached_parse_tree_origin(&*db, self.salsa_file),
+        );
         self.request
             .check_cancelled("semantic_context.before_build")?;
         let mut ctx = if self.lang.id() == "java" {
@@ -275,12 +294,18 @@ impl<'a> PreparedRequest<'a> {
             ctx
         };
         self.request
+            .metrics()
+            .record_phase_duration("semantic_context.build", build_started.elapsed());
+        self.request
             .check_cancelled("semantic_context.after_build")?;
 
         if let Some(pkg) = self.inferred_package.as_ref() {
             ctx = ctx.with_inferred_package(Arc::clone(pkg));
         }
 
+        self.request
+            .metrics()
+            .record_phase_duration("semantic_context.total", extract_started.elapsed());
         Ok(Some(ctx))
     }
 
@@ -291,27 +316,6 @@ impl<'a> PreparedRequest<'a> {
     ) -> RequestResult<Option<SemanticContext>> {
         self.semantic_context(self.token_end_position(position), trigger)
     }
-}
-
-fn ensure_tree(workspace: &Workspace, uri: &Url, lang: &dyn Language) -> Option<Arc<SourceFile>> {
-    let has_tree = workspace
-        .documents
-        .with_doc(uri, |doc| doc.source().tree.is_some())
-        .unwrap_or(false);
-
-    if !has_tree {
-        workspace.documents.with_doc_mut(uri, |doc| {
-            if doc.source().tree.is_some() {
-                return;
-            }
-            let tree = lang.parse_tree(doc.source().text(), None);
-            doc.set_tree(tree);
-        });
-    }
-
-    workspace
-        .documents
-        .with_doc(uri, |doc| Arc::clone(doc.source()))
 }
 
 fn token_end_character(content: &str, line: u32, character: u32) -> u32 {

@@ -37,6 +37,7 @@ fn handle_completion_blocking(
     params: CompletionParams,
     request: Arc<RequestContext>,
 ) -> crate::lsp::request_cancellation::RequestResult<Option<CompletionResponse>> {
+    let started = std::time::Instant::now();
     let uri = &params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
     let trigger = params
@@ -58,6 +59,14 @@ fn handle_completion_blocking(
     let analysis = prepared.analysis();
     let scope = prepared.scope();
     let view = prepared.view();
+    let log_summary = || {
+        prepared.metrics().log_summary(
+            analysis.module.0,
+            analysis.classpath,
+            analysis.source_root.map(|id| id.0),
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
+    };
 
     let _uri_str = uri.as_str();
 
@@ -88,6 +97,7 @@ fn handle_completion_blocking(
     );
 
     let Some(ctx) = prepared.semantic_context(position, trigger)? else {
+        log_summary();
         return Ok(None);
     };
 
@@ -110,6 +120,7 @@ fn handle_completion_blocking(
     )?;
     if completion.candidates.is_empty() {
         debug!("no candidates");
+        log_summary();
         return Ok(None);
     }
 
@@ -137,6 +148,7 @@ fn handle_completion_blocking(
         final_truncated = metadata.final_truncated,
         "returning completions"
     );
+    log_summary();
 
     Ok(Some(CompletionResponse::List(completion_list)))
 }

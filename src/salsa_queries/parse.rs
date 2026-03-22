@@ -93,6 +93,13 @@ pub fn parse_tree(db: &dyn Db, file: SourceFile) -> Option<Tree> {
     }
 }
 
+/// Inspect the latest cached parse origin for a file without forcing a reparse.
+pub fn cached_parse_tree_origin(db: &dyn Db, file: SourceFile) -> Option<ParseTreeOrigin> {
+    let file_id = file.file_id(db);
+    db.cached_parse_tree(&file_id)
+        .map(|snapshot| snapshot.origin)
+}
+
 /// Seed the parse cache with an already-computed tree, typically from the LSP document path.
 pub fn seed_parse_tree(db: &dyn Db, file: SourceFile, tree: &Tree) {
     db.store_parse_tree(

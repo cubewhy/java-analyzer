@@ -14,6 +14,7 @@ use crate::index::{
     ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex,
     WorkspaceIndexHandle,
 };
+use crate::language::Language;
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
 use crate::salsa_queries::semantic::CachedMethodLocal;
 use crate::semantic::context::CurrentClassMember;
@@ -138,49 +139,72 @@ impl Workspace {
         self.get_or_update_salsa_file(&url)
     }
 
+    pub fn document_snapshot(&self, uri: &Url) -> Option<Arc<SourceFile>> {
+        self.documents.with_doc(uri, |doc| doc.snapshot())
+    }
+
+    pub fn ensure_tree(&self, uri: &Url, lang: &dyn Language) -> Option<Arc<SourceFile>> {
+        let has_tree = self
+            .documents
+            .with_doc(uri, |doc| doc.source().tree.is_some())
+            .unwrap_or(false);
+
+        if !has_tree {
+            self.documents.with_doc_mut(uri, |doc| {
+                if doc.source().tree.is_some() {
+                    return;
+                }
+                let tree = lang.parse_tree(doc.source().text(), None);
+                doc.set_tree(tree);
+            });
+        }
+
+        self.document_snapshot(uri)
+    }
+
     /// Get or update a Salsa SourceFile for a URI
     ///
     /// This ensures the Salsa file is synchronized with the document content.
     /// If the file exists but content has changed, it updates the Salsa file.
     pub fn get_or_update_salsa_file(&self, uri: &Url) -> Option<crate::salsa_db::SourceFile> {
-        // Get current document content
-        let content = self
-            .documents
-            .with_doc(uri, |doc| doc.source().text().to_string())?;
-        let language_id = self
-            .documents
-            .with_doc(uri, |doc| doc.language_id().to_string())?;
+        let source = self.document_snapshot(uri)?;
+        Some(self.get_or_update_salsa_file_for_snapshot(source.as_ref()))
+    }
 
+    pub fn get_or_update_salsa_file_for_snapshot(
+        &self,
+        source: &SourceFile,
+    ) -> crate::salsa_db::SourceFile {
         // Check if file exists
         {
             let files = self.salsa_files.read();
-            if let Some(&file) = files.get(uri) {
-                let (salsa_content, salsa_language_id) = {
+            if let Some(&file) = files.get(source.uri.as_ref()) {
+                let in_sync = {
                     let db = self.salsa_db.lock();
-                    (
-                        file.content(&*db).to_string(),
-                        file.language_id(&*db).to_string(),
-                    )
+                    file.content(&*db).as_str() == source.text()
+                        && file.language_id(&*db).as_ref() == source.language_id.as_ref()
                 };
 
-                if salsa_content == content && salsa_language_id == language_id {
+                if in_sync {
                     // Already in sync
-                    return Some(file);
+                    return file;
                 }
 
                 // Update the existing Salsa input to match the current document snapshot.
                 drop(files); // Release read lock
-                self.update_existing_salsa_file(file, content, language_id);
-                self.seed_salsa_parse_tree_from_document(uri, file);
-                return Some(file);
+                self.update_existing_salsa_file_from_source(file, source);
+                self.seed_salsa_parse_tree_from_source(file, source);
+                return file;
             }
         }
 
         // Create new file
-        let file = self.create_salsa_file(uri.clone(), content, language_id);
-        self.salsa_files.write().insert(uri.clone(), file);
-        self.seed_salsa_parse_tree_from_document(uri, file);
-        Some(file)
+        let file = self.create_salsa_file_from_source(source);
+        self.salsa_files
+            .write()
+            .insert(source.uri.as_ref().clone(), file);
+        self.seed_salsa_parse_tree_from_source(file, source);
+        file
     }
 
     pub fn scope_for_uri(&self, uri: &Url) -> IndexScope {
@@ -603,6 +627,16 @@ impl Workspace {
         crate::salsa_db::SourceFile::new(&*db, FileId::new(uri), content, Arc::from(language_id))
     }
 
+    fn create_salsa_file_from_source(&self, source: &SourceFile) -> crate::salsa_db::SourceFile {
+        let db = self.salsa_db.lock();
+        crate::salsa_db::SourceFile::new(
+            &*db,
+            FileId::new(source.uri.as_ref().clone()),
+            source.text().to_owned(),
+            Arc::clone(&source.language_id),
+        )
+    }
+
     fn update_existing_salsa_file(
         &self,
         file: crate::salsa_db::SourceFile,
@@ -620,25 +654,42 @@ impl Workspace {
         }
     }
 
+    fn update_existing_salsa_file_from_source(
+        &self,
+        file: crate::salsa_db::SourceFile,
+        source: &SourceFile,
+    ) {
+        use salsa::Setter;
+
+        let mut db = self.salsa_db.lock();
+        if file.content(&*db).as_str() != source.text() {
+            file.set_content(&mut *db).to(source.text().to_owned());
+        }
+        if file.language_id(&*db).as_ref() != source.language_id.as_ref() {
+            file.set_language_id(&mut *db)
+                .to(Arc::clone(&source.language_id));
+        }
+    }
+
     fn seed_salsa_parse_tree_from_document(&self, uri: &Url, file: crate::salsa_db::SourceFile) {
-        let snapshot = self
-            .documents
-            .with_doc(uri, |doc| {
-                let source = doc.source();
-                source
-                    .tree
-                    .as_deref()
-                    .cloned()
-                    .map(|tree| (source.text().to_string(), source.language_id.clone(), tree))
-            })
-            .flatten();
-        let Some((content, language_id, tree)) = snapshot else {
+        let Some(source) = self.document_snapshot(uri) else {
+            return;
+        };
+        self.seed_salsa_parse_tree_from_source(file, source.as_ref());
+    }
+
+    fn seed_salsa_parse_tree_from_source(
+        &self,
+        file: crate::salsa_db::SourceFile,
+        source: &SourceFile,
+    ) {
+        let Some(tree) = source.tree.as_deref().cloned() else {
             return;
         };
 
         let db = self.salsa_db.lock();
-        if file.content(&*db).as_str() != content.as_str()
-            || file.language_id(&*db).as_ref() != language_id.as_ref()
+        if file.content(&*db).as_str() != source.text()
+            || file.language_id(&*db).as_ref() != source.language_id.as_ref()
         {
             return;
         }
@@ -861,6 +912,7 @@ mod tests {
         DetectedBuildToolKind, JavaToolchainInfo, ModelFidelity, ModelFreshness,
         WorkspaceModelProvenance, WorkspaceModule, WorkspaceRoot, WorkspaceSourceRoot,
     };
+    use crate::language::LanguageRegistry;
     use crate::salsa_db::ParseTreeOrigin;
     use crate::workspace::document::Document;
     use tempfile::tempdir;
@@ -1033,6 +1085,42 @@ mod tests {
 
         assert_eq!(snapshot.origin, ParseTreeOrigin::Seeded);
         assert_eq!(snapshot.content.as_ref(), text);
+    }
+
+    #[test]
+    fn ensure_tree_materializes_tree_on_document_snapshot_boundary() {
+        let workspace = Workspace::new();
+        let registry = LanguageRegistry::new();
+        let uri = Url::parse("file:///workspace/Test.java").expect("valid uri");
+        let text = "class Test { void demo() {} }";
+        let lang = registry.find("java").expect("java language");
+
+        workspace
+            .documents
+            .open(Document::new(crate::workspace::SourceFile::new(
+                uri.clone(),
+                "java",
+                1,
+                text,
+                None,
+            )));
+
+        let snapshot = workspace
+            .ensure_tree(&uri, lang)
+            .expect("snapshot with tree should exist");
+
+        assert!(
+            snapshot.tree.is_some(),
+            "returned snapshot should have a tree"
+        );
+        assert!(
+            workspace
+                .document_snapshot(&uri)
+                .expect("stored snapshot")
+                .tree
+                .is_some(),
+            "document snapshot boundary should publish the tree back to the workspace"
+        );
     }
 
     #[tokio::test]

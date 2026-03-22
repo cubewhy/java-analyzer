@@ -42,6 +42,11 @@ impl Document {
         &self.source
     }
 
+    #[inline]
+    pub fn snapshot(&self) -> Arc<SourceFile> {
+        Arc::clone(&self.source)
+    }
+
     /// Replace the current source snapshot with a new one.
     /// Invalidates all version-sensitive caches.
     pub fn update_source(&mut self, source: SourceFile) {

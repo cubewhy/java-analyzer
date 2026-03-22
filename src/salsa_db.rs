@@ -84,6 +84,16 @@ pub enum ParseTreeOrigin {
     Incremental,
 }
 
+impl ParseTreeOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Seeded => "seeded",
+            Self::Full => "full",
+            Self::Incremental => "incremental",
+        }
+    }
+}
+
 /// Latest parse snapshot retained for incremental tree-sitter reparses.
 #[derive(Clone)]
 pub struct ParseTreeSnapshot {

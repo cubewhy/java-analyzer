@@ -5,39 +5,11 @@ use tower_lsp::lsp_types::*;
 use crate::language::rope_utils::rope_line_col_to_offset;
 use crate::language::{LanguageRegistry, TokenCollector};
 use crate::lsp::request_context::RequestContext;
-use crate::workspace::{SourceFile, Workspace};
+use crate::workspace::Workspace;
 
 /// Generate a unique but stable result_id for this document version.
 fn make_result_id(version: i32) -> String {
     version.to_string()
-}
-
-/// Ensure the document has a parsed tree, returning an `Arc<SourceFile>` with
-/// a tree attached.  If the file already has a tree this is a no-op clone.
-fn ensure_tree(
-    workspace: &Workspace,
-    uri: &Url,
-    lang: &dyn crate::language::Language,
-) -> Option<Arc<SourceFile>> {
-    // First pass: check if tree already exists (read-only).
-    let has_tree = workspace
-        .documents
-        .with_doc(uri, |doc| doc.source().tree.is_some())
-        .unwrap_or(false);
-
-    if !has_tree {
-        workspace.documents.with_doc_mut(uri, |doc| {
-            if doc.source().tree.is_some() {
-                return; // already set by a concurrent call
-            }
-            let tree = lang.parse_tree(doc.source().text(), None);
-            doc.set_tree(tree);
-        });
-    }
-
-    workspace
-        .documents
-        .with_doc(uri, |doc| Arc::clone(doc.source()))
 }
 
 pub async fn handle_semantic_tokens_full(
@@ -77,7 +49,7 @@ fn handle_semantic_tokens_full_blocking(
         return Ok(None);
     };
     request.check_cancelled("semantic_tokens_full.before_ensure_tree")?;
-    let Some(file) = ensure_tree(&workspace, &uri, lang) else {
+    let Some(file) = workspace.ensure_tree(&uri, lang) else {
         return Ok(None);
     };
 
@@ -149,7 +121,7 @@ fn handle_semantic_tokens_range_blocking(
         return Ok(None);
     };
     request.check_cancelled("semantic_tokens_range.before_ensure_tree")?;
-    let Some(file) = ensure_tree(&workspace, &uri, lang) else {
+    let Some(file) = workspace.ensure_tree(&uri, lang) else {
         return Ok(None);
     };
 
@@ -209,7 +181,7 @@ fn handle_semantic_tokens_full_delta_blocking(
         return Ok(None);
     };
     request.check_cancelled("semantic_tokens_delta.before_ensure_tree")?;
-    let Some(file) = ensure_tree(&workspace, &uri, lang) else {
+    let Some(file) = workspace.ensure_tree(&uri, lang) else {
         return Ok(None);
     };
 
