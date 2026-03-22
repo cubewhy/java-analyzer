@@ -701,7 +701,7 @@ impl<'idx> TypeResolver<'idx> {
         for (name, ty) in param_names.into_iter().zip(sam_params.into_iter()) {
             out.push(LocalVar {
                 name: Arc::from(name),
-                type_internal: ty.to_type_name(),
+                type_internal: normalize_lambda_param_jvm_type(&ty).to_type_name(),
                 init_expr: None,
             });
         }
@@ -2111,6 +2111,13 @@ fn extract_functional_input_type(param_ty: &JvmType) -> Option<JvmType> {
     }
 }
 
+fn normalize_lambda_param_jvm_type(ty: &JvmType) -> JvmType {
+    match ty {
+        JvmType::WildcardBound(_, inner) => normalize_lambda_param_jvm_type(inner),
+        other => other.clone(),
+    }
+}
+
 fn is_concrete_jvm_type(ty: &JvmType) -> bool {
     match ty {
         JvmType::TypeVar(_) | JvmType::Wildcard | JvmType::WildcardBound(_, _) => false,
@@ -3100,6 +3107,85 @@ mod tests {
                 )
                 .map(|t| t.to_signature_string()),
             Some("Ljava/lang/StringBuilder;".to_string())
+        );
+    }
+
+    #[test]
+    fn test_functional_lambda_return_inference_boxes_primitive_result_with_wildcard_input_target() {
+        use crate::index::{ClassMetadata, ClassOrigin, MethodSummary};
+        use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC};
+
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("length"),
+                    params: MethodParams::empty(),
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: None,
+                    return_type: Some(Arc::from("I")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/util/function")),
+                name: Arc::from("Function"),
+                internal_name: Arc::from("java/util/function/Function"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("apply"),
+                    params: MethodParams::from([("Ljava/lang/Object;", "t")]),
+                    access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                    is_synthetic: false,
+                    annotations: vec![],
+                    generic_signature: Some(Arc::from("(TT;)TR;")),
+                    return_type: Some(Arc::from("Ljava/lang/Object;")),
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: Some(Arc::from(
+                    "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                )),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let view = idx.view(root_scope());
+        let resolver = TypeResolver::new(&view);
+        let target = JvmType::Object(
+            "java/util/function/Function".to_string(),
+            vec![
+                JvmType::WildcardBound(
+                    '-',
+                    Box::new(JvmType::Object("java/lang/String".to_string(), vec![])),
+                ),
+                JvmType::WildcardBound('+', Box::new(JvmType::TypeVar("R".to_string()))),
+            ],
+        );
+
+        let inferred = resolver.infer_functional_arg_return_shallow(
+            "s -> s.length()",
+            EvalContext::default(),
+            Some(&target),
+        );
+        assert_eq!(
+            inferred.map(|t| t.to_signature_string()),
+            Some("Ljava/lang/Integer;".to_string()),
+            "wildcarded functional input should still materialize a usable lambda param type"
         );
     }
 

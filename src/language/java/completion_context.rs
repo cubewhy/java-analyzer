@@ -2250,11 +2250,92 @@ mod tests {
                     super_name: Some(Arc::from("java/lang/Object")),
                     interfaces: vec![],
                     annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("length"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: None,
+                        return_type: Some(Arc::from("I")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/lang")),
+                    name: Arc::from("Integer"),
+                    internal_name: Arc::from("java/lang/Integer"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
                     methods: vec![],
                     fields: vec![],
                     access_flags: ACC_PUBLIC,
                     inner_class_of: None,
                     generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/util/function")),
+                    name: Arc::from("Function"),
+                    internal_name: Arc::from("java/util/function/Function"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![MethodSummary {
+                        name: Arc::from("apply"),
+                        params: MethodParams::from([("Ljava/lang/Object;", "t")]),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC | ACC_ABSTRACT,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("(TT;)TR;")),
+                        return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    }],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from(
+                        "<T:Ljava/lang/Object;R:Ljava/lang/Object;>Ljava/lang/Object;",
+                    )),
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("java/util/stream")),
+                    name: Arc::from("Stream"),
+                    internal_name: Arc::from("java/util/stream/Stream"),
+                    super_name: Some(Arc::from("java/lang/Object")),
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![
+                        MethodSummary {
+                            name: Arc::from("map"),
+                            params: MethodParams::from([("Ljava/util/function/Function;", "mapper")]),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from(
+                                "<R:Ljava/lang/Object;>(Ljava/util/function/Function<-TE;+TR;>;)Ljava/util/stream/Stream<TR;>;",
+                            )),
+                            return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
+                        },
+                        MethodSummary {
+                            name: Arc::from("toList"),
+                            params: MethodParams::empty(),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from("()Ljava/util/List<TE;>;")),
+                            return_type: Some(Arc::from("Ljava/util/List;")),
+                        },
+                    ],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: Some(Arc::from("<E:Ljava/lang/Object;>Ljava/lang/Object;")),
                     origin: ClassOrigin::Unknown,
                 },
                 ClassMetadata {
@@ -2291,15 +2372,35 @@ mod tests {
                     super_name: Some(Arc::from("java/lang/Object")),
                     interfaces: vec![],
                     annotations: vec![],
-                    methods: vec![MethodSummary {
-                        name: Arc::from("size"),
-                        params: MethodParams::empty(),
-                        annotations: vec![],
-                        access_flags: ACC_PUBLIC,
-                        is_synthetic: false,
-                        generic_signature: None,
-                        return_type: Some(Arc::from("I")),
-                    }],
+                    methods: vec![
+                        MethodSummary {
+                            name: Arc::from("size"),
+                            params: MethodParams::empty(),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: None,
+                            return_type: Some(Arc::from("I")),
+                        },
+                        MethodSummary {
+                            name: Arc::from("get"),
+                            params: MethodParams::from([("I", "index")]),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from("(I)TE;")),
+                            return_type: Some(Arc::from("Ljava/lang/Object;")),
+                        },
+                        MethodSummary {
+                            name: Arc::from("stream"),
+                            params: MethodParams::empty(),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: Some(Arc::from("()Ljava/util/stream/Stream<TE;>;")),
+                            return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
+                        },
+                    ],
                     fields: vec![],
                     access_flags: ACC_PUBLIC,
                     inner_class_of: None,
@@ -2321,6 +2422,14 @@ mod tests {
                         is_synthetic: false,
                         generic_signature: Some(Arc::from("(I)TE;")),
                         return_type: Some(Arc::from("Ljava/lang/Object;")),
+                    }, MethodSummary {
+                        name: Arc::from("stream"),
+                        params: MethodParams::empty(),
+                        annotations: vec![],
+                        access_flags: ACC_PUBLIC,
+                        is_synthetic: false,
+                        generic_signature: Some(Arc::from("()Ljava/util/stream/Stream<TE;>;")),
+                        return_type: Some(Arc::from("Ljava/util/stream/Stream;")),
                     }],
                     fields: vec![],
                     access_flags: ACC_PUBLIC,
@@ -5838,6 +5947,86 @@ mod tests {
             labels.iter().any(|l| l == "size"),
             "expected List members on a.get(0)"
         );
+    }
+
+    #[test]
+    fn test_var_rhs_inference_materializes_stream_lambda_map_tolist_chain() {
+        let idx = make_index_with_var_local_generic_types();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let name_table = view.build_name_table();
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec![
+                "java.util.*".into(),
+                "java.util.stream.*".into(),
+                "java.lang.*".into(),
+            ],
+            Some(name_table),
+        ));
+
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "toS".to_string(),
+                receiver_expr: "res.get(0)".to_string(),
+                arguments: None,
+            },
+            "toS",
+            vec![
+                LocalVar {
+                    name: Arc::from("list"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("new ArrayList<String>()".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("res"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("list.stream().map(it -> it.length()).toList()".to_string()),
+                },
+            ],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec![
+                "java.util.*".into(),
+                "java.util.stream.*".into(),
+                "java.lang.*".into(),
+            ],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        let res = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "res")
+            .expect("local res");
+        assert_eq!(
+            res.type_internal.to_internal_with_generics(),
+            "java/util/List<Ljava/lang/Integer;>",
+            "var rhs should materialize the lambda map/toList chain to List<Integer>"
+        );
+
+        if let CursorLocation::MemberAccess {
+            receiver_semantic_type,
+            ..
+        } = &ctx.location
+        {
+            assert_eq!(
+                receiver_semantic_type
+                    .as_ref()
+                    .map(TypeName::to_internal_with_generics),
+                Some("java/lang/Integer".to_string()),
+                "res.get(0) should resolve through the materialized List<Integer> local"
+            );
+        } else {
+            panic!("expected member access location");
+        }
     }
 
     #[test]
