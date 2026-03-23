@@ -382,6 +382,32 @@ class A {
     }
 
     #[test]
+    fn test_misread_before_real_local_decl_and_calls_stays_expression() {
+        let src = indoc::indoc! {r#"
+class A {
+    private void bar() {
+        fo
+        String a = null;
+        foo();
+        this.foo();
+    }
+}
+"#};
+        let marker = "        fo";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression before recovered String a = null, got {:?}",
+            loc
+        );
+        assert_eq!(query, "fo");
+    }
+
+    #[test]
     fn test_break_routes_to_statement_label_location() {
         let src = indoc::indoc! {r#"
 class A {

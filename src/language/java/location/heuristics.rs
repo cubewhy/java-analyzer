@@ -337,29 +337,64 @@ pub(super) fn is_misread_expression_in_local_decl(
     let Some(declarator) = declarator else {
         return false;
     };
-    let Some(name_node) = declarator.child_by_field_name("name") else {
+    let name_node = declarator.child_by_field_name("name").or_else(|| {
+        let mut walker = declarator.walk();
+        declarator
+            .named_children(&mut walker)
+            .find(|child| matches!(child.kind(), "identifier" | "type_identifier"))
+    });
+    let Some(name_node) = name_node else {
         return false;
     };
     let declarator_name = ctx.node_text(name_node).trim();
     if declarator_name != "super" && declarator_name != "this" {
-        return false;
+        let declarator_gap = &ctx.source[type_node.end_byte()..name_node.start_byte()];
+        if !declarator_gap.contains('\n') {
+            return false;
+        }
     }
 
-    let error_child = {
+    let direct_error_child = {
         let mut walker = decl_node.walk();
         decl_node
             .children(&mut walker)
             .find(|child| child.kind() == "ERROR")
     };
-    let Some(error_child) = error_child else {
+    if let Some(error_child) = direct_error_child {
+        let mut walker = error_child.walk();
+        let error_starts_with_dot = error_child
+            .children(&mut walker)
+            .find(|child| !child.is_extra())
+            .is_some_and(|child| child.kind() == ".");
+        if error_starts_with_dot && (declarator_name == "super" || declarator_name == "this") {
+            return true;
+        }
+    }
+
+    let declarator_error = {
+        let mut walker = declarator.walk();
+        declarator
+            .children(&mut walker)
+            .find(|child| child.kind() == "ERROR")
+    };
+    let Some(error_child) = declarator_error else {
         return false;
     };
 
-    let mut walker = error_child.walk();
+    let has_assignment = {
+        let mut walker = declarator.walk();
+        declarator
+            .children(&mut walker)
+            .any(|child| child.kind() == "=")
+    };
+    if !has_assignment {
+        return false;
+    }
+
+    let mut error_children = error_child.walk();
     error_child
-        .children(&mut walker)
-        .find(|child| !child.is_extra())
-        .is_some_and(|child| child.kind() == ".")
+        .named_children(&mut error_children)
+        .any(|child| matches!(child.kind(), "identifier" | "type_identifier"))
 }
 
 /// Detects member access tail misread as local variable declaration.
