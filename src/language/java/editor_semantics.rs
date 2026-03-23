@@ -1107,6 +1107,76 @@ class Test {
     }
 
     #[test]
+    fn semantic_context_does_not_rewrite_bare_method_call_to_import() {
+        let view = make_view();
+        let source = r#"
+class Test {
+    static void helper() {}
+
+    void demo() {
+        helper();
+    }
+}
+"#;
+        let rope = Rope::from_str(source);
+        let mut parser = make_java_parser();
+        let tree = parser.parse(source, None).expect("tree");
+        let root = tree.root_node();
+        let offset = source.find("helper();").expect("call site") + "helper".len();
+
+        let ctx =
+            semantic_context_at_offset(source, &rope, root, offset, &view).expect("semantic ctx");
+
+        match &ctx.location {
+            CursorLocation::MemberAccess {
+                receiver_expr,
+                member_prefix,
+                arguments,
+                ..
+            } => {
+                assert!(receiver_expr.is_empty());
+                assert_eq!(member_prefix, "helper");
+                assert_eq!(arguments.as_deref(), Some("()"));
+            }
+            other => panic!("expected member-access location, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn semantic_context_does_not_rewrite_package_like_call_to_import() {
+        let view = make_view();
+        let source = r#"
+class Test {
+    void demo() {
+        java.util.foo();
+    }
+}
+"#;
+        let rope = Rope::from_str(source);
+        let mut parser = make_java_parser();
+        let tree = parser.parse(source, None).expect("tree");
+        let root = tree.root_node();
+        let offset = source.find("foo();").expect("call site") + "foo".len();
+
+        let ctx =
+            semantic_context_at_offset(source, &rope, root, offset, &view).expect("semantic ctx");
+
+        match &ctx.location {
+            CursorLocation::MemberAccess {
+                receiver_expr,
+                member_prefix,
+                arguments,
+                ..
+            } => {
+                assert_eq!(receiver_expr, "java.util");
+                assert_eq!(member_prefix, "foo");
+                assert_eq!(arguments.as_deref(), Some("()"));
+            }
+            other => panic!("expected member-access location, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn semantic_context_preserves_enclosing_static_member_from_salsa_source_bridge() {
         let workspace = Workspace::new();
         let view = workspace.index.load().view(IndexScope {

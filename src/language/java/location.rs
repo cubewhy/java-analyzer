@@ -1647,4 +1647,64 @@ class A {
         );
         assert_eq!(query, "appe");
     }
+
+    #[test]
+    fn test_unqualified_intersection_bounded_method_call_is_member_access() {
+        let src = indoc::indoc! {r#"
+interface Flyable {
+    void fly();
+}
+
+interface Swimmable {
+    void swim();
+}
+
+class Duck implements Flyable, Swimmable {
+    @Override
+    public void fly() {
+        System.out.println("Duck is flying");
+    }
+
+    @Override
+    public void swim() {
+        System.out.println("Duck is swimming");
+    }
+}
+
+public class IntersectionDemo {
+
+    public static <T extends Flyable & Swimmable> void act(T animal) {
+        animal.fly();
+        animal.swim();
+    }
+
+    public static void main(String[] args) {
+        Duck duck = new Duck();
+        act(duck);
+    }
+}
+"#};
+        let marker = "act(duck)";
+        let offset = src.find(marker).unwrap() + "act".len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(
+                loc,
+                CursorLocation::MemberAccess {
+                    ref receiver_expr,
+                    ref member_prefix,
+                    ref arguments,
+                    ..
+                } if receiver_expr.is_empty()
+                    && member_prefix == "act"
+                    && arguments.as_deref() == Some("(duck)")
+            ),
+            "Expected unqualified call to be MemberAccess, got {:?}",
+            loc
+        );
+        assert_eq!(query, "act");
+    }
 }

@@ -204,9 +204,12 @@ impl<'a> ContextEnricher<'a> {
                 receiver_type,
                 receiver_expr,
                 member_prefix,
+                arguments,
                 ..
             } = &ctx.location
                 && receiver_type.is_none()
+                && arguments.is_none()
+                && !receiver_expr.is_empty()
             {
                 let pkg_normalized = receiver_expr.replace('.', "/");
                 if self.view.has_package(&pkg_normalized) {
