@@ -44,6 +44,8 @@ pub enum CursorLocationData {
     ConstructorCall {
         class_prefix: Arc<str>,
         expected_type: Option<Arc<str>>,
+        qualifier_expr: Option<Arc<str>>,
+        qualifier_owner_internal: Option<Arc<str>>,
     },
     MemberAccess {
         receiver_expr: Arc<str>,

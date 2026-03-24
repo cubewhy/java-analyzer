@@ -376,6 +376,7 @@ pub(super) fn handle_constructor(
     }
 
     let type_node = node.child_by_field_name("type");
+    let qualifier_expr = constructor_qualifier_expr(ctx, node, type_node);
 
     if let Some(ty) = type_node
         && ctx.offset < ty.start_byte()
@@ -393,6 +394,8 @@ pub(super) fn handle_constructor(
                     CursorLocation::ConstructorCall {
                         class_prefix: String::new(),
                         expected_type,
+                        qualifier_expr,
+                        qualifier_owner_internal: None,
                     },
                     String::new(),
                 );
@@ -413,9 +416,36 @@ pub(super) fn handle_constructor(
         CursorLocation::ConstructorCall {
             class_prefix: class_prefix.clone(),
             expected_type,
+            qualifier_expr,
+            qualifier_owner_internal: None,
         },
         class_prefix,
     )
+}
+
+fn constructor_qualifier_expr(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    type_node: Option<Node>,
+) -> Option<String> {
+    let type_start = type_node?.start_byte();
+    let mut walker = node.walk();
+    for child in node.named_children(&mut walker) {
+        if child.end_byte() > type_start {
+            continue;
+        }
+        if matches!(
+            child.kind(),
+            "_simple_type" | "type_identifier" | "generic_type" | "scoped_type_identifier"
+        ) {
+            continue;
+        }
+        let text = ctx.node_text(child).trim().to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
 }
 
 fn infer_expected_type_from_lhs(ctx: &JavaContextExtractor, node: Node) -> Option<String> {
@@ -826,13 +856,15 @@ pub(super) fn handle_identifier(
                     member_prefix,
                 ));
             }
-            if let Some((class_prefix, expected_type)) = detect_new_keyword_before_cursor(before) {
+            if let Some(detected) = detect_new_keyword_before_cursor(before) {
                 return Some((
                     CursorLocation::ConstructorCall {
-                        class_prefix: class_prefix.clone(),
-                        expected_type,
+                        class_prefix: detected.class_prefix.clone(),
+                        expected_type: None,
+                        qualifier_expr: detected.qualifier_expr,
+                        qualifier_owner_internal: None,
                     },
-                    class_prefix,
+                    detected.class_prefix,
                 ));
             }
             let text = cursor_truncated_text(ctx, orig);

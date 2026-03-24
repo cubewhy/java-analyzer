@@ -73,13 +73,15 @@ fn handle_error_as_last_block_child(
 
     let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
     // Case 12/cases with `new`: detect new keyword
-    if let Some((class_prefix, expected_type)) = detect_new_keyword_before_cursor(before) {
+    if let Some(detected) = detect_new_keyword_before_cursor(before) {
         return (
             CursorLocation::ConstructorCall {
-                class_prefix: class_prefix.clone(),
-                expected_type,
+                class_prefix: detected.class_prefix.clone(),
+                expected_type: None,
+                qualifier_expr: detected.qualifier_expr,
+                qualifier_owner_internal: None,
             },
-            class_prefix,
+            detected.class_prefix,
         );
     }
     // Case 11/13: incomplete assignment `int x =`) → Expression

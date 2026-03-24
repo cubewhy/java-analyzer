@@ -250,9 +250,13 @@ fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {
         CursorLocationData::ConstructorCall {
             class_prefix,
             expected_type,
+            qualifier_expr,
+            qualifier_owner_internal,
         } => CursorLocation::ConstructorCall {
             class_prefix: class_prefix.to_string(),
             expected_type: expected_type.as_ref().map(|s| s.to_string()),
+            qualifier_expr: qualifier_expr.as_ref().map(|s| s.to_string()),
+            qualifier_owner_internal: qualifier_owner_internal.clone(),
         },
         CursorLocationData::TypeAnnotation { prefix } => CursorLocation::TypeAnnotation {
             prefix: prefix.to_string(),

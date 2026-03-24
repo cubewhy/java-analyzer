@@ -579,12 +579,18 @@ public enum RandomEnum {
     };
 
     for constant in ["A", "B", "C"] {
-        let member = members.get(constant).unwrap_or_else(|| {
-            panic!(
-                "missing enum constant {constant}, members={:?}",
-                members.keys().collect::<Vec<_>>()
-            )
-        });
+        let member = members
+            .iter()
+            .find(|member| member.name().as_ref() == constant)
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing enum constant {constant}, members={:?}",
+                    members
+                        .iter()
+                        .map(|member| member.name().to_string())
+                        .collect::<Vec<_>>()
+                )
+            });
         match member {
             CurrentClassMember::Field(field) => {
                 assert!(

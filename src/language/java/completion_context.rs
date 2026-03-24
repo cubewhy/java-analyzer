@@ -70,6 +70,8 @@ impl<'a> ContextEnricher<'a> {
                 ctx.location = CursorLocation::ConstructorCall {
                     class_prefix: qualifier_expr.clone(),
                     expected_type: None,
+                    qualifier_expr: None,
+                    qualifier_owner_internal: None,
                 };
                 ctx.query = qualifier_expr;
             } else {
@@ -168,6 +170,37 @@ impl<'a> ContextEnricher<'a> {
             if receiver_type.is_none() {
                 *receiver_type = Some(Arc::from(ty.erased_internal()));
             }
+        }
+
+        let qualified_constructor_owner = if let CursorLocation::ConstructorCall {
+            qualifier_expr: Some(qualifier_expr),
+            qualifier_owner_internal,
+            ..
+        } = &ctx.location
+            && qualifier_owner_internal.is_none()
+        {
+            let resolver = TypeResolver::new(self.view);
+            let resolved = resolve_member_receiver_with_flow(
+                &ctx.local_variables,
+                &ctx.flow_type_overrides,
+                ctx.enclosing_internal_name.as_ref(),
+                &type_ctx,
+                self.view,
+                &resolver,
+                qualifier_expr,
+            );
+            canonicalize_receiver_semantic(resolved, &type_ctx)
+                .map(|ty| Arc::from(ty.erased_internal()))
+        } else {
+            None
+        };
+        if let Some(owner_internal) = qualified_constructor_owner
+            && let CursorLocation::ConstructorCall {
+                qualifier_owner_internal,
+                ..
+            } = &mut ctx.location
+        {
+            *qualifier_owner_internal = Some(owner_internal);
         }
 
         // If receiver expression is a class/type qualifier (not a value expression),
@@ -1242,7 +1275,7 @@ mod tests {
     };
     use crate::semantic::LocalVar;
     use crate::semantic::types::{CallArgs, EvalContext, OverloadInvocationMode};
-    use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC, ACC_VARARGS};
+    use rust_asm::constants::{ACC_ABSTRACT, ACC_PUBLIC, ACC_STATIC, ACC_VARARGS};
 
     fn seg_names(expr: &str) -> Vec<(String, Option<usize>)> {
         parse_chain_from_expr(expr)
@@ -3143,7 +3176,8 @@ mod tests {
                 ctx.location,
                 CursorLocation::ConstructorCall {
                     class_prefix: ref c,
-                    expected_type: None
+                    expected_type: None,
+                    ..
                 } if c == "ArrayList"
             ),
             "Expected constructor reference to normalize to ConstructorCall, got {:?}",
@@ -6325,6 +6359,98 @@ mod tests {
         assert!(
             matches!(ctx.location, CursorLocation::MemberAccess { .. }),
             "local variable shadowing should keep member access"
+        );
+    }
+
+    #[test]
+    fn test_qualified_inner_constructor_enriches_owner_from_local_receiver() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("app")),
+                name: Arc::from("Test"),
+                internal_name: Arc::from("app/Test"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("app")),
+                name: Arc::from("NestedNonStatic"),
+                internal_name: Arc::from("app/Test$NestedNonStatic"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Test")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("app")),
+                name: Arc::from("Nested"),
+                internal_name: Arc::from("app/Test$Nested"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | ACC_STATIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Test")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("app")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::ConstructorCall {
+                class_prefix: "NestedNonSta".to_string(),
+                expected_type: None,
+                qualifier_expr: Some("t".to_string()),
+                qualifier_owner_internal: None,
+            },
+            "NestedNonSta",
+            vec![LocalVar {
+                name: Arc::from("t"),
+                type_internal: TypeName::new("app/Test"),
+                init_expr: None,
+            }],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        assert!(
+            matches!(
+                ctx.location,
+                CursorLocation::ConstructorCall {
+                    qualifier_expr: Some(ref qualifier_expr),
+                    qualifier_owner_internal: Some(ref owner),
+                    ..
+                } if qualifier_expr == "t" && owner.as_ref() == "app/Test"
+            ),
+            "expected qualified constructor owner resolution, got {:?}",
+            ctx.location
         );
     }
 

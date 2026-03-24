@@ -100,11 +100,22 @@ impl<'a> SymbolResolver<'a> {
                 }
                 self.resolve_bare_id(ctx, prefix)
             }
-            CursorLocation::ConstructorCall { class_prefix, .. } => {
+            CursorLocation::ConstructorCall {
+                class_prefix,
+                qualifier_owner_internal,
+                ..
+            } => {
                 if class_prefix.is_empty() {
                     return None;
                 }
                 tracing::debug!(class = %class_prefix, "resolve: constructor call");
+                if let Some(owner_internal) = qualifier_owner_internal
+                    && let Some(inner) = self
+                        .view
+                        .resolve_direct_inner_class(owner_internal, class_prefix)
+                {
+                    return Some(ResolvedSymbol::Class(Arc::clone(&inner.internal_name)));
+                }
                 self.resolve_type_name(ctx, class_prefix)
                     .map(ResolvedSymbol::Class)
             }

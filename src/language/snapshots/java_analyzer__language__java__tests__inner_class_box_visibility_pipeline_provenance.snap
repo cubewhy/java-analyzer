@@ -13,7 +13,7 @@ type_location=TypeAnnotation { prefix: "Bo" }
 type_annotation_list_bo_candidates_contains_box=true
 first_20=["Box"]
 
-ctor_location=ConstructorCall { class_prefix: "Bo", expected_type: None }
+ctor_location=ConstructorCall { class_prefix: "Bo", expected_type: None, qualifier_expr: None, qualifier_owner_internal: None }
 constructor_new_bo_candidates_contains_box=true
 first_20=["Box"]
 

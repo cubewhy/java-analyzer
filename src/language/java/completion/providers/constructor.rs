@@ -1,13 +1,15 @@
 use crate::{
     completion::{
-        CandidateKind, CompletionCandidate,
+        CandidateKind, CompletionCandidate, fuzzy,
         import_utils::{is_import_needed, source_fqn_of_meta},
         provider::{CompletionProvider, ProviderCompletionResult, ProviderSearchSpace},
         scorer::AccessFilter,
     },
     index::{IndexScope, IndexView},
     language::java::{
-        completion::providers::type_lookup::qualified_nested_type_matches,
+        completion::providers::type_lookup::{
+            qualified_nested_type_matches, visible_direct_inner_classes,
+        },
         completion_context::normalize_top_level_generic_base,
     },
     semantic::context::{CursorLocation, SemanticContext},
@@ -39,18 +41,26 @@ impl CompletionProvider for ConstructorProvider {
                 is_incomplete: true,
             });
         }
-        let (class_prefix, expected_type) = match &ctx.location {
-            CursorLocation::ConstructorCall {
-                class_prefix,
-                expected_type,
-            } => (class_prefix.as_str(), expected_type.as_deref()),
-            _ => {
-                return Ok(ProviderCompletionResult {
-                    candidates: vec![],
-                    is_incomplete: false,
-                });
-            }
-        };
+        let (class_prefix, expected_type, qualifier_expr, qualifier_owner_internal) =
+            match &ctx.location {
+                CursorLocation::ConstructorCall {
+                    class_prefix,
+                    expected_type,
+                    qualifier_expr,
+                    qualifier_owner_internal,
+                } => (
+                    class_prefix.as_str(),
+                    expected_type.as_deref(),
+                    qualifier_expr.as_deref(),
+                    qualifier_owner_internal.as_deref(),
+                ),
+                _ => {
+                    return Ok(ProviderCompletionResult {
+                        candidates: vec![],
+                        is_incomplete: false,
+                    });
+                }
+            };
         let class_prefix = normalize_top_level_generic_base(class_prefix);
 
         // When prefix is empty but expected_type exists, search for expected_type first
@@ -60,7 +70,11 @@ impl CompletionProvider for ConstructorProvider {
             class_prefix
         };
         let search_limit = limit.unwrap_or(50).clamp(1, 50);
-        let metas = if class_prefix.contains('.') {
+        let metas = if let Some(owner_internal) = qualifier_owner_internal {
+            qualified_instance_inner_constructor_matches(owner_internal, class_prefix, ctx, index)
+        } else if qualifier_expr.is_some() {
+            Vec::new()
+        } else if class_prefix.contains('.') {
             qualified_nested_type_matches(class_prefix, ctx, index)
         } else {
             index
@@ -87,11 +101,12 @@ impl CompletionProvider for ConstructorProvider {
             }
 
             let fqn = source_fqn_of_meta(&meta, index);
-            let needs_import = is_import_needed(
-                &fqn,
-                &ctx.existing_imports,
-                ctx.enclosing_package.as_deref(),
-            );
+            let needs_import = qualifier_owner_internal.is_none()
+                && is_import_needed(
+                    &fqn,
+                    &ctx.existing_imports,
+                    ctx.enclosing_package.as_deref(),
+                );
             let direct_name = meta.direct_name();
 
             // Score boost when class name matches the expected LHS type
@@ -201,6 +216,24 @@ impl CompletionProvider for ConstructorProvider {
             is_incomplete: truncated,
         })
     }
+}
+
+fn qualified_instance_inner_constructor_matches(
+    owner_internal: &str,
+    class_prefix: &str,
+    ctx: &SemanticContext,
+    index: &IndexView,
+) -> Vec<Arc<crate::index::ClassMetadata>> {
+    let prefix_lower = (!class_prefix.is_empty()).then(|| class_prefix.to_lowercase());
+    visible_direct_inner_classes(owner_internal, ctx, index)
+        .into_iter()
+        .filter(|meta| meta.is_instance_inner_class())
+        .filter(|meta| {
+            prefix_lower.as_deref().is_none_or(|prefix| {
+                fuzzy::fuzzy_match(prefix, &meta.direct_name().to_lowercase()).is_some()
+            })
+        })
+        .collect()
 }
 
 fn is_constructor_type_visible(
@@ -366,6 +399,8 @@ mod tests {
             CursorLocation::ConstructorCall {
                 class_prefix: prefix.to_string(),
                 expected_type: expected.map(|s| s.to_string()),
+                qualifier_expr: None,
+                qualifier_owner_internal: None,
             },
             prefix,
             vec![],
@@ -457,12 +492,35 @@ mod tests {
             CursorLocation::ConstructorCall {
                 class_prefix: prefix.to_string(),
                 expected_type: None,
+                qualifier_expr: None,
+                qualifier_owner_internal: None,
             },
             prefix,
             vec![],
             Some(Arc::from("Probe")),
             enclosing_internal.map(Arc::from),
             Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+    }
+
+    fn make_qualified_inner_ctx(
+        prefix: &str,
+        qualifier_expr: &str,
+        owner_internal: &str,
+    ) -> SemanticContext {
+        SemanticContext::new(
+            CursorLocation::ConstructorCall {
+                class_prefix: prefix.to_string(),
+                expected_type: None,
+                qualifier_expr: Some(qualifier_expr.to_string()),
+                qualifier_owner_internal: Some(Arc::from(owner_internal)),
+            },
+            prefix,
+            vec![],
+            Some(Arc::from("Probe")),
+            Some(Arc::from("app/Probe")),
+            Some(Arc::from("app")),
             vec![],
         )
     }
@@ -794,6 +852,94 @@ mod tests {
             results.iter().all(|c| c.label.as_ref() != "Box"),
             "{:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_qualified_inner_constructor_completion_only_suggests_non_static_direct_inner_classes() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("app")),
+                name: Arc::from("Test"),
+                internal_name: Arc::from("app/Test"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("app")),
+                name: Arc::from("Nested"),
+                internal_name: Arc::from("app/Test$Nested"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("<init>"),
+                    params: MethodParams::empty(),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | rust_asm::constants::ACC_STATIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Test")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("app")),
+                name: Arc::from("NestedNonStatic"),
+                internal_name: Arc::from("app/Test$NestedNonStatic"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("<init>"),
+                    params: MethodParams::empty(),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: None,
+                }],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("Test")),
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        let results = ConstructorProvider
+            .provide_test(
+                root_scope(),
+                &make_qualified_inner_ctx("Nested", "t", "app/Test"),
+                &idx.view(root_scope()),
+                None,
+            )
+            .candidates;
+
+        assert!(
+            results
+                .iter()
+                .any(|c| c.label.as_ref() == "NestedNonStatic"),
+            "{results:?}"
+        );
+        assert!(
+            !results.iter().any(|c| c.label.as_ref() == "Nested"),
+            "{results:?}"
+        );
+        assert!(
+            results.iter().all(|c| c.required_import.is_none()),
+            "{results:?}"
         );
     }
 

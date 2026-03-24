@@ -940,6 +940,8 @@ mod tests {
             CursorLocation::ConstructorCall {
                 class_prefix: String::new(),
                 expected_type: Some("RandomClass".to_string()),
+                qualifier_expr: None,
+                qualifier_owner_internal: None,
             },
             "",
             vec![],

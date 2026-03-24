@@ -90,6 +90,10 @@ pub enum CursorLocation {
     ConstructorCall {
         class_prefix: String,
         expected_type: Option<String>,
+        /// Qualifying instance expression for inner-class construction, e.g. `outer` in `outer.new Inner()`.
+        qualifier_expr: Option<String>,
+        /// Resolved owner type for qualified inner-class construction.
+        qualifier_owner_internal: Option<Arc<str>>,
     },
     /// Type annotation location: the type part of the variable declaration `Ma|in m;`
     // The class name should be completed, not the variable name.
@@ -175,6 +179,30 @@ impl CursorLocation {
     pub fn member_access_arguments(&self) -> Option<&str> {
         match self {
             CursorLocation::MemberAccess { arguments, .. } => arguments.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn constructor_prefix(&self) -> Option<&str> {
+        match self {
+            CursorLocation::ConstructorCall { class_prefix, .. } => Some(class_prefix),
+            _ => None,
+        }
+    }
+
+    pub fn constructor_qualifier_expr(&self) -> Option<&str> {
+        match self {
+            CursorLocation::ConstructorCall { qualifier_expr, .. } => qualifier_expr.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn constructor_qualifier_owner_internal(&self) -> Option<&str> {
+        match self {
+            CursorLocation::ConstructorCall {
+                qualifier_owner_internal,
+                ..
+            } => qualifier_owner_internal.as_deref(),
             _ => None,
         }
     }

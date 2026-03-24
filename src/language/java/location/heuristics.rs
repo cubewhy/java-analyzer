@@ -27,6 +27,12 @@ fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct DetectedConstructorCall {
+    pub class_prefix: String,
+    pub qualifier_expr: Option<String>,
+}
+
 /// Detect trailing-dot pattern in source text before the cursor.
 ///
 /// What it does:
@@ -172,7 +178,7 @@ fn non_empty(s: &str) -> Option<String> {
 ///   conservatively.
 pub(super) fn detect_new_keyword_before_cursor(
     before_cursor: &str,
-) -> Option<(String, Option<String>)> {
+) -> Option<DetectedConstructorCall> {
     let current_line = before_cursor.rsplit('\n').next().unwrap_or(before_cursor);
     let current_line = current_line.trim_end();
     if current_line.is_empty() {
@@ -196,7 +202,14 @@ pub(super) fn detect_new_keyword_before_cursor(
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$' || *c == '.')
         .collect();
 
-    Some((class_prefix, None))
+    let qualifier_expr = detect_trailing_dot_in_text(&last_line[..new_start]).and_then(
+        |(receiver_expr, member_prefix)| member_prefix.is_empty().then_some(receiver_expr),
+    );
+
+    Some(DetectedConstructorCall {
+        class_prefix,
+        qualifier_expr,
+    })
 }
 
 /// Find position of a standalone `new` token in a string.
@@ -1215,7 +1228,7 @@ pub(super) fn detect_constructor_in_local_decl_error(
     }
 
     let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
-    let (class_prefix, _) = detect_new_keyword_before_cursor(before)?;
+    let detected = detect_new_keyword_before_cursor(before)?;
 
     let expected_type = {
         let mut wc3 = decl_node.walk();
@@ -1228,10 +1241,12 @@ pub(super) fn detect_constructor_in_local_decl_error(
 
     Some((
         CursorLocation::ConstructorCall {
-            class_prefix: class_prefix.clone(),
+            class_prefix: detected.class_prefix.clone(),
             expected_type,
+            qualifier_expr: detected.qualifier_expr,
+            qualifier_owner_internal: None,
         },
-        class_prefix,
+        detected.class_prefix,
     ))
 }
 
@@ -1515,7 +1530,10 @@ class Child extends Base {
     fn test_detect_new_keyword_before_cursor_with_prefix() {
         assert_eq!(
             detect_new_keyword_before_cursor("class A { void f() { new RandomCla"),
-            Some(("RandomCla".to_string(), None))
+            Some(DetectedConstructorCall {
+                class_prefix: "RandomCla".to_string(),
+                qualifier_expr: None,
+            })
         );
     }
 
@@ -1523,7 +1541,21 @@ class Child extends Base {
     fn test_detect_new_keyword_before_cursor_no_prefix() {
         assert_eq!(
             detect_new_keyword_before_cursor("class A { void f() { new "),
-            Some((String::new(), None))
+            Some(DetectedConstructorCall {
+                class_prefix: String::new(),
+                qualifier_expr: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_detect_new_keyword_before_cursor_with_qualified_inner_constructor() {
+        assert_eq!(
+            detect_new_keyword_before_cursor("class A { void f() { Test.Inner value = t.new Inner"),
+            Some(DetectedConstructorCall {
+                class_prefix: "Inner".to_string(),
+                qualifier_expr: Some("t".to_string()),
+            })
         );
     }
 

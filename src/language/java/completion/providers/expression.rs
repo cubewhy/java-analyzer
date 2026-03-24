@@ -64,12 +64,13 @@ impl CompletionProvider for ExpressionProvider {
         } = &ctx.location
         {
             let t0 = Instant::now();
-            let resolver = SymbolResolver::new(index);
-            let owner = receiver_semantic_type
-                .as_ref()
-                .map(|t| Arc::from(t.erased_internal()))
-                .or_else(|| receiver_type.clone())
-                .or_else(|| resolver.resolve_type_name(ctx, receiver_expr));
+            let owner = member_access_nested_type_owner(
+                ctx,
+                index,
+                receiver_expr,
+                receiver_semantic_type,
+                receiver_type,
+            );
             let Some(owner_internal) = owner else {
                 return Ok(ProviderCompletionResult {
                     candidates: vec![],
@@ -491,6 +492,53 @@ fn provide_qualified_type_prefix(
     Ok(out)
 }
 
+fn member_access_nested_type_owner(
+    ctx: &SemanticContext,
+    index: &IndexView,
+    receiver_expr: &str,
+    receiver_semantic_type: &Option<crate::semantic::types::type_name::TypeName>,
+    receiver_type: &Option<Arc<str>>,
+) -> Option<Arc<str>> {
+    if !is_type_qualifier_expr(ctx, index, receiver_expr) {
+        return None;
+    }
+
+    receiver_semantic_type
+        .as_ref()
+        .map(|t| Arc::from(t.erased_internal()))
+        .or_else(|| receiver_type.clone())
+        .or_else(|| SymbolResolver::new(index).resolve_type_name(ctx, receiver_expr))
+}
+
+fn is_type_qualifier_expr(ctx: &SemanticContext, index: &IndexView, receiver_expr: &str) -> bool {
+    let expr = receiver_expr.trim();
+    if expr.is_empty() || matches!(expr, "this" | "super") {
+        return false;
+    }
+    if !expr
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+    {
+        return false;
+    }
+
+    let mut parts = expr.split('.').filter(|s| !s.is_empty());
+    let Some(head) = parts.next() else {
+        return false;
+    };
+    if ctx
+        .local_variables
+        .iter()
+        .any(|lv| lv.name.as_ref() == head)
+    {
+        return false;
+    }
+
+    SymbolResolver::new(index)
+        .resolve_type_name(ctx, expr)
+        .is_some()
+}
+
 fn maybe_check_cancelled(
     request: Option<&crate::lsp::request_context::RequestContext>,
     phase: &'static str,
@@ -844,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn test_member_access_with_semantic_owner_exposes_nested_types() {
+    fn test_member_access_with_type_qualifier_expr_exposes_nested_types() {
         let index = WorkspaceIndex::new();
         index.add_classes(vec![make_cls("org/cubewhy", "ChainCheck"), {
             let mut c = make_cls("org/cubewhy", "Box");
@@ -868,12 +916,95 @@ mod tests {
             Some(Arc::from("org/cubewhy/ChainCheck")),
             Some(Arc::from("org/cubewhy")),
             vec![],
-        );
+        )
+        .with_extension(Arc::new(
+            crate::language::java::type_ctx::SourceTypeCtx::new(
+                Some(Arc::from("org/cubewhy")),
+                vec![],
+                Some(index.view(root_scope()).build_name_table()),
+            ),
+        ));
         let results = ExpressionProvider
             .provide_test(root_scope(), &ctx, &index.view(root_scope()), None)
             .candidates;
         assert!(
             results.iter().any(|c| c.label.as_ref() == "Box"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn test_member_access_hides_nested_types_for_this_receiver() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![make_cls("app", "Test"), {
+            let mut c = make_cls("app", "Nested");
+            c.internal_name = Arc::from("app/Test$Nested");
+            c.inner_class_of = Some(Arc::from("Test"));
+            c
+        }]);
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(crate::semantic::types::type_name::TypeName::new(
+                    "app/Test",
+                )),
+                receiver_type: None,
+                member_prefix: "N".to_string(),
+                receiver_expr: "this".to_string(),
+                arguments: None,
+            },
+            "N",
+            vec![],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        );
+        let results = ExpressionProvider
+            .provide_test(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
+        assert!(
+            !results.iter().any(|c| c.label.as_ref() == "Nested"),
+            "{results:?}"
+        );
+    }
+
+    #[test]
+    fn test_member_access_hides_nested_types_for_local_instance_receiver() {
+        let index = WorkspaceIndex::new();
+        index.add_classes(vec![make_cls("app", "Test"), {
+            let mut c = make_cls("app", "NestedNonStatic");
+            c.internal_name = Arc::from("app/Test$NestedNonStatic");
+            c.inner_class_of = Some(Arc::from("Test"));
+            c
+        }]);
+        let ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: Some(crate::semantic::types::type_name::TypeName::new(
+                    "app/Test",
+                )),
+                receiver_type: None,
+                member_prefix: "N".to_string(),
+                receiver_expr: "t".to_string(),
+                arguments: None,
+            },
+            "N",
+            vec![crate::semantic::LocalVar {
+                name: Arc::from("t"),
+                type_internal: crate::semantic::types::type_name::TypeName::new("app/Test"),
+                init_expr: None,
+            }],
+            Some(Arc::from("Test")),
+            Some(Arc::from("app/Test")),
+            Some(Arc::from("app")),
+            vec![],
+        );
+        let results = ExpressionProvider
+            .provide_test(root_scope(), &ctx, &index.view(root_scope()), None)
+            .candidates;
+        assert!(
+            !results
+                .iter()
+                .any(|c| c.label.as_ref() == "NestedNonStatic"),
             "{results:?}"
         );
     }

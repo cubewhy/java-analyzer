@@ -71,13 +71,15 @@ pub(super) fn handle_error(
     }
 
     // Priority 2: `new ClassName` → ConstructorCall
-    if let Some((class_prefix, expected_type)) = detect_new_keyword_before_cursor(before) {
+    if let Some(detected) = detect_new_keyword_before_cursor(before) {
         return (
             CursorLocation::ConstructorCall {
-                class_prefix: class_prefix.clone(),
-                expected_type,
+                class_prefix: detected.class_prefix.clone(),
+                expected_type: None,
+                qualifier_expr: detected.qualifier_expr,
+                qualifier_owner_internal: None,
             },
-            class_prefix,
+            detected.class_prefix,
         );
     }
 

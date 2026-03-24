@@ -238,9 +238,13 @@ fn convert_rich_location(location: &CursorLocation) -> CursorLocationData {
         CursorLocation::ConstructorCall {
             class_prefix,
             expected_type,
+            qualifier_expr,
+            qualifier_owner_internal,
         } => CursorLocationData::ConstructorCall {
             class_prefix: Arc::from(class_prefix.as_str()),
             expected_type: expected_type.as_deref().map(Arc::from),
+            qualifier_expr: qualifier_expr.as_deref().map(Arc::from),
+            qualifier_owner_internal: qualifier_owner_internal.clone(),
         },
         CursorLocation::TypeAnnotation { prefix } => CursorLocationData::TypeAnnotation {
             prefix: Arc::from(prefix.as_str()),

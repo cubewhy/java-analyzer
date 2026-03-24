@@ -3,6 +3,7 @@ use rayon::prelude::*;
 use rust_asm::class_reader::ClassReader;
 use rust_asm::class_reader::{AttributeInfo, ElementValue};
 use rust_asm::constant_pool::CpInfo;
+use rust_asm::constants::ACC_STATIC;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::io::Read;
 use std::path::Path;
@@ -99,6 +100,14 @@ impl ClassMetadata {
                 .rsplit('$')
                 .next()
                 .is_some_and(|simple| self.direct_name() == simple)
+    }
+
+    pub fn is_static(&self) -> bool {
+        (self.access_flags & ACC_STATIC) != 0
+    }
+
+    pub fn is_instance_inner_class(&self) -> bool {
+        self.inner_class_of.is_some() && !self.is_static()
     }
 
     /// Returns None if no @Target (applicable everywhere).
