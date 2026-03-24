@@ -375,6 +375,18 @@ pub(super) fn handle_constructor(
         }
     }
 
+    if let Some(new_node) = tree_sitter_utils::traversal::any_child_of_kind(node, "new")
+        && ctx.offset <= new_node.start_byte()
+    {
+        let prefix = extract_identifier_prefix_near_cursor(ctx, node.start_byte());
+        return (
+            CursorLocation::Expression {
+                prefix: prefix.clone(),
+            },
+            prefix,
+        );
+    }
+
     let type_node = node.child_by_field_name("type");
     let qualifier_expr = constructor_qualifier_expr(ctx, node, type_node);
 

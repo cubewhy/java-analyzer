@@ -1171,6 +1171,33 @@ class Test {
     }
 
     #[test]
+    fn test_qualified_inner_constructor_before_new_is_expression() {
+        let src = indoc::indoc! {r#"
+class Test {
+    void f() {
+        Test t = null;
+        Test.NestedNonStatic nns = t.new NestedNonStatic();
+    }
+
+    class NestedNonStatic {}
+}
+"#};
+        let marker = "t.new NestedNonStatic";
+        let offset = src.find(marker).unwrap() + "t.".len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { ref prefix } if prefix.is_empty()),
+            "Expected Expression before qualified constructor `new`, got {:?}",
+            loc
+        );
+        assert_eq!(query, "");
+    }
+
+    #[test]
     fn test_constructor_type_argument_identifier_is_type_annotation() {
         let src = indoc::indoc! {r#"
 class A {
