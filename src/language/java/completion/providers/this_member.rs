@@ -21,6 +21,13 @@ impl CompletionProvider for ThisMemberProvider {
         "this_member"
     }
 
+    fn is_applicable(&self, ctx: &SemanticContext) -> bool {
+        matches!(
+            ctx.location,
+            CursorLocation::Expression { .. } | CursorLocation::MethodArgument { .. }
+        )
+    }
+
     fn provide(
         &self,
         _scope: IndexScope,
