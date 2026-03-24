@@ -2262,15 +2262,26 @@ mod tests {
                     super_name: Some(Arc::from("java/lang/Object")),
                     interfaces: vec![],
                     annotations: vec![],
-                    methods: vec![MethodSummary {
-                        name: Arc::from("length"),
-                        params: MethodParams::empty(),
-                        annotations: vec![],
-                        access_flags: ACC_PUBLIC,
-                        is_synthetic: false,
-                        generic_signature: None,
-                        return_type: Some(Arc::from("I")),
-                    }],
+                    methods: vec![
+                        MethodSummary {
+                            name: Arc::from("length"),
+                            params: MethodParams::empty(),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: None,
+                            return_type: Some(Arc::from("I")),
+                        },
+                        MethodSummary {
+                            name: Arc::from("substring"),
+                            params: MethodParams::from([("I", "beginIndex")]),
+                            annotations: vec![],
+                            access_flags: ACC_PUBLIC,
+                            is_synthetic: false,
+                            generic_signature: None,
+                            return_type: Some(Arc::from("Ljava/lang/String;")),
+                        },
+                    ],
                     fields: vec![],
                     access_flags: ACC_PUBLIC,
                     inner_class_of: None,
@@ -5802,6 +5813,53 @@ mod tests {
             .find(|lv| lv.name.as_ref() == "c")
             .expect("local c");
         assert_eq!(c.type_internal.erased_internal(), "java/lang/String");
+    }
+
+    #[test]
+    fn test_var_rhs_inference_method_call_on_unmaterialized_var_receiver_materializes_string() {
+        let idx = make_index_with_var_local_generic_types();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            None,
+            vec!["java.lang.*".into()],
+            Some(view.build_name_table()),
+        ));
+
+        let mut ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "s2".to_string(),
+            },
+            "s2",
+            vec![
+                LocalVar {
+                    name: Arc::from("s2"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("s1.substring(1)".to_string()),
+                },
+                LocalVar {
+                    name: Arc::from("s1"),
+                    type_internal: TypeName::new("var"),
+                    init_expr: Some("\"\"".to_string()),
+                },
+            ],
+            Some(Arc::from("Demo")),
+            Some(Arc::from("Demo")),
+            None,
+            vec!["java.lang.*".into()],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+
+        let s2 = ctx
+            .local_variables
+            .iter()
+            .find(|lv| lv.name.as_ref() == "s2")
+            .expect("local s2");
+        assert_eq!(s2.type_internal.erased_internal(), "java/lang/String");
     }
 
     #[test]

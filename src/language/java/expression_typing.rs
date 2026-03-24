@@ -23,19 +23,22 @@ pub(crate) fn resolve_expression_type(
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
 ) -> Option<TypeName> {
-    resolve_expression_type_with_target(
+    let mut resolving_vars = Vec::new();
+    resolve_expression_type_with_target_inner(
         expr,
         locals,
         enclosing_internal,
         resolver,
         type_ctx,
         view,
+        &mut resolving_vars,
         None,
         None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn resolve_expression_type_with_target(
     expr: &str,
     locals: &[LocalVar],
@@ -43,6 +46,32 @@ pub(crate) fn resolve_expression_type_with_target(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    expected_functional_interface: Option<&TypeName>,
+    expected_sam: Option<&SamSignature>,
+) -> Option<TypeName> {
+    let mut resolving_vars = Vec::new();
+    resolve_expression_type_with_target_inner(
+        expr,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        &mut resolving_vars,
+        expected_functional_interface,
+        expected_sam,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_expression_type_with_target_inner(
+    expr: &str,
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -58,6 +87,7 @@ pub(crate) fn resolve_expression_type_with_target(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     ) {
@@ -72,14 +102,32 @@ pub(crate) fn resolve_expression_type_with_target(
             resolver,
             type_ctx,
             view,
+            resolving_vars,
         );
     }
 
     let chain = parse_chain_from_expr(expr);
     if chain.is_empty() {
-        return resolver.resolve(expr, locals, enclosing_internal);
+        return resolve_local_identifier_type(
+            expr,
+            locals,
+            enclosing_internal,
+            resolver,
+            type_ctx,
+            view,
+            resolving_vars,
+        )
+        .or_else(|| resolver.resolve(expr, locals, enclosing_internal));
     }
-    evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view)
+    evaluate_chain_inner(
+        &chain,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        resolving_vars,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -90,6 +138,7 @@ fn resolve_expression_type_ast(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -113,6 +162,7 @@ fn resolve_expression_type_ast(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )
@@ -145,6 +195,7 @@ fn resolve_ast_node_type(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -161,6 +212,7 @@ fn resolve_ast_node_type(
                 resolver,
                 type_ctx,
                 view,
+                resolving_vars,
                 expected_functional_interface,
                 expected_sam,
             )
@@ -172,22 +224,16 @@ fn resolve_ast_node_type(
         "identifier" => {
             let text = node.utf8_text(bytes).ok()?;
             let ident = text.trim();
-            if let Some(local) = locals.iter().find(|lv| lv.name.as_ref() == ident)
-                && local.type_internal.erased_internal() == "var"
-                && let Some(init_expr) = local.init_expr.as_deref()
-                && init_expr.trim() != ident
-            {
-                return resolve_var_init_expr(
-                    init_expr,
-                    locals,
-                    enclosing_internal,
-                    resolver,
-                    type_ctx,
-                    view,
-                )
-                .or_else(|| resolver.resolve(ident, locals, enclosing_internal));
-            }
-            resolver.resolve(ident, locals, enclosing_internal)
+            resolve_local_identifier_type(
+                ident,
+                locals,
+                enclosing_internal,
+                resolver,
+                type_ctx,
+                view,
+                resolving_vars,
+            )
+            .or_else(|| resolver.resolve(ident, locals, enclosing_internal))
         }
         "decimal_integer_literal"
         | "hex_integer_literal"
@@ -218,6 +264,7 @@ fn resolve_ast_node_type(
             resolver,
             type_ctx,
             view,
+            resolving_vars,
             expected_functional_interface,
             expected_sam,
         ),
@@ -229,6 +276,7 @@ fn resolve_ast_node_type(
             resolver,
             type_ctx,
             view,
+            resolving_vars,
             expected_functional_interface,
             expected_sam,
         ),
@@ -240,33 +288,44 @@ fn resolve_ast_node_type(
             resolver,
             type_ctx,
             view,
+            resolving_vars,
             expected_functional_interface,
             expected_sam,
         ),
         "method_invocation" => {
             let text = node.utf8_text(bytes).ok()?;
-            resolve_expression_via_existing_resolver(
+            resolve_expression_via_existing_resolver_inner(
                 text,
                 locals,
                 enclosing_internal,
                 resolver,
                 type_ctx,
                 view,
+                resolving_vars,
             )
         }
         "object_creation_expression" | "explicit_constructor_invocation" => {
             let text = node.utf8_text(bytes).ok()?;
-            resolve_var_init_expr(text, locals, enclosing_internal, resolver, type_ctx, view)
-        }
-        "field_access" => {
-            let text = node.utf8_text(bytes).ok()?;
-            resolve_expression_via_existing_resolver(
+            resolve_var_init_expr_inner(
                 text,
                 locals,
                 enclosing_internal,
                 resolver,
                 type_ctx,
                 view,
+                resolving_vars,
+            )
+        }
+        "field_access" => {
+            let text = node.utf8_text(bytes).ok()?;
+            resolve_expression_via_existing_resolver_inner(
+                text,
+                locals,
+                enclosing_internal,
+                resolver,
+                type_ctx,
+                view,
+                resolving_vars,
             )
         }
         "lambda_expression" => {
@@ -280,6 +339,7 @@ fn resolve_ast_node_type(
             resolver,
             type_ctx,
             view,
+            resolving_vars,
             expected_functional_interface,
             expected_sam,
         ),
@@ -387,19 +447,37 @@ fn resolve_lambda_expression_type(
     Some(expected_ty.clone())
 }
 
-fn resolve_expression_via_existing_resolver(
+fn resolve_expression_via_existing_resolver_inner(
     expr: &str,
     locals: &[LocalVar],
     enclosing_internal: Option<&Arc<str>>,
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
 ) -> Option<TypeName> {
     let chain = parse_chain_from_expr(expr.trim());
     if chain.is_empty() {
-        return resolver.resolve(expr, locals, enclosing_internal);
+        return resolve_local_identifier_type(
+            expr,
+            locals,
+            enclosing_internal,
+            resolver,
+            type_ctx,
+            view,
+            resolving_vars,
+        )
+        .or_else(|| resolver.resolve(expr, locals, enclosing_internal));
     }
-    evaluate_chain(&chain, locals, enclosing_internal, resolver, type_ctx, view)
+    evaluate_chain_inner(
+        &chain,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        resolving_vars,
+    )
 }
 
 fn intrinsic_method_return_type(
@@ -437,6 +515,7 @@ fn resolve_unary_expression_type(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -453,6 +532,7 @@ fn resolve_unary_expression_type(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )?;
@@ -486,6 +566,7 @@ fn resolve_binary_expression_type(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -500,6 +581,7 @@ fn resolve_binary_expression_type(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )?;
@@ -511,6 +593,7 @@ fn resolve_binary_expression_type(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )?;
@@ -714,6 +797,7 @@ fn resolve_assignment_expression_type(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -726,6 +810,7 @@ fn resolve_assignment_expression_type(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )
@@ -739,6 +824,7 @@ fn resolve_assignment_expression_type(
             resolver,
             type_ctx,
             view,
+            resolving_vars,
             expected_functional_interface,
             expected_sam,
         )
@@ -754,6 +840,7 @@ fn resolve_ternary_expression_type(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
     expected_functional_interface: Option<&TypeName>,
     expected_sam: Option<&SamSignature>,
 ) -> Option<TypeName> {
@@ -773,6 +860,7 @@ fn resolve_ternary_expression_type(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )?;
@@ -784,6 +872,7 @@ fn resolve_ternary_expression_type(
         resolver,
         type_ctx,
         view,
+        resolving_vars,
         expected_functional_interface,
         expected_sam,
     )?;
@@ -839,6 +928,27 @@ pub(crate) fn resolve_var_init_expr(
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
 ) -> Option<TypeName> {
+    let mut resolving_vars = Vec::new();
+    resolve_var_init_expr_inner(
+        expr,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        &mut resolving_vars,
+    )
+}
+
+fn resolve_var_init_expr_inner(
+    expr: &str,
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
+) -> Option<TypeName> {
     let expr = expr.trim();
     if let Some(rest) = expr.strip_prefix("new ") {
         let mut boundary_idx = rest.find(['(', '[', '{']).unwrap_or(rest.len());
@@ -871,7 +981,17 @@ pub(crate) fn resolve_var_init_expr(
         return Some(resolved_base);
     }
 
-    resolve_expression_type(expr, locals, enclosing_internal, resolver, type_ctx, view)
+    resolve_expression_type_with_target_inner(
+        expr,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        resolving_vars,
+        None,
+        None,
+    )
 }
 
 fn resolve_constructor_type_name(
@@ -926,6 +1046,7 @@ pub(crate) fn resolve_array_access_type(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
 ) -> Option<TypeName> {
     let bracket = expr.rfind('[')?;
     if !expr.trim_end().ends_with(']') {
@@ -935,17 +1056,21 @@ pub(crate) fn resolve_array_access_type(
     if array_expr.is_empty() {
         return None;
     }
-    let array_type = resolve_expression_type(
+    let array_type = resolve_expression_type_with_target_inner(
         array_expr,
         locals,
         enclosing_internal,
         resolver,
         type_ctx,
         view,
+        resolving_vars,
+        None,
+        None,
     )?;
     array_type.element_type()
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn evaluate_chain(
     chain: &[ChainSegment],
     locals: &[LocalVar],
@@ -953,6 +1078,27 @@ pub(crate) fn evaluate_chain(
     resolver: &TypeResolver,
     type_ctx: &SourceTypeCtx,
     view: &IndexView,
+) -> Option<TypeName> {
+    let mut resolving_vars = Vec::new();
+    evaluate_chain_inner(
+        chain,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        &mut resolving_vars,
+    )
+}
+
+fn evaluate_chain_inner(
+    chain: &[ChainSegment],
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
 ) -> Option<TypeName> {
     let mut current: Option<TypeName> = None;
     let resolve_qualifier = |q: &str| type_ctx.resolve_type_name_strict(q);
@@ -1006,7 +1152,16 @@ pub(crate) fn evaluate_chain(
                         );
                 }
             } else {
-                current = resolver.resolve(base_name, locals, enclosing_internal);
+                current = resolve_local_identifier_type(
+                    base_name,
+                    locals,
+                    enclosing_internal,
+                    resolver,
+                    type_ctx,
+                    view,
+                    resolving_vars,
+                )
+                .or_else(|| resolver.resolve(base_name, locals, enclosing_internal));
                 if current.is_none() {
                     if let Some(enclosing) = enclosing_internal {
                         let enclosing_simple = enclosing
@@ -1028,95 +1183,168 @@ pub(crate) fn evaluate_chain(
                 }
             }
         } else {
-            let recv = current.as_ref()?;
-            if base_name.is_empty() {
-                current = Some(recv.clone());
-            } else {
-                let recv_full: TypeName = if recv.contains_slash() || recv.is_primitive() {
-                    recv.clone()
-                } else {
-                    let mut canonical =
-                        type_ctx.resolve_type_name_strict(recv.erased_internal())?;
-                    if !recv.args.is_empty() {
-                        canonical.args = recv.args.clone();
-                    }
-                    canonical.array_dims = recv.array_dims;
-                    canonical
-                };
-
-                if seg.arg_count.is_some() {
-                    if let Some(intrinsic) = intrinsic_method_return_type(
-                        &recv_full,
-                        base_name,
-                        seg.arg_count.unwrap_or(0),
-                    ) {
-                        current = Some(intrinsic);
-                        continue;
-                    }
-                    let arg_types: Vec<TypeName> = seg
-                        .arg_texts
-                        .iter()
-                        .map(|t| {
-                            resolve_expression_type(
-                                t.trim(),
-                                locals,
-                                enclosing_internal,
-                                resolver,
-                                type_ctx,
-                                view,
-                            )
-                            .unwrap_or_else(|| TypeName::new("unknown"))
-                        })
-                        .collect();
-                    let receiver_internal = recv_full.to_internal_with_generics();
-                    current = resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
-                        &receiver_internal,
-                        base_name,
-                        CallArgs::new(seg.arg_count.unwrap_or(0), &arg_types, &seg.arg_texts),
-                        EvalContext::new(locals, enclosing_internal)
-                            .with_qualifier(Some(&resolve_qualifier)),
-                    );
-                } else {
-                    if recv_full.is_array() && base_name == "length" {
-                        current = Some(TypeName::new("int"));
-                    } else {
-                        let (_methods, fields) =
-                            view.collect_inherited_members(recv_full.erased_internal());
-
-                        if let Some(f) = fields.iter().find(|f| f.name.as_ref() == base_name) {
-                            if let Some(ty) = singleton_descriptor_to_type(&f.descriptor) {
-                                current = Some(TypeName::new(ty));
-                            } else {
-                                current = parse_single_type_to_internal(&f.descriptor);
-                            }
-                        // } else if methods.iter().any(|m| m.name.as_ref() == base_name) {
-                        //     current = None;
-                        } else {
-                            current = None;
-                        }
-                    }
-                }
-            }
+            current = Some(resolve_chain_segment_on_receiver(
+                current.as_ref()?,
+                seg,
+                locals,
+                enclosing_internal,
+                resolver,
+                type_ctx,
+                view,
+                &resolve_qualifier,
+                resolving_vars,
+            )?);
         }
 
-        if dimensions > 0
-            && let Some(mut ty) = current.take()
-        {
-            let mut success = true;
-            for _ in 0..dimensions {
-                if let Some(el) = ty.element_type() {
-                    ty = el;
-                } else {
-                    success = false;
-                    break;
-                }
-            }
-            if success {
-                current = Some(ty);
-            }
-        }
+        current = apply_chain_dimensions(current, dimensions);
     }
     current
+}
+
+fn resolve_chain_segment_on_receiver(
+    recv: &TypeName,
+    seg: &ChainSegment,
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+    resolve_qualifier: &dyn Fn(&str) -> Option<TypeName>,
+    resolving_vars: &mut Vec<Arc<str>>,
+) -> Option<TypeName> {
+    let base_name = seg.name.split('[').next().unwrap_or(seg.name.as_str());
+    if base_name.is_empty() {
+        return Some(recv.clone());
+    }
+
+    let recv_full = canonicalize_chain_receiver_type(recv, type_ctx)?;
+    let current = if seg.arg_count.is_some() {
+        if let Some(intrinsic) =
+            intrinsic_method_return_type(&recv_full, base_name, seg.arg_count.unwrap_or(0))
+        {
+            Some(intrinsic)
+        } else {
+            let arg_types: Vec<TypeName> = seg
+                .arg_texts
+                .iter()
+                .map(|t| {
+                    resolve_expression_type_with_target_inner(
+                        t.trim(),
+                        locals,
+                        enclosing_internal,
+                        resolver,
+                        type_ctx,
+                        view,
+                        resolving_vars,
+                        None,
+                        None,
+                    )
+                    .unwrap_or_else(|| TypeName::new("unknown"))
+                })
+                .collect();
+            let receiver_internal = recv_full.to_internal_with_generics();
+            resolver.resolve_method_return_with_callsite_and_qualifier_resolver(
+                &receiver_internal,
+                base_name,
+                CallArgs::new(seg.arg_count.unwrap_or(0), &arg_types, &seg.arg_texts),
+                EvalContext::new(locals, enclosing_internal)
+                    .with_qualifier(Some(resolve_qualifier)),
+            )
+        }
+    } else if recv_full.is_array() && base_name == "length" {
+        Some(TypeName::new("int"))
+    } else {
+        let (_methods, fields) = view.collect_inherited_members(recv_full.erased_internal());
+        if let Some(field) = fields.iter().find(|f| f.name.as_ref() == base_name) {
+            field_descriptor_type(field.descriptor.as_ref())
+        } else {
+            None
+        }
+    };
+
+    current
+}
+
+fn canonicalize_chain_receiver_type(recv: &TypeName, type_ctx: &SourceTypeCtx) -> Option<TypeName> {
+    if recv.contains_slash() || recv.is_primitive() {
+        return Some(recv.clone());
+    }
+
+    let mut canonical = type_ctx.resolve_type_name_strict(recv.erased_internal())?;
+    if !recv.args.is_empty() {
+        canonical.args = recv.args.clone();
+    }
+    canonical.array_dims = recv.array_dims;
+    Some(canonical)
+}
+
+fn apply_chain_dimensions(current: Option<TypeName>, dimensions: usize) -> Option<TypeName> {
+    if dimensions == 0 {
+        return current;
+    }
+
+    let mut ty = current?;
+    for _ in 0..dimensions {
+        ty = ty.element_type()?;
+    }
+    Some(ty)
+}
+
+fn resolve_local_identifier_type(
+    ident: &str,
+    locals: &[LocalVar],
+    enclosing_internal: Option<&Arc<str>>,
+    resolver: &TypeResolver,
+    type_ctx: &SourceTypeCtx,
+    view: &IndexView,
+    resolving_vars: &mut Vec<Arc<str>>,
+) -> Option<TypeName> {
+    let local = locals.iter().find(|lv| lv.name.as_ref() == ident)?;
+    if local.type_internal.erased_internal() != "var" {
+        return Some(local.type_internal.clone());
+    }
+
+    let init_expr = local.init_expr.as_deref()?;
+    if init_expr.trim() == ident {
+        return Some(local.type_internal.clone());
+    }
+    if is_currently_resolving_var_local(ident, locals, resolving_vars) {
+        return None;
+    }
+
+    resolving_vars.push(Arc::clone(&local.name));
+    let resolved = resolve_var_init_expr_inner(
+        init_expr,
+        locals,
+        enclosing_internal,
+        resolver,
+        type_ctx,
+        view,
+        resolving_vars,
+    );
+    resolving_vars.pop();
+    resolved.or_else(|| Some(local.type_internal.clone()))
+}
+
+fn is_currently_resolving_var_local(
+    ident: &str,
+    locals: &[LocalVar],
+    resolving_vars: &[Arc<str>],
+) -> bool {
+    resolving_vars.iter().any(|name| name.as_ref() == ident)
+        && locals.iter().any(|lv| {
+            lv.name.as_ref() == ident
+                && lv.type_internal.erased_internal() == "var"
+                && lv.init_expr.is_some()
+        })
+}
+
+fn field_descriptor_type(descriptor: &str) -> Option<TypeName> {
+    if let Some(ty) = singleton_descriptor_to_type(descriptor) {
+        Some(TypeName::new(ty))
+    } else {
+        parse_single_type_to_internal(descriptor)
+    }
 }
 
 #[cfg(test)]
@@ -1198,7 +1426,15 @@ mod tests {
                 super_name: Some(Arc::from("java/lang/Object")),
                 interfaces: vec![],
                 annotations: vec![],
-                methods: vec![],
+                methods: vec![MethodSummary {
+                    name: Arc::from("substring"),
+                    params: MethodParams::from([("I", "beginIndex")]),
+                    annotations: vec![],
+                    access_flags: ACC_PUBLIC,
+                    is_synthetic: false,
+                    generic_signature: None,
+                    return_type: Some(Arc::from("Ljava/lang/String;")),
+                }],
                 fields: vec![],
                 access_flags: ACC_PUBLIC,
                 generic_signature: None,
@@ -1366,6 +1602,42 @@ mod tests {
         .expect("resolved type");
 
         assert_eq!(ty.erased_internal(), "org/cubewhy/Main");
+    }
+
+    #[test]
+    fn test_var_init_expr_method_call_on_unmaterialized_var_receiver_materializes_string() {
+        let idx = make_index();
+        let view = idx.view(root_scope());
+        let type_ctx = SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec!["java.lang.*".into()],
+            Some(view.build_name_table()),
+        );
+        let resolver = TypeResolver::new(&view);
+        let locals = vec![
+            LocalVar {
+                name: Arc::from("s2"),
+                type_internal: TypeName::new("var"),
+                init_expr: Some("s1.substring(1)".to_string()),
+            },
+            LocalVar {
+                name: Arc::from("s1"),
+                type_internal: TypeName::new("var"),
+                init_expr: Some("\"\"".to_string()),
+            },
+        ];
+
+        let ty = resolve_var_init_expr(
+            "s1.substring(1)",
+            &locals,
+            Some(&Arc::from("org/cubewhy/Main")),
+            &resolver,
+            &type_ctx,
+            &view,
+        )
+        .expect("resolved type");
+
+        assert_eq!(ty.erased_internal(), "java/lang/String");
     }
 
     #[test]
