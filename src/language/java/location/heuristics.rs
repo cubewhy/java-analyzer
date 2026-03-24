@@ -305,6 +305,8 @@ pub(super) fn handle_import_from_text(
 /// - Tree-sitter may also recover `expr\nsuper.foo()` / `expr\nthis.foo()` as a
 ///   local declaration whose declarator name is `super`/`this` and whose tail
 ///   lives under `ERROR`.
+/// - Tree-sitter may recover `expr\nType.Name name = ...` as a declaration with
+///   the later qualified type path stored in a direct `ERROR` child.
 ///
 /// Effect on behavior:
 /// - Forces the cursor location to `Expression` to avoid type completions.
@@ -382,6 +384,9 @@ pub(super) fn is_misread_expression_in_local_decl(
         if error_starts_with_dot && (declarator_name == "super" || declarator_name == "this") {
             return true;
         }
+        if is_recovered_qualified_type_tail(error_child, type_node, declarator, ctx) {
+            return true;
+        }
     }
 
     let declarator_error = {
@@ -408,6 +413,39 @@ pub(super) fn is_misread_expression_in_local_decl(
     error_child
         .named_children(&mut error_children)
         .any(|child| matches!(child.kind(), "identifier" | "type_identifier"))
+}
+
+fn is_recovered_qualified_type_tail(
+    error_child: Node,
+    type_node: Node,
+    declarator: Node,
+    ctx: &JavaContextExtractor,
+) -> bool {
+    if error_child.start_byte() <= type_node.end_byte()
+        || error_child.end_byte() > declarator.start_byte()
+    {
+        return false;
+    }
+
+    let gap = &ctx.source[type_node.end_byte()..error_child.start_byte()];
+    if !gap.contains('\n') {
+        return false;
+    }
+
+    let mut children = error_child.walk();
+    let has_dot = error_child
+        .children(&mut children)
+        .any(|child| child.kind() == ".");
+    if !has_dot {
+        return false;
+    }
+
+    let mut named = error_child.walk();
+    let parts: Vec<Node> = error_child.named_children(&mut named).collect();
+    parts.len() >= 2
+        && parts
+            .iter()
+            .all(|child| is_type_like_node_kind(child.kind()))
 }
 
 /// Detects member access tail misread as local variable declaration.

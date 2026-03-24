@@ -408,6 +408,62 @@ class A {
     }
 
     #[test]
+    fn test_misread_before_qualified_inner_constructor_stays_expression() {
+        let src = indoc::indoc! {r#"
+class Test {
+    private void foo() {
+        Test t = null;
+        f // expected expression there
+        Test.NestedNonStatic nns = t.new NestedNonStatic();
+    }
+
+    public class NestedNonStatic {}
+}
+"#};
+        let marker = "        f";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression before recovered qualified inner constructor, got {:?}",
+            loc
+        );
+        assert_eq!(query, "f");
+    }
+
+    #[test]
+    fn test_misread_before_qualified_inner_constructor_without_comment_stays_expression() {
+        let src = indoc::indoc! {r#"
+class Test {
+    private void foo() {
+        Test t = null;
+        f
+        Test.NestedNonStatic nns = t.new NestedNonStatic();
+    }
+
+    public class NestedNonStatic {}
+}
+"#};
+        let marker = "        f";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression before recovered qualified inner constructor without comment, got {:?}",
+            loc
+        );
+        assert_eq!(query, "f");
+    }
+
+    #[test]
     fn test_break_routes_to_statement_label_location() {
         let src = indoc::indoc! {r#"
 class A {
@@ -543,6 +599,32 @@ class T {
             loc
         );
         assert_eq!(query, "HashM");
+    }
+
+    #[test]
+    fn test_genuine_qualified_type_annotation_in_local_decl() {
+        let src = indoc::indoc! {r#"
+    class Test {
+        class NestedNonStatic {}
+
+        void f() {
+            Test.NestedNonStatic nns = null;
+        }
+    }
+    "#};
+        let marker = "Test.NestedNonStatic";
+        let offset = src.find(marker).unwrap() + "Test".len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::TypeAnnotation { .. }),
+            "Expected TypeAnnotation for genuine qualified type position, got {:?}",
+            loc
+        );
+        assert_eq!(query, "Test");
     }
 
     #[test]
