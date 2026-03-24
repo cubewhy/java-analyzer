@@ -36,7 +36,10 @@ impl CompletionProvider for MemberProvider {
     fn is_applicable(&self, ctx: &SemanticContext) -> bool {
         matches!(
             ctx.location,
-            CursorLocation::MemberAccess { .. } | CursorLocation::StaticAccess { .. }
+            CursorLocation::Expression { .. }
+                | CursorLocation::MethodArgument { .. }
+                | CursorLocation::MemberAccess { .. }
+                | CursorLocation::StaticAccess { .. }
         )
     }
 
@@ -52,10 +55,31 @@ impl CompletionProvider for MemberProvider {
             return Ok(results.into());
         }
 
-        let receiver_semantic_type = ctx.location.member_access_receiver_semantic_type();
-        let receiver_owner_internal = ctx.location.member_access_receiver_owner_internal();
-        let member_prefix = ctx.location.member_access_prefix().unwrap_or("");
-        let receiver_expr = ctx.location.member_access_expr().unwrap_or("");
+        let (receiver_semantic_type, receiver_owner_internal, member_prefix, receiver_expr) =
+            match &ctx.location {
+                CursorLocation::MemberAccess {
+                    receiver_semantic_type,
+                    receiver_type,
+                    member_prefix,
+                    receiver_expr,
+                    ..
+                } => (
+                    receiver_semantic_type.as_ref(),
+                    receiver_semantic_type
+                        .as_ref()
+                        .map(TypeName::erased_internal)
+                        .or(receiver_type.as_deref()),
+                    member_prefix.as_str(),
+                    receiver_expr.as_str(),
+                ),
+                CursorLocation::Expression { prefix }
+                | CursorLocation::MethodArgument { prefix } => (None, None, prefix.as_str(), ""),
+                _ => return Ok(ProviderCompletionResult::default()),
+            };
+        let is_bare_self_context = matches!(
+            &ctx.location,
+            CursorLocation::Expression { .. } | CursorLocation::MethodArgument { .. }
+        );
 
         tracing::debug!(
             receiver_expr,
@@ -100,6 +124,12 @@ impl CompletionProvider for MemberProvider {
         let resolved_original = match resolved_semantic {
             Some(t) => t,
             None => {
+                if is_bare_self_context && !ctx.current_class_members.is_empty() {
+                    let resolver = ContextualResolver::new(index, ctx);
+                    return Ok(self
+                        .provide_from_source_members(ctx, member_prefix, true, &resolver)
+                        .into());
+                }
                 tracing::debug!(
                     receiver_expr,
                     "resolve_receiver_type returned None, returning empty"
@@ -161,6 +191,7 @@ impl CompletionProvider for MemberProvider {
 
         let has_paren_after_cursor = ctx.is_followed_by_opener();
         let resolver = ContextualResolver::new(index, ctx);
+        let use_fuzzy_member_match = is_bare_self_context;
 
         let mut results = Vec::new();
         let mut seen_methods: std::collections::HashSet<(Arc<str>, Arc<str>)> =
@@ -221,7 +252,9 @@ impl CompletionProvider for MemberProvider {
                         method,
                         &resolver,
                         &filter,
+                        member_prefix,
                         prefix_lower.as_deref(),
+                        use_fuzzy_member_match,
                         &mut seen_methods,
                         class_internal.as_str(),
                         &class_internal_for_substitution,
@@ -239,7 +272,9 @@ impl CompletionProvider for MemberProvider {
                         field,
                         &resolver,
                         &filter,
+                        member_prefix,
                         prefix_lower.as_deref(),
+                        use_fuzzy_member_match,
                         &mut seen_fields,
                         class_internal.as_str(),
                         &class_internal_for_substitution,
@@ -568,7 +603,9 @@ impl MemberProvider {
                     method,
                     &resolver,
                     &AccessFilter::member_completion(),
+                    member_prefix,
                     prefix_lower.as_deref(),
+                    false,
                     &mut seen_methods,
                     JAVA_LANG_OBJECT_INTERNAL,
                     class_internal_for_substitution,
@@ -598,7 +635,9 @@ impl MemberProvider {
         method: &crate::index::MethodSummary,
         resolver: &ContextualResolver<'_>,
         filter: &AccessFilter,
+        member_prefix: &str,
         prefix_lower: Option<&str>,
+        use_fuzzy_member_match: bool,
         seen_methods: &mut std::collections::HashSet<(Arc<str>, Arc<str>)>,
         class_internal: &str,
         class_internal_for_substitution: &str,
@@ -617,9 +656,17 @@ impl MemberProvider {
         if !filter.is_method_accessible(method.access_flags, method.is_synthetic) {
             return;
         }
-        if !name_matches_member_prefix(method.name.as_ref(), prefix_lower) {
-            return;
-        }
+        let match_score = if use_fuzzy_member_match {
+            match fuzzy::fuzzy_match(member_prefix, method.name.as_ref()) {
+                Some(score) => Some(score),
+                None => return,
+            }
+        } else {
+            if !name_matches_member_prefix(method.name.as_ref(), prefix_lower) {
+                return;
+            }
+            None
+        };
 
         let is_static = method.access_flags & ACC_STATIC != 0;
         if only_static_members && !is_static {
@@ -680,6 +727,10 @@ impl MemberProvider {
             );
         }
 
+        if let Some(match_score) = match_score {
+            candidate = candidate.with_score(50.0 + match_score as f32 * 0.1);
+        }
+
         results.push(candidate);
     }
 
@@ -692,7 +743,9 @@ impl MemberProvider {
         field: &crate::index::FieldSummary,
         resolver: &ContextualResolver<'_>,
         filter: &AccessFilter,
+        member_prefix: &str,
         prefix_lower: Option<&str>,
+        use_fuzzy_member_match: bool,
         seen_fields: &mut std::collections::HashSet<Arc<str>>,
         class_internal: &str,
         class_internal_for_substitution: &str,
@@ -706,9 +759,17 @@ impl MemberProvider {
         if !filter.is_field_accessible(field.access_flags, field.is_synthetic) {
             return;
         }
-        if !name_matches_member_prefix(field.name.as_ref(), prefix_lower) {
-            return;
-        }
+        let match_score = if use_fuzzy_member_match {
+            match fuzzy::fuzzy_match(member_prefix, field.name.as_ref()) {
+                Some(score) => Some(score),
+                None => return,
+            }
+        } else {
+            if !name_matches_member_prefix(field.name.as_ref(), prefix_lower) {
+                return;
+            }
+            None
+        };
         let is_static = field.access_flags & ACC_STATIC != 0;
         if only_static_members && !is_static {
             return;
@@ -752,6 +813,10 @@ impl MemberProvider {
                 plan.receiver_expr.clone(),
                 plan.cast_type.clone(),
             );
+        }
+
+        if let Some(match_score) = match_score {
+            candidate = candidate.with_score(50.0 + match_score as f32 * 0.1);
         }
 
         results.push(candidate);
@@ -1528,6 +1593,44 @@ mod tests {
         )
     }
 
+    fn ctx_expression(
+        enclosing_simple: &str,
+        enclosing_internal: Option<&str>,
+        enclosing_pkg: Option<&str>,
+        prefix: &str,
+    ) -> SemanticContext {
+        SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: prefix.to_string(),
+            },
+            prefix,
+            vec![],
+            Some(Arc::from(enclosing_simple)),
+            enclosing_internal.map(Arc::from),
+            enclosing_pkg.map(Arc::from),
+            vec![],
+        )
+    }
+
+    fn ctx_method_argument(
+        enclosing_simple: &str,
+        enclosing_internal: &str,
+        enclosing_pkg: &str,
+        prefix: &str,
+    ) -> SemanticContext {
+        SemanticContext::new(
+            CursorLocation::MethodArgument {
+                prefix: prefix.to_string(),
+            },
+            prefix,
+            vec![],
+            Some(Arc::from(enclosing_simple)),
+            Some(Arc::from(enclosing_internal)),
+            Some(Arc::from(enclosing_pkg)),
+            vec![],
+        )
+    }
+
     #[test]
     fn test_instance_method_found() {
         let idx = make_index(
@@ -2008,6 +2111,237 @@ mod tests {
             .candidates;
         assert!(results.iter().any(|c| candidate_name(c) == "priFunc"));
         assert!(results.iter().any(|c| candidate_name(c) == "fun"));
+    }
+
+    #[test]
+    fn test_expression_completion_uses_source_members() {
+        let idx = WorkspaceIndex::new();
+        let ctx = ctx_expression(
+            "Main",
+            Some("org/cubewhy/a/Main"),
+            Some("org/cubewhy/a"),
+            "fu",
+        )
+        .with_class_members(vec![
+            CurrentClassMember::Method(Arc::new(make_method("func", "()V", ACC_PUBLIC, false))),
+            CurrentClassMember::Method(Arc::new(make_method("fun", "()V", ACC_PUBLIC, false))),
+            CurrentClassMember::Method(Arc::new(make_method("other", "()V", ACC_PUBLIC, false))),
+        ]);
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+
+        assert!(results.iter().any(|c| candidate_name(c) == "func"));
+        assert!(results.iter().any(|c| candidate_name(c) == "fun"));
+        assert!(results.iter().all(|c| candidate_name(c) != "other"));
+    }
+
+    #[test]
+    fn test_expression_completion_preserves_source_overloads() {
+        let idx = WorkspaceIndex::new();
+        let ctx = ctx_expression(
+            "Main",
+            Some("org/cubewhy/a/Main"),
+            Some("org/cubewhy/a"),
+            "fo",
+        )
+        .with_class_members(vec![
+            CurrentClassMember::Method(Arc::new(make_method("foo", "()V", ACC_PUBLIC, false))),
+            CurrentClassMember::Method(Arc::new(make_method(
+                "foo",
+                "(Ljava/lang/String;)V",
+                ACC_PUBLIC,
+                false,
+            ))),
+        ]);
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let foo_methods: Vec<_> = results
+            .iter()
+            .filter(|candidate| candidate_name(candidate) == "foo")
+            .collect();
+
+        assert_eq!(foo_methods.len(), 2, "both source overloads should appear");
+        assert!(
+            foo_methods
+                .iter()
+                .all(|candidate| candidate.insertion.filter_text.as_deref() == Some("foo")),
+            "source method completions should filter on the bare method name"
+        );
+    }
+
+    #[test]
+    fn test_expression_completion_falls_back_to_source_members_without_enclosing_owner() {
+        let idx = WorkspaceIndex::new();
+        let ctx = ctx_expression("Main", None, None, "he").with_class_members(vec![
+            CurrentClassMember::Method(Arc::new(make_method("helper", "()V", ACC_PUBLIC, false))),
+        ]);
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+
+        assert!(results.iter().any(|c| candidate_name(c) == "helper"));
+    }
+
+    #[test]
+    fn test_expression_completion_static_context_only_shows_static_members() {
+        let idx = WorkspaceIndex::new();
+        let enclosing_method = Arc::new(make_method(
+            "main",
+            "([Ljava/lang/String;)V",
+            ACC_PUBLIC | ACC_STATIC,
+            false,
+        ));
+        let ctx = ctx_expression(
+            "Main",
+            Some("org/cubewhy/a/Main"),
+            Some("org/cubewhy/a"),
+            "",
+        )
+        .with_class_members(vec![
+            m("pri", ACC_STATIC | ACC_PUBLIC, false),
+            m("fun", ACC_PUBLIC, false),
+            f("CONST", ACC_STATIC | ACC_PUBLIC, false),
+            f("count", ACC_PUBLIC, false),
+        ])
+        .with_enclosing_member(Some(CurrentClassMember::Method(enclosing_method)));
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+
+        assert!(results.iter().any(|c| candidate_name(c) == "pri"));
+        assert!(results.iter().any(|c| candidate_name(c) == "CONST"));
+        assert!(results.iter().all(|c| candidate_name(c) != "fun"));
+        assert!(results.iter().all(|c| candidate_name(c) != "count"));
+    }
+
+    #[test]
+    fn test_method_argument_completion_uses_implicit_self_members() {
+        let idx = WorkspaceIndex::new();
+        let enclosing_method = Arc::new(make_method(
+            "main",
+            "([Ljava/lang/String;)V",
+            ACC_PUBLIC | ACC_STATIC,
+            false,
+        ));
+        let ctx = ctx_method_argument("Main", "org/cubewhy/a/Main", "org/cubewhy/a", "")
+            .with_class_members(vec![m("pri", ACC_STATIC | ACC_PUBLIC, false)])
+            .with_enclosing_member(Some(CurrentClassMember::Method(enclosing_method)));
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+
+        assert!(
+            results.iter().any(|c| candidate_name(c) == "pri"),
+            "empty prefix in method arg should return class members"
+        );
+    }
+
+    #[test]
+    fn test_expression_completion_includes_inherited_members() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("BaseClass"),
+                internal_name: Arc::from("org/cubewhy/BaseClass"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![make_method("funcA", "()V", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("org/cubewhy/Main2"),
+                super_name: Some("org/cubewhy/BaseClass".into()),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![make_method("func", "()V", ACC_PUBLIC, false)],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let enclosing_method = Arc::new(make_method("func", "()V", ACC_PUBLIC, false));
+        let ctx = ctx_expression("Main2", Some("org/cubewhy/Main2"), Some("org/cubewhy"), "")
+            .with_class_members(vec![CurrentClassMember::Method(enclosing_method.clone())])
+            .with_enclosing_member(Some(CurrentClassMember::Method(enclosing_method)));
+
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+
+        assert!(
+            results.iter().any(|c| candidate_name(c) == "funcA"),
+            "inherited members should be visible for bare expression completion"
+        );
+    }
+
+    #[test]
+    fn test_expression_completion_fuzzy_matches_inherited_members() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("BaseClass"),
+                internal_name: Arc::from("org/cubewhy/BaseClass"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![make_field("veryLongMemberName", "I", ACC_PUBLIC, false)],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Main2"),
+                internal_name: Arc::from("org/cubewhy/Main2"),
+                super_name: Some("org/cubewhy/BaseClass".into()),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+
+        let ctx = ctx_expression(
+            "Main2",
+            Some("org/cubewhy/Main2"),
+            Some("org/cubewhy"),
+            "vlmn",
+        );
+        let results = MemberProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+
+        assert!(
+            results
+                .iter()
+                .any(|c| candidate_name(c) == "veryLongMemberName"),
+            "fuzzy subsequence should match inherited members for bare expression completion"
+        );
     }
 
     #[test]
