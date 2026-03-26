@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use rust_asm::constants::{ACC_FINAL, ACC_PRIVATE, ACC_STATIC};
+use rust_asm::constants::{ACC_FINAL, ACC_INTERFACE, ACC_PRIVATE, ACC_STATIC, ACC_TRANSIENT};
 
 use crate::{
     completion::{
@@ -9,14 +9,32 @@ use crate::{
         candidate::ReplacementMode,
         provider::{CompletionProvider, ProviderCompletionResult},
     },
-    index::{IndexScope, IndexView, MethodSummary},
+    index::{ClassMetadata, FieldSummary, IndexScope, IndexView, MethodSummary},
     semantic::{
-        context::{CursorLocation, SemanticContext},
+        context::{CurrentClassMember, CursorLocation, SemanticContext},
         types::ContextualResolver,
     },
 };
 
 pub struct OverrideProvider;
+
+const JAVA_LANG_OBJECT_INTERNAL: &str = "java/lang/Object";
+const THROW_NOT_IMPLEMENTED_BODY: &str = r#"throw new RuntimeException("Not implemented yet");"#;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverrideBodyStrategy {
+    InterfaceThrow,
+    SuperCall,
+    ObjectEquals,
+    ObjectHashCode,
+    ObjectToString,
+}
+
+#[derive(Debug, Clone)]
+struct ParamBinding {
+    ty: String,
+    name: String,
+}
 
 impl CompletionProvider for OverrideProvider {
     fn name(&self) -> &'static str {
@@ -62,15 +80,11 @@ impl CompletionProvider for OverrideProvider {
         // (name, descriptor) already appearing in this candidate list, to avoid the same method appearing repeatedly from multiple ancestors.
         let mut emitted: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
-        let mut mro = index.mro(enclosing);
-        let has_object = mro
-            .iter()
-            .any(|c| c.internal_name.as_ref() == "java/lang/Object");
-        if !has_object && let Some(object_meta) = index.get_class("java/lang/Object") {
-            mro.push(object_meta);
-        }
-
+        let mro = index.mro(enclosing);
         let mut candidates = Vec::new();
+        let resolver = ContextualResolver::new(index, ctx);
+        let current_class_fields = self.collect_current_class_fields(enclosing, ctx, index);
+        let current_class_name = self.current_class_name(enclosing, ctx, index);
 
         for (i, class_meta) in mro.iter().enumerate() {
             if i == 0 {
@@ -106,8 +120,6 @@ impl CompletionProvider for OverrideProvider {
                     continue;
                 }
 
-                let resolver = ContextualResolver::new(index, ctx);
-
                 let Some((params_source, return_type_source)) =
                     crate::semantic::types::parse_strict_method_signature(
                         &method.desc(),
@@ -121,10 +133,11 @@ impl CompletionProvider for OverrideProvider {
                     method,
                     &return_type_source,
                     &params_source,
-                    &class_meta.internal_name,
+                    class_meta.as_ref(),
+                    &current_class_fields,
+                    &current_class_name,
                     ctx,
                     index,
-                    scope,
                     self.name(),
                 );
                 candidates.push(candidate);
@@ -152,6 +165,49 @@ impl OverrideProvider {
             }
         }
         set
+    }
+
+    fn collect_current_class_fields(
+        &self,
+        enclosing: &str,
+        ctx: &SemanticContext,
+        index: &IndexView,
+    ) -> Vec<FieldSummary> {
+        let source_fields: Vec<FieldSummary> = ctx
+            .current_class_member_list
+            .iter()
+            .filter_map(|member| match member {
+                CurrentClassMember::Field(field) => Some((**field).clone()),
+                CurrentClassMember::Method(_) => None,
+            })
+            .collect();
+        if !source_fields.is_empty() {
+            return source_fields;
+        }
+
+        index
+            .get_class(enclosing)
+            .map(|meta| meta.fields.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn current_class_name(
+        &self,
+        enclosing: &str,
+        ctx: &SemanticContext,
+        index: &IndexView,
+    ) -> String {
+        if let Some(name) = ctx.enclosing_class.as_deref() {
+            return name.to_string();
+        }
+        if let Some(meta) = index.get_class(enclosing) {
+            return meta.direct_name().to_string();
+        }
+        enclosing
+            .rsplit(['/', '$'])
+            .next()
+            .unwrap_or(enclosing)
+            .to_string()
     }
 }
 
@@ -192,10 +248,11 @@ fn build_candidate(
     method: &MethodSummary,
     return_type_source: &str,
     params_source: &[String],
-    defining_class_internal: &Arc<str>,
+    defining_class: &ClassMetadata,
+    current_class_fields: &[FieldSummary],
+    current_class_name: &str,
     ctx: &SemanticContext,
     index: &IndexView,
-    _scope: IndexScope,
     source: &'static str,
 ) -> CompletionCandidate {
     use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC};
@@ -209,13 +266,9 @@ fn build_candidate(
         ""
     };
 
-    // 组装参数列表：如 "java.lang.Object arg0, int arg1"
-    let params_str = params_source
-        .iter()
-        .enumerate()
-        .map(|(i, t)| format!("{} arg{}", t, i))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let body_strategy = classify_body_strategy(method, defining_class);
+    let param_bindings = build_param_bindings(method, params_source, body_strategy);
+    let params_str = render_param_declarations(&param_bindings);
 
     let label_text = format!(
         "{} {} {}({})",
@@ -224,7 +277,13 @@ fn build_candidate(
     .trim()
     .to_string();
 
-    let body_line = r#"throw new RuntimeException("Not implemented yet");"#;
+    let body = build_method_body(
+        body_strategy,
+        method,
+        &param_bindings,
+        current_class_fields,
+        current_class_name,
+    );
 
     let vis_prefix = if visibility.is_empty() {
         String::new()
@@ -239,15 +298,19 @@ fn build_candidate(
         )
     } else {
         format!(
-            "@Override\n{}{} {}({}) {{\n    {}\n}}",
-            vis_prefix, return_type_source, method.name, params_str, body_line
+            "@Override\n{}{} {}({}) {{\n{}\n}}",
+            vis_prefix,
+            return_type_source,
+            method.name,
+            params_str,
+            indent_block(&body, 4)
         )
     };
 
     // 查找展示名称，如果因为某些极端的并发原因没查到，做个兜底展示
     let defining_class_display = index
-        .get_source_type_name(defining_class_internal)
-        .unwrap_or_else(|| defining_class_internal.replace(['/', '$'], "."));
+        .get_source_type_name(&defining_class.internal_name)
+        .unwrap_or_else(|| defining_class.internal_name.replace(['/', '$'], "."));
 
     let detail = format!("@Override — {}", defining_class_display);
 
@@ -256,7 +319,7 @@ fn build_candidate(
         insert_text,
         CandidateKind::Method {
             descriptor: method.desc(),
-            defining_class: Arc::clone(defining_class_internal),
+            defining_class: Arc::clone(&defining_class.internal_name),
         },
         source,
     )
@@ -266,17 +329,247 @@ fn build_candidate(
     .with_score(65.0)
 }
 
+fn classify_body_strategy(
+    method: &MethodSummary,
+    defining_class: &ClassMetadata,
+) -> OverrideBodyStrategy {
+    let descriptor = method.desc();
+    if defining_class.internal_name.as_ref() == JAVA_LANG_OBJECT_INTERNAL {
+        return match (method.name.as_ref(), descriptor.as_ref()) {
+            ("equals", "(Ljava/lang/Object;)Z") => OverrideBodyStrategy::ObjectEquals,
+            ("hashCode", "()I") => OverrideBodyStrategy::ObjectHashCode,
+            ("toString", "()Ljava/lang/String;") => OverrideBodyStrategy::ObjectToString,
+            _ => OverrideBodyStrategy::SuperCall,
+        };
+    }
+
+    if defining_class.access_flags & ACC_INTERFACE != 0 {
+        OverrideBodyStrategy::InterfaceThrow
+    } else {
+        OverrideBodyStrategy::SuperCall
+    }
+}
+
+fn build_param_bindings(
+    method: &MethodSummary,
+    params_source: &[String],
+    body_strategy: OverrideBodyStrategy,
+) -> Vec<ParamBinding> {
+    params_source
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| ParamBinding {
+            ty: ty.clone(),
+            name: match body_strategy {
+                OverrideBodyStrategy::ObjectEquals if i == 0 => "o".to_string(),
+                _ => format!("arg{i}"),
+            },
+        })
+        .take(method.params.len())
+        .collect()
+}
+
+fn render_param_declarations(param_bindings: &[ParamBinding]) -> String {
+    param_bindings
+        .iter()
+        .map(|param| format!("{} {}", param.ty, param.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn build_method_body(
+    body_strategy: OverrideBodyStrategy,
+    method: &MethodSummary,
+    param_bindings: &[ParamBinding],
+    current_class_fields: &[FieldSummary],
+    current_class_name: &str,
+) -> String {
+    match body_strategy {
+        OverrideBodyStrategy::InterfaceThrow => THROW_NOT_IMPLEMENTED_BODY.to_string(),
+        OverrideBodyStrategy::SuperCall => build_super_call_body(method, param_bindings),
+        OverrideBodyStrategy::ObjectEquals => {
+            build_equals_body(current_class_name, current_class_fields)
+        }
+        OverrideBodyStrategy::ObjectHashCode => build_hash_code_body(current_class_fields),
+        OverrideBodyStrategy::ObjectToString => {
+            build_to_string_body(current_class_name, current_class_fields)
+        }
+    }
+}
+
+fn build_super_call_body(method: &MethodSummary, param_bindings: &[ParamBinding]) -> String {
+    let args = param_bindings
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let call = format!("super.{}({args})", method.name);
+    if method.return_type.is_some() {
+        format!("return {call};")
+    } else {
+        format!("{call};")
+    }
+}
+
+fn build_equals_body(current_class_name: &str, fields: &[FieldSummary]) -> String {
+    let comparable_fields = select_equals_hash_code_fields(fields);
+    let mut lines = vec![
+        "if (this == o) return true;".to_string(),
+        "if (o == null || getClass() != o.getClass()) return false;".to_string(),
+    ];
+
+    if comparable_fields.is_empty() {
+        lines.push("return true;".to_string());
+        return lines.join("\n");
+    }
+
+    lines.push(format!(
+        "{current_class_name} other = ({current_class_name}) o;"
+    ));
+
+    let comparisons = comparable_fields
+        .iter()
+        .map(|field| field_equality_expr(field))
+        .collect::<Vec<_>>();
+    if comparisons.len() == 1 {
+        lines.push(format!("return {};", comparisons[0]));
+    } else {
+        lines.push(format!("return {};", comparisons.join("\n        && ")));
+    }
+
+    lines.join("\n")
+}
+
+fn build_hash_code_body(fields: &[FieldSummary]) -> String {
+    let comparable_fields = select_equals_hash_code_fields(fields);
+    if comparable_fields.is_empty() {
+        return "return 0;".to_string();
+    }
+
+    let mut lines = vec![format!(
+        "int result = {};",
+        field_hash_expr(comparable_fields[0])
+    )];
+    for field in comparable_fields.iter().skip(1) {
+        lines.push(format!(
+            "result = 31 * result + {};",
+            field_hash_expr(field)
+        ));
+    }
+    lines.push("return result;".to_string());
+    lines.join("\n")
+}
+
+fn build_to_string_body(current_class_name: &str, fields: &[FieldSummary]) -> String {
+    let printable_fields = select_to_string_fields(fields);
+    if printable_fields.is_empty() {
+        return format!("return \"{current_class_name}{{}}\";");
+    }
+
+    let mut lines = vec![format!("return \"{current_class_name}{{\" +")];
+    for (i, field) in printable_fields.iter().enumerate() {
+        let prefix = if i == 0 {
+            format!("\"{}=\" + {}", field.name, field_to_string_expr(field))
+        } else {
+            format!("\", {}=\" + {}", field.name, field_to_string_expr(field))
+        };
+        lines.push(format!("        {prefix} +"));
+    }
+    lines.push("        '}';".to_string());
+    lines.join("\n")
+}
+
+fn select_equals_hash_code_fields(fields: &[FieldSummary]) -> Vec<&FieldSummary> {
+    fields
+        .iter()
+        .filter(|field| {
+            !field.is_synthetic
+                && field.access_flags & ACC_STATIC == 0
+                && field.access_flags & ACC_TRANSIENT == 0
+                && !field.name.as_ref().starts_with('$')
+        })
+        .collect()
+}
+
+fn select_to_string_fields(fields: &[FieldSummary]) -> Vec<&FieldSummary> {
+    fields
+        .iter()
+        .filter(|field| {
+            !field.is_synthetic
+                && field.access_flags & ACC_STATIC == 0
+                && !field.name.as_ref().starts_with('$')
+        })
+        .collect()
+}
+
+fn field_equality_expr(field: &FieldSummary) -> String {
+    let left = format!("this.{}", field.name);
+    let right = format!("other.{}", field.name);
+    match descriptor_array_depth(&field.descriptor) {
+        0 => match descriptor_base(&field.descriptor) {
+            "F" => format!("Float.compare({left}, {right}) == 0"),
+            "D" => format!("Double.compare({left}, {right}) == 0"),
+            "B" | "C" | "I" | "J" | "S" | "Z" => format!("{left} == {right}"),
+            _ => format!("java.util.Objects.equals({left}, {right})"),
+        },
+        1 => format!("java.util.Arrays.equals({left}, {right})"),
+        _ => format!("java.util.Arrays.deepEquals({left}, {right})"),
+    }
+}
+
+fn field_hash_expr(field: &FieldSummary) -> String {
+    let access = format!("this.{}", field.name);
+    match descriptor_array_depth(&field.descriptor) {
+        0 => match descriptor_base(&field.descriptor) {
+            "Z" => format!("({access} ? 1 : 0)"),
+            "B" | "C" | "I" | "S" => access,
+            "J" => format!("Long.hashCode({access})"),
+            "F" => format!("Float.hashCode({access})"),
+            "D" => format!("Double.hashCode({access})"),
+            _ => format!("java.util.Objects.hashCode({access})"),
+        },
+        1 => format!("java.util.Arrays.hashCode({access})"),
+        _ => format!("java.util.Arrays.deepHashCode({access})"),
+    }
+}
+
+fn field_to_string_expr(field: &FieldSummary) -> String {
+    let access = format!("this.{}", field.name);
+    match descriptor_array_depth(&field.descriptor) {
+        0 => access,
+        1 => format!("java.util.Arrays.toString({access})"),
+        _ => format!("java.util.Arrays.deepToString({access})"),
+    }
+}
+
+fn descriptor_array_depth(descriptor: &str) -> usize {
+    descriptor.bytes().take_while(|b| *b == b'[').count()
+}
+
+fn descriptor_base(descriptor: &str) -> &str {
+    &descriptor[descriptor_array_depth(descriptor)..]
+}
+
+fn indent_block(block: &str, spaces: usize) -> String {
+    let pad = " ".repeat(spaces);
+    block
+        .lines()
+        .map(|line| format!("{pad}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::index::WorkspaceIndex;
     use crate::index::{
-        ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
+        ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary, ModuleId,
     };
     use crate::language::test_helpers::completion_context_from_marked_source;
     use crate::semantic::context::{CurrentClassMember, CursorLocation, SemanticContext};
     use crate::semantic::types::parse_return_type_from_descriptor;
-    use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC};
+    use rust_asm::constants::{ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_TRANSIENT};
     use std::sync::Arc;
 
     fn root_scope() -> IndexScope {
@@ -306,6 +599,17 @@ mod tests {
             is_synthetic: true,
             generic_signature: None,
             return_type: parse_return_type_from_descriptor(descriptor),
+        }
+    }
+
+    fn field(name: &str, descriptor: &str, flags: u16) -> FieldSummary {
+        FieldSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags: flags,
+            annotations: vec![],
+            is_synthetic: false,
+            generic_signature: None,
         }
     }
 
@@ -483,8 +787,11 @@ mod tests {
             .candidates;
         let c = results.iter().find(|c| c.label.contains("doWork")).unwrap();
 
-        assert!(c.insert_text.contains('{'), "should have opening brace");
-        assert!(c.insert_text.contains('}'), "should have closing brace");
+        assert!(
+            c.insert_text.contains("super.doWork();"),
+            "superclass override should delegate to super: {}",
+            c.insert_text
+        );
     }
 
     #[test]
@@ -903,7 +1210,7 @@ mod tests {
 
     #[test]
     fn test_object_methods_appear_when_no_explicit_superclass() {
-        // Object 的 toString / equals / hashCode 应当出现
+        // parser normalizes implicit superclass to java/lang/Object
         let idx = WorkspaceIndex::new();
         idx.add_classes(vec![
             make_class("java/lang", "String", None, vec![]),
@@ -926,8 +1233,7 @@ mod tests {
                 inner_class_of: None,
                 origin: ClassOrigin::Unknown,
             },
-            // 没有显式 super_name 的类
-            make_class("com/example", "Plain", None, vec![]),
+            make_class("com/example", "Plain", Some("java/lang/Object"), vec![]),
         ]);
 
         let ctx = ctx_with_prefix("pub", "com/example/Plain");
@@ -1085,6 +1391,306 @@ mod tests {
             results.iter().any(|c| c.label.contains("greet")),
             "default interface method should be overridable: {:?}",
             results.iter().map(|c| c.label.as_ref()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_non_void_superclass_method_returns_super_call() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            make_class(
+                "com/example",
+                "Parent",
+                Some("java/lang/Object"),
+                vec![method("answer", "()I", ACC_PUBLIC)],
+            ),
+            make_class("com/example", "Child", Some("com/example/Parent"), vec![]),
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Child");
+        let results = OverrideProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let candidate = results
+            .iter()
+            .find(|c| c.label.contains("answer"))
+            .expect("answer override candidate");
+
+        assert!(
+            candidate.insert_text.contains("return super.answer();"),
+            "non-void superclass override should return super call: {}",
+            candidate.insert_text
+        );
+    }
+
+    #[test]
+    fn test_interface_method_keeps_throw_stub() {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![make_interface(
+            "com/example",
+            "Runnable",
+            vec![abstract_method("run", "()V")],
+        )]);
+        let mut cls = make_class("com/example", "MyTask", Some("java/lang/Object"), vec![]);
+        cls.interfaces = vec![Arc::from("com/example/Runnable")];
+        idx.add_classes(vec![cls]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/MyTask");
+        let results = OverrideProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let candidate = results
+            .iter()
+            .find(|c| c.label.contains("run"))
+            .expect("run override candidate");
+
+        assert!(
+            candidate.insert_text.contains(THROW_NOT_IMPLEMENTED_BODY),
+            "interface override should keep throw stub: {}",
+            candidate.insert_text
+        );
+    }
+
+    #[test]
+    fn test_object_equals_uses_field_comparisons() {
+        let idx = WorkspaceIndex::new();
+        let mut object = make_class("java/lang", "Object", None, vec![]);
+        object.methods = vec![method("equals", "(Ljava/lang/Object;)Z", ACC_PUBLIC)];
+        let mut child = make_class("com/example", "Person", Some("java/lang/Object"), vec![]);
+        child.fields = vec![
+            field("id", "I", ACC_PUBLIC),
+            field("name", "Ljava/lang/String;", ACC_PUBLIC),
+            field("scores", "[I", ACC_PUBLIC),
+            field("matrix", "[[I", ACC_PUBLIC),
+            field("weight", "D", ACC_PUBLIC),
+            field("ignored", "Ljava/lang/String;", ACC_STATIC),
+            field("ephemeral", "Ljava/lang/String;", ACC_TRANSIENT),
+        ];
+        idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
+            object,
+            child,
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Person");
+        let results = OverrideProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let candidate = results
+            .iter()
+            .find(|c| c.label.contains("equals"))
+            .expect("equals override candidate");
+
+        assert!(
+            candidate
+                .insert_text
+                .contains("if (this == o) return true;"),
+            "equals should have identity guard: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate.insert_text.contains("Person other = (Person) o;"),
+            "equals should cast to current class: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate.insert_text.contains("this.id == other.id"),
+            "primitive field should use direct comparison: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("java.util.Objects.equals(this.name, other.name)"),
+            "reference field should use Objects.equals: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("java.util.Arrays.equals(this.scores, other.scores)"),
+            "1d arrays should use Arrays.equals: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("java.util.Arrays.deepEquals(this.matrix, other.matrix)"),
+            "nested arrays should use Arrays.deepEquals: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("Double.compare(this.weight, other.weight) == 0"),
+            "double field should use Double.compare: {}",
+            candidate.insert_text
+        );
+        assert!(
+            !candidate.insert_text.contains("ignored"),
+            "static fields must be skipped: {}",
+            candidate.insert_text
+        );
+        assert!(
+            !candidate.insert_text.contains("ephemeral"),
+            "transient fields must be skipped: {}",
+            candidate.insert_text
+        );
+    }
+
+    #[test]
+    fn test_object_hash_code_uses_field_hashes() {
+        let idx = WorkspaceIndex::new();
+        let mut object = make_class("java/lang", "Object", None, vec![]);
+        object.methods = vec![method("hashCode", "()I", ACC_PUBLIC)];
+        let mut child = make_class("com/example", "Person", Some("java/lang/Object"), vec![]);
+        child.fields = vec![
+            field("id", "I", ACC_PUBLIC),
+            field("name", "Ljava/lang/String;", ACC_PUBLIC),
+            field("scores", "[I", ACC_PUBLIC),
+            field("matrix", "[[I", ACC_PUBLIC),
+            field("weight", "D", ACC_PUBLIC),
+        ];
+        idx.add_classes(vec![object, child]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Person");
+        let results = OverrideProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let candidate = results
+            .iter()
+            .find(|c| c.label.contains("hashCode"))
+            .expect("hashCode override candidate");
+
+        assert!(
+            candidate.insert_text.contains("int result = this.id;"),
+            "hashCode should seed from first field: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("result = 31 * result + java.util.Objects.hashCode(this.name);"),
+            "reference fields should use Objects.hashCode: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("result = 31 * result + java.util.Arrays.hashCode(this.scores);"),
+            "1d arrays should use Arrays.hashCode: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("result = 31 * result + java.util.Arrays.deepHashCode(this.matrix);"),
+            "nested arrays should use Arrays.deepHashCode: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("result = 31 * result + Double.hashCode(this.weight);"),
+            "double fields should use Double.hashCode: {}",
+            candidate.insert_text
+        );
+    }
+
+    #[test]
+    fn test_object_to_string_uses_array_rendering() {
+        let idx = WorkspaceIndex::new();
+        let mut object = make_class("java/lang", "Object", None, vec![]);
+        object.methods = vec![method("toString", "()Ljava/lang/String;", ACC_PUBLIC)];
+        let mut child = make_class("com/example", "Person", Some("java/lang/Object"), vec![]);
+        child.fields = vec![
+            field("name", "Ljava/lang/String;", ACC_PUBLIC),
+            field("scores", "[I", ACC_PUBLIC),
+            field("matrix", "[[I", ACC_PUBLIC),
+            field("ignored", "Ljava/lang/String;", ACC_STATIC),
+        ];
+        idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
+            object,
+            child,
+        ]);
+
+        let ctx = ctx_with_prefix("pub", "com/example/Person");
+        let results = OverrideProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let candidate = results
+            .iter()
+            .find(|c| c.label.contains("toString"))
+            .expect("toString override candidate");
+
+        assert!(
+            candidate.insert_text.contains("return \"Person{\" +"),
+            "toString should start with class name: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate.insert_text.contains("\"name=\" + this.name +"),
+            "reference field should print directly: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("\", scores=\" + java.util.Arrays.toString(this.scores) +"),
+            "1d arrays should use Arrays.toString: {}",
+            candidate.insert_text
+        );
+        assert!(
+            candidate
+                .insert_text
+                .contains("\", matrix=\" + java.util.Arrays.deepToString(this.matrix) +"),
+            "nested arrays should use Arrays.deepToString: {}",
+            candidate.insert_text
+        );
+        assert!(
+            !candidate.insert_text.contains("ignored"),
+            "static fields must be skipped: {}",
+            candidate.insert_text
+        );
+    }
+
+    #[test]
+    fn test_object_methods_prefer_source_fields_over_index_fields() {
+        let idx = WorkspaceIndex::new();
+        let mut object = make_class("java/lang", "Object", None, vec![]);
+        object.methods = vec![method("toString", "()Ljava/lang/String;", ACC_PUBLIC)];
+        let mut child = make_class("com/example", "Person", Some("java/lang/Object"), vec![]);
+        child.fields = vec![field("indexed", "Ljava/lang/String;", ACC_PUBLIC)];
+        idx.add_classes(vec![
+            make_class("java/lang", "String", None, vec![]),
+            object,
+            child,
+        ]);
+
+        let source_fields = [CurrentClassMember::Field(Arc::new(field(
+            "sourceOnly",
+            "Ljava/lang/String;",
+            ACC_PUBLIC,
+        )))];
+        let ctx = ctx_with_prefix("pub", "com/example/Person").with_class_members(source_fields);
+        let results = OverrideProvider
+            .provide_test(root_scope(), &ctx, &idx.view(root_scope()), None)
+            .candidates;
+        let candidate = results
+            .iter()
+            .find(|c| c.label.contains("toString"))
+            .expect("toString override candidate");
+
+        assert!(
+            candidate.insert_text.contains("sourceOnly"),
+            "source fields should be used when available: {}",
+            candidate.insert_text
+        );
+        assert!(
+            !candidate.insert_text.contains("indexed"),
+            "indexed fields should be ignored when source fields exist: {}",
+            candidate.insert_text
         );
     }
 
