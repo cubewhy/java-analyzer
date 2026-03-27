@@ -512,6 +512,21 @@ impl IndexView {
         field
     }
 
+    pub fn lookup_member_type_in_hierarchy(
+        &self,
+        class_internal: &str,
+        simple_name: &str,
+    ) -> Option<Arc<ClassMetadata>> {
+        for owner in self.mro(class_internal) {
+            if let Some(inner) =
+                self.resolve_direct_inner_class(owner.internal_name.as_ref(), simple_name)
+            {
+                return Some(inner);
+            }
+        }
+        None
+    }
+
     pub fn find_declaring_method_owner(
         &self,
         class_internal: &str,

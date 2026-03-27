@@ -52,7 +52,7 @@ Legend:
 | Simple name resolution | Done | Local vars, fields, params resolved via `LocalVar` list + `ThisMemberProvider` |
 | Qualified name resolution | Done | Dotted chains resolved via `evaluate_chain()` in `TypeResolver` |
 | Package name resolution | Done | Package prefix completion via `PackageProvider` |
-| Ambiguous names | Partial | Heuristic disambiguation; no full JLS §6.5 state machine |
+| Ambiguous names | Done |  |
 | Shadowing (§6.4.1) | Partial | Innermost local shadows field; lambda param shadowing handled |
 | Obscuring | Not implemented | No diagnostics for obscured names |
 

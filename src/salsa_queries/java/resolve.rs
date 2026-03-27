@@ -128,6 +128,7 @@ fn resolve_java_symbol_with_resolver(
     let mut ctx = extract_java_semantic_context_at_offset(db, file, offset, view.clone(), None)?;
     if let Some(location) = location_override {
         ctx.location = location;
+        crate::language::java::completion_context::ContextEnricher::new(&view).enrich(&mut ctx);
     }
 
     let resolved = SymbolResolver::new(&view).resolve(&ctx)?;

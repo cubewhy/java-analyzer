@@ -204,63 +204,72 @@ impl<'a> ContextEnricher<'a> {
             *qualifier_owner_internal = Some(owner_internal);
         }
 
-        // If receiver expression is a class/type qualifier (not a value expression),
-        // normalize MemberAccess into StaticAccess so static members and nested types
-        // come from the same authoritative path.
-        let static_access_location = if let CursorLocation::MemberAccess {
+        let member_access_reclassification = if let CursorLocation::MemberAccess {
             receiver_expr,
             member_prefix,
+            receiver_type,
+            arguments,
             ..
         } = &ctx.location
+            && arguments.is_none()
+            && !receiver_expr.is_empty()
         {
-            resolve_type_qualifier_internal(ctx, self.view, receiver_expr).map(|owner| {
-                (
-                    CursorLocation::StaticAccess {
-                        class_internal_name: owner,
-                        member_prefix: member_prefix.clone(),
-                    },
-                    member_prefix.clone(),
-                )
-            })
+            Some((
+                receiver_expr.clone(),
+                member_prefix.clone(),
+                receiver_type.is_some(),
+                SymbolResolver::new(self.view).classify_name(ctx, receiver_expr),
+            ))
         } else {
             None
         };
-        if let Some((location, query)) = static_access_location {
-            ctx.location = location;
-            ctx.query = query;
+
+        let classified_member_receiver = member_access_reclassification
+            .as_ref()
+            .and_then(|(_, _, _, classified)| classified.clone());
+
+        if let Some(crate::semantic::names::NameClassification::Expression { ty, .. }) =
+            classified_member_receiver.as_ref()
+            && let CursorLocation::MemberAccess {
+                receiver_semantic_type,
+                receiver_type,
+                ..
+            } = &mut ctx.location
+        {
+            ctx.typed_chain_receiver = Some(build_typed_chain_receiver(ty));
+            if receiver_semantic_type.is_none() {
+                *receiver_semantic_type = Some(ty.clone());
+            }
+            if receiver_type.is_none() {
+                *receiver_type = Some(Arc::from(ty.erased_internal()));
+            }
+        }
+
+        if let Some((receiver_expr, member_prefix, has_receiver_type, Some(classified))) =
+            member_access_reclassification
+        {
+            match classified {
+                crate::semantic::names::NameClassification::Type { internal_name, .. } => {
+                    ctx.location = CursorLocation::StaticAccess {
+                        class_internal_name: internal_name,
+                        member_prefix: member_prefix.clone(),
+                    };
+                    ctx.query = member_prefix.clone();
+                }
+                crate::semantic::names::NameClassification::Package { .. }
+                    if !has_receiver_type =>
+                {
+                    ctx.location = CursorLocation::Import {
+                        prefix: format!("{receiver_expr}.{member_prefix}"),
+                    };
+                    ctx.query = member_prefix.clone();
+                }
+                crate::semantic::names::NameClassification::Package { .. } => {}
+                crate::semantic::names::NameClassification::Expression { .. } => {}
+            }
         }
 
         ctx.java_intrinsic_access = classify_intrinsic_access(ctx, self.view, &type_ctx);
-
-        // If the receiver text is a known package, reinterpret this as import completion.
-        let import_location: Option<(CursorLocation, String)> =
-            if let CursorLocation::MemberAccess {
-                receiver_type,
-                receiver_expr,
-                member_prefix,
-                arguments,
-                ..
-            } = &ctx.location
-                && receiver_type.is_none()
-                && arguments.is_none()
-                && !receiver_expr.is_empty()
-            {
-                let pkg_normalized = receiver_expr.replace('.', "/");
-                if self.view.has_package(&pkg_normalized) {
-                    let prefix = format!("{}.{}", receiver_expr, member_prefix);
-                    let query = member_prefix.clone();
-                    Some((CursorLocation::Import { prefix }, query))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-        if let Some((loc, query)) = import_location {
-            ctx.location = loc;
-            ctx.query = query;
-        }
     }
 }
 
@@ -311,44 +320,6 @@ fn canonicalize_receiver_semantic(
             }
         }
     }
-}
-
-fn resolve_type_qualifier_internal(
-    ctx: &SemanticContext,
-    view: &IndexView,
-    receiver_expr: &str,
-) -> Option<Arc<str>> {
-    let expr = receiver_expr.trim();
-    if expr.is_empty() || expr == "this" || is_super_receiver_expr(expr) {
-        return None;
-    }
-
-    // Type-qualifier resolution only applies to dotted/simple identifiers.
-    if !expr
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
-    {
-        return None;
-    }
-
-    let parts: Vec<&str> = expr.split('.').filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() {
-        return None;
-    }
-
-    // Value symbols shadow type qualifiers.
-    if parts[0] == "this"
-        || parts[0] == "super"
-        || ctx
-            .local_variables
-            .iter()
-            .any(|lv| lv.name.as_ref() == parts[0])
-    {
-        return None;
-    }
-
-    let resolver = SymbolResolver::new(view);
-    resolver.resolve_type_name(ctx, &parts.join("."))
 }
 
 fn build_typed_chain_receiver(receiver_ty: &TypeName) -> TypedChainReceiver {
@@ -1310,7 +1281,8 @@ mod tests {
     use crate::completion::provider::CompletionProvider;
     use crate::index::ModuleId;
     use crate::index::{
-        ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, WorkspaceIndex,
+        ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary,
+        WorkspaceIndex,
     };
     use crate::semantic::LocalVar;
     use crate::semantic::types::{CallArgs, EvalContext, OverloadInvocationMode};
@@ -1329,6 +1301,17 @@ mod tests {
             .filter_text
             .as_deref()
             .unwrap_or(candidate.label.as_ref())
+    }
+
+    fn make_field(name: &str, descriptor: &str, access_flags: u16) -> FieldSummary {
+        FieldSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags,
+            annotations: vec![],
+            is_synthetic: false,
+            generic_signature: None,
+        }
     }
 
     #[test]
@@ -6392,6 +6375,73 @@ mod tests {
         idx
     }
 
+    fn make_index_with_nested_chaincheck_and_static_field() -> WorkspaceIndex {
+        let idx = WorkspaceIndex::new();
+        idx.add_classes(vec![
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("ChainCheck"),
+                internal_name: Arc::from("org/cubewhy/ChainCheck"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![make_field(
+                    "Box",
+                    "Ljava/lang/String;",
+                    ACC_PUBLIC | ACC_STATIC,
+                )],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("org/cubewhy")),
+                name: Arc::from("Box"),
+                internal_name: Arc::from("org/cubewhy/ChainCheck$Box"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC | ACC_STATIC,
+                generic_signature: None,
+                inner_class_of: Some(Arc::from("org/cubewhy/ChainCheck")),
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("String"),
+                internal_name: Arc::from("java/lang/String"),
+                super_name: Some(Arc::from("java/lang/Object")),
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+            ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Object"),
+                internal_name: Arc::from("java/lang/Object"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![],
+                access_flags: ACC_PUBLIC,
+                generic_signature: None,
+                inner_class_of: None,
+                origin: ClassOrigin::Unknown,
+            },
+        ]);
+        idx
+    }
+
     #[test]
     fn test_member_access_type_qualifier_is_normalized_to_static_access() {
         let idx = make_index_with_nested_chaincheck();
@@ -6473,6 +6523,95 @@ mod tests {
             matches!(ctx.location, CursorLocation::MemberAccess { .. }),
             "local variable shadowing should keep member access"
         );
+    }
+
+    #[test]
+    fn test_member_access_qualified_member_type_is_normalized_to_static_access() {
+        let idx = make_index_with_nested_chaincheck();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "ChainCheck.Box".to_string(),
+                arguments: None,
+            },
+            "",
+            vec![],
+            Some(Arc::from("ChainCheck")),
+            Some(Arc::from("org/cubewhy/ChainCheck")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+        match &ctx.location {
+            CursorLocation::StaticAccess {
+                class_internal_name,
+                member_prefix,
+            } => {
+                assert_eq!(class_internal_name.as_ref(), "org/cubewhy/ChainCheck$Box");
+                assert!(member_prefix.is_empty());
+            }
+            other => panic!("expected StaticAccess, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_member_access_field_shadow_beats_type_qualifier_reclassification() {
+        let idx = make_index_with_nested_chaincheck_and_static_field();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        let view = idx.view(scope);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let mut ctx = SemanticContext::new(
+            CursorLocation::MemberAccess {
+                receiver_semantic_type: None,
+                receiver_type: None,
+                member_prefix: "".to_string(),
+                receiver_expr: "ChainCheck.Box".to_string(),
+                arguments: None,
+            },
+            "",
+            vec![],
+            Some(Arc::from("ChainCheck")),
+            Some(Arc::from("org/cubewhy/ChainCheck")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        ContextEnricher::new(&view).enrich(&mut ctx);
+        match &ctx.location {
+            CursorLocation::MemberAccess {
+                receiver_semantic_type,
+                receiver_type,
+                ..
+            } => {
+                let receiver_semantic_type = receiver_semantic_type
+                    .as_ref()
+                    .expect("receiver semantic type");
+                let receiver_type = receiver_type.as_ref().expect("receiver type");
+                assert_eq!(receiver_semantic_type.erased_internal(), "java/lang/String");
+                assert_eq!(receiver_type.as_ref(), "java/lang/String");
+            }
+            other => panic!("expected MemberAccess, got {other:?}"),
+        }
     }
 
     #[test]

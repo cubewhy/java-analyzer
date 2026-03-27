@@ -1,10 +1,14 @@
 use crate::index::{FieldSummary, IndexView, MethodSummary};
+use crate::language::java::members::is_java_keyword;
 use crate::language::java::super_support::{is_super_receiver_expr, resolve_direct_super_owner};
 use crate::language::java::type_ctx::SourceTypeCtx;
 use crate::semantic::context::{CursorLocation, SemanticContext};
 use crate::semantic::enclosing::resolve_enclosing_owner_internal;
+use crate::semantic::names::{ExpressionNameBase, NameClassification};
 use crate::semantic::types::TypeResolver;
 use crate::semantic::types::type_name::TypeName;
+use crate::semantic::types::{parse_single_type_to_internal, singleton_descriptor_to_type};
+use rust_asm::constants::ACC_STATIC;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -82,18 +86,15 @@ impl<'a> SymbolResolver<'a> {
                 class_internal_name,
                 member_prefix,
             } => {
-                if let Some(inner) = self
-                    .view
-                    .resolve_direct_inner_class(class_internal_name, member_prefix)
+                let receiver = TypeName::internal(class_internal_name.as_ref());
+                if let Some(resolved_member) =
+                    self.resolve_member(ctx, &receiver, member_prefix, None)
                 {
-                    return Some(ResolvedSymbol::Class(Arc::clone(&inner.internal_name)));
+                    return Some(resolved_member);
                 }
-                self.resolve_member(
-                    ctx,
-                    &TypeName::internal(class_internal_name.as_ref()),
-                    member_prefix,
-                    None,
-                )
+                self.view
+                    .lookup_member_type_in_hierarchy(class_internal_name, member_prefix)
+                    .map(|inner| ResolvedSymbol::Class(Arc::clone(&inner.internal_name)))
             }
             CursorLocation::Expression { prefix } => {
                 if prefix.is_empty() {
@@ -113,7 +114,7 @@ impl<'a> SymbolResolver<'a> {
                 if let Some(owner_internal) = qualifier_owner_internal
                     && let Some(inner) = self
                         .view
-                        .resolve_direct_inner_class(owner_internal, class_prefix)
+                        .lookup_member_type_in_hierarchy(owner_internal, class_prefix)
                 {
                     return Some(ResolvedSymbol::Class(Arc::clone(&inner.internal_name)));
                 }
@@ -271,40 +272,294 @@ impl<'a> SymbolResolver<'a> {
         None
     }
 
-    fn resolve_bare_id(&self, ctx: &SemanticContext, id: &str) -> Option<ResolvedSymbol> {
-        if is_super_receiver_expr(id) {
-            return resolve_direct_super_owner(ctx, self.view).map(ResolvedSymbol::Class);
-        }
+    fn lookup_static_field_candidate(
+        &self,
+        receiver: &TypeName,
+        name: &str,
+    ) -> Option<(Arc<str>, Arc<FieldSummary>)> {
+        let (owner, field) = self.lookup_field_candidate(receiver, name)?;
+        ((field.access_flags & ACC_STATIC) != 0).then_some((owner, field))
+    }
 
-        // local variable -> return its type
-        if let Some(local) = ctx.local_variables.iter().find(|v| v.name.as_ref() == id) {
-            let base = local.type_internal.erased_internal();
-            let resolved_type = self
-                .resolve_type_name(ctx, base)
-                .unwrap_or_else(|| Arc::from(base));
-            return Some(ResolvedSymbol::Class(resolved_type));
-        }
+    fn lookup_static_import_field(
+        &self,
+        ctx: &SemanticContext,
+        name: &str,
+    ) -> Option<(Arc<str>, Arc<FieldSummary>)> {
+        let mut matches = Vec::new();
+        let mut seen: HashSet<(Arc<str>, Arc<str>)> = HashSet::new();
 
-        // this member
-        if let Some(enclosing) = &ctx.enclosing_internal_name {
-            tracing::debug!(
-                enclosing = %enclosing,
-                id = %id,
-                "resolve: bare id in enclosing class"
-            );
-
-            if let Some(res) =
-                self.resolve_member(ctx, &TypeName::new(enclosing.as_ref()), id, None)
-            {
-                return Some(res);
+        for import in &ctx.static_imports {
+            let import = import.as_ref();
+            let Some((owner_dot, member_name)) = import.rsplit_once('.') else {
+                continue;
+            };
+            if member_name != "*" && member_name != name {
+                continue;
             }
-        } else {
-            tracing::debug!(id = %id, "resolve: enclosing_internal_name is None");
+
+            let owner_internal = owner_dot.replace('.', "/");
+            let receiver = TypeName::internal(owner_internal.as_str());
+            let Some((owner, field)) = self.lookup_static_field_candidate(&receiver, name) else {
+                continue;
+            };
+
+            let key = (Arc::clone(&owner), Arc::clone(&field.descriptor));
+            if seen.insert(key) {
+                matches.push((owner, field));
+            }
         }
 
-        // type name
-        tracing::debug!(id = %id, "resolve: trying as type name");
-        self.resolve_type_name(ctx, id).map(ResolvedSymbol::Class)
+        (matches.len() == 1)
+            .then(|| matches.into_iter().next())
+            .flatten()
+    }
+
+    pub fn classify_name(&self, ctx: &SemanticContext, name: &str) -> Option<NameClassification> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+
+        let full_package_fallback = || {
+            let package_internal = name.replace('.', "/");
+            self.view
+                .has_package(&package_internal)
+                .then(|| NameClassification::Package {
+                    internal_name: Arc::from(package_internal),
+                })
+        };
+
+        if name.contains('/') {
+            if let Some(class) = self.view.get_class(name) {
+                return Some(NameClassification::Type {
+                    internal_name: Arc::clone(&class.internal_name),
+                    ty: TypeName::internal(class.internal_name.as_ref()),
+                });
+            }
+            return self
+                .view
+                .has_package(name)
+                .then(|| NameClassification::Package {
+                    internal_name: Arc::from(name),
+                });
+        }
+
+        let mut parts = name.split('.').filter(|segment| !segment.is_empty());
+        let head = parts.next()?;
+        if !is_name_head_segment(head) || !parts.clone().all(is_java_identifier_segment) {
+            return self
+                .resolve_type_name(ctx, name)
+                .map(|internal_name| NameClassification::Type {
+                    ty: TypeName::internal(internal_name.as_ref()),
+                    internal_name,
+                })
+                .or_else(full_package_fallback);
+        }
+        let mut current = match self.classify_simple_name(ctx, head) {
+            Some(current) => current,
+            None => {
+                return self
+                    .resolve_type_name(ctx, name)
+                    .map(|internal_name| NameClassification::Type {
+                        ty: TypeName::internal(internal_name.as_ref()),
+                        internal_name,
+                    })
+                    .or_else(full_package_fallback);
+            }
+        };
+        for segment in parts {
+            current = match self.advance_name_classification(ctx, current, segment) {
+                Some(next) => next,
+                None => {
+                    return self
+                        .resolve_type_name(ctx, name)
+                        .map(|internal_name| NameClassification::Type {
+                            ty: TypeName::internal(internal_name.as_ref()),
+                            internal_name,
+                        })
+                        .or_else(full_package_fallback);
+                }
+            };
+        }
+        Some(current)
+    }
+
+    fn classify_simple_name(
+        &self,
+        ctx: &SemanticContext,
+        name: &str,
+    ) -> Option<NameClassification> {
+        if name == "this" {
+            let ty = TypeName::internal(ctx.enclosing_internal_name.as_deref()?);
+            return Some(NameClassification::Expression {
+                ty,
+                base: ExpressionNameBase::This,
+            });
+        }
+
+        if is_super_receiver_expr(name) {
+            let owner = resolve_direct_super_owner(ctx, self.view)?;
+            return Some(NameClassification::Expression {
+                ty: TypeName::internal(owner.as_ref()),
+                base: ExpressionNameBase::Super,
+            });
+        }
+
+        if let Some(local) = ctx
+            .local_variables
+            .iter()
+            .rfind(|local| local.name.as_ref() == name)
+        {
+            let ty = ctx
+                .flow_override_for_local(name)
+                .cloned()
+                .unwrap_or_else(|| local.type_internal.clone());
+            return Some(NameClassification::Expression {
+                ty,
+                base: ExpressionNameBase::Local {
+                    name: Arc::clone(&local.name),
+                },
+            });
+        }
+
+        if let Some(enclosing) = &ctx.enclosing_internal_name {
+            let receiver = TypeName::internal(enclosing.as_ref());
+            if let Some((owner, field)) = self.lookup_field_candidate(&receiver, name)
+                && let Some(ty) = field_type_name(&field)
+            {
+                return Some(NameClassification::Expression {
+                    ty,
+                    base: ExpressionNameBase::Field {
+                        owner,
+                        name: Arc::clone(&field.name),
+                        is_static: (field.access_flags & ACC_STATIC) != 0,
+                    },
+                });
+            }
+        }
+
+        if let Some((owner, field)) = self.lookup_static_import_field(ctx, name)
+            && let Some(ty) = field_type_name(&field)
+        {
+            return Some(NameClassification::Expression {
+                ty,
+                base: ExpressionNameBase::Field {
+                    owner,
+                    name: Arc::clone(&field.name),
+                    is_static: true,
+                },
+            });
+        }
+
+        if let Some(internal_name) = self.resolve_type_name(ctx, name) {
+            return Some(NameClassification::Type {
+                ty: TypeName::internal(internal_name.as_ref()),
+                internal_name,
+            });
+        }
+
+        let package_internal = name.replace('.', "/");
+        self.view
+            .has_package(&package_internal)
+            .then(|| NameClassification::Package {
+                internal_name: Arc::from(package_internal),
+            })
+    }
+
+    fn advance_name_classification(
+        &self,
+        _ctx: &SemanticContext,
+        current: NameClassification,
+        segment: &str,
+    ) -> Option<NameClassification> {
+        if !is_java_identifier_segment(segment) {
+            return None;
+        }
+
+        match current {
+            NameClassification::Package { internal_name } => {
+                let next_package = format!("{internal_name}/{segment}");
+                if self.view.has_package(&next_package) {
+                    return Some(NameClassification::Package {
+                        internal_name: Arc::from(next_package),
+                    });
+                }
+
+                let candidate_type = format!("{internal_name}/{segment}");
+                self.view
+                    .get_class(&candidate_type)
+                    .map(|class| NameClassification::Type {
+                        ty: TypeName::internal(class.internal_name.as_ref()),
+                        internal_name: Arc::clone(&class.internal_name),
+                    })
+            }
+            NameClassification::Type { ty, internal_name } => {
+                if let Some((owner, field)) = self.lookup_static_field_candidate(&ty, segment)
+                    && let Some(field_ty) = field_type_name(&field)
+                {
+                    return Some(NameClassification::Expression {
+                        ty: field_ty,
+                        base: ExpressionNameBase::Field {
+                            owner,
+                            name: Arc::clone(&field.name),
+                            is_static: true,
+                        },
+                    });
+                }
+
+                self.view
+                    .lookup_member_type_in_hierarchy(internal_name.as_ref(), segment)
+                    .map(|inner| NameClassification::Type {
+                        ty: TypeName::internal(inner.internal_name.as_ref()),
+                        internal_name: Arc::clone(&inner.internal_name),
+                    })
+            }
+            NameClassification::Expression { ty, .. } => {
+                if ty.is_array() && segment == "length" {
+                    return Some(NameClassification::Expression {
+                        ty: TypeName::new("int"),
+                        base: ExpressionNameBase::Value,
+                    });
+                }
+
+                let (owner, field) = self.lookup_field_candidate(&ty, segment)?;
+                let field_ty = field_type_name(&field)?;
+                Some(NameClassification::Expression {
+                    ty: field_ty,
+                    base: ExpressionNameBase::Field {
+                        owner,
+                        name: Arc::clone(&field.name),
+                        is_static: (field.access_flags & ACC_STATIC) != 0,
+                    },
+                })
+            }
+        }
+    }
+
+    fn resolve_bare_id(&self, ctx: &SemanticContext, id: &str) -> Option<ResolvedSymbol> {
+        match self.classify_name(ctx, id)? {
+            NameClassification::Package { .. } => None,
+            NameClassification::Type { internal_name, .. } => {
+                Some(ResolvedSymbol::Class(internal_name))
+            }
+            NameClassification::Expression { ty, base } => match base {
+                ExpressionNameBase::Field { owner, name, .. } => self
+                    .view
+                    .lookup_field_in_hierarchy(owner.as_ref(), name.as_ref())
+                    .map(|summary| ResolvedSymbol::Field { owner, summary }),
+                ExpressionNameBase::Local { .. }
+                | ExpressionNameBase::This
+                | ExpressionNameBase::Super
+                | ExpressionNameBase::Value => {
+                    let base = ty.erased_internal();
+                    let resolved_type = self
+                        .resolve_type_name(ctx, base)
+                        .unwrap_or_else(|| Arc::from(base));
+                    Some(ResolvedSymbol::Class(resolved_type))
+                }
+            },
+        }
     }
 
     fn infer_receiver_type(&self, ctx: &SemanticContext, expr: &str) -> Option<TypeName> {
@@ -319,85 +574,21 @@ impl<'a> SymbolResolver<'a> {
             }
         }
 
-        let as_internal = expr.replace('.', "/");
-        if self.view.get_class(&as_internal).is_some() {
-            return Some(TypeName::internal(as_internal));
-        }
-
-        if expr.is_empty() || expr == "this" {
+        if expr.is_empty() {
             return ctx
                 .enclosing_internal_name
                 .as_deref()
                 .map(TypeName::internal);
         }
-        if is_super_receiver_expr(expr) {
-            return resolve_direct_super_owner(ctx, self.view)
-                .as_deref()
-                .map(TypeName::internal);
+
+        if let Some(classified) = self.classify_name(ctx, expr) {
+            return classified.into_qualifier_type();
         }
 
-        // local variable
-        if let Some(lv) = ctx.local_variables.iter().find(|v| v.name.as_ref() == expr) {
-            tracing::debug!(
-                expr = %expr,
-                type_ = %lv.type_internal.to_internal_with_generics(),
-                "resolve: receiver type from local var"
-            );
-            return Some(lv.type_internal.clone());
-        }
-        if !expr.contains('.') {
-            // Simple identifier: used as a type name (for accessing static fields such as System.xxx)
-            return self
-                .resolve_type_name(ctx, expr)
-                .as_deref()
-                .map(TypeName::internal);
-        }
-        // Chained field access: System.out -> java/lang/System -> field out -> java/io/PrintStream
-        self.resolve_chained(ctx, expr)
-    }
-
-    /// Iterate through each field in the dotted expression and return the internal name of the final type.
-    fn resolve_chained(&self, ctx: &SemanticContext, expr: &str) -> Option<TypeName> {
-        let mut parts = expr.split('.');
-        let first = parts.next()?;
-
-        let mut current: TypeName = if first == "this" {
-            TypeName::internal(ctx.enclosing_internal_name.as_deref()?)
-        } else if is_super_receiver_expr(first) {
-            TypeName::internal(resolve_direct_super_owner(ctx, self.view)?.as_ref())
-        } else if let Some(lv) = ctx
-            .local_variables
-            .iter()
-            .find(|v| v.name.as_ref() == first)
-        {
-            lv.type_internal.clone()
-        } else {
-            TypeName::internal(self.resolve_type_name(ctx, first)?.as_ref())
-        };
-
-        for part in parts {
-            if let Some(inner) = self
-                .view
-                .resolve_direct_inner_class(current.erased_internal(), part)
-            {
-                current = TypeName::internal(inner.internal_name.as_ref());
-                continue;
-            }
-            tracing::debug!(
-                owner = %current.to_internal_with_generics(),
-                field = %part,
-                "resolve: chained field lookup"
-            );
-            let (_, field) = self.lookup_field_candidate(&current, part)?;
-            current = TypeName::internal(descriptor_to_internal_arc(&field.descriptor)?.as_ref());
-        }
-
-        tracing::debug!(
-            expr = %expr,
-            result = %current.to_internal_with_generics(),
-            "resolve: chained resolved"
-        );
-        Some(current)
+        let as_internal = expr.replace('.', "/");
+        self.view
+            .get_class(&as_internal)
+            .map(|_| TypeName::internal(as_internal))
     }
 
     pub fn resolve_type_name(&self, ctx: &SemanticContext, name: &str) -> Option<Arc<str>> {
@@ -475,14 +666,22 @@ impl<'a> SymbolResolver<'a> {
     }
 }
 
-/// `Ljava/io/PrintStream;` -> `java/io/PrintStream`
-fn descriptor_to_internal_arc(desc: &str) -> Option<Arc<str>> {
-    if desc.starts_with('L') && desc.ends_with(';') {
-        Some(Arc::from(&desc[1..desc.len() - 1]))
-    } else {
-        // Primitive types, arrays: not navigable to classes
-        None
-    }
+fn field_type_name(field: &FieldSummary) -> Option<TypeName> {
+    singleton_descriptor_to_type(&field.descriptor)
+        .map(TypeName::new)
+        .or_else(|| parse_single_type_to_internal(&field.descriptor))
+}
+
+fn is_java_identifier_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !is_java_keyword(segment)
+        && segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+fn is_name_head_segment(segment: &str) -> bool {
+    segment == "this" || is_super_receiver_expr(segment) || is_java_identifier_segment(segment)
 }
 
 fn split_args(s: &str) -> Vec<String> {
@@ -514,13 +713,24 @@ fn split_args(s: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::index::{
-        ClassMetadata, ClassOrigin, IndexScope, MethodParams, MethodSummary, ModuleId,
-        WorkspaceIndex,
+        ClassMetadata, ClassOrigin, FieldSummary, IndexScope, MethodParams, MethodSummary,
+        ModuleId, WorkspaceIndex,
     };
     use crate::language::java::class_parser::parse_java_source_with_test_jdk;
     use crate::language::java::type_ctx::SourceTypeCtx;
     use crate::semantic::context::{CursorLocation, SemanticContext};
-    use rust_asm::constants::ACC_PUBLIC;
+    use rust_asm::constants::{ACC_PUBLIC, ACC_STATIC};
+
+    fn make_field(name: &str, descriptor: &str, access_flags: u16) -> FieldSummary {
+        FieldSummary {
+            name: Arc::from(name),
+            descriptor: Arc::from(descriptor),
+            access_flags,
+            annotations: vec![],
+            is_synthetic: false,
+            generic_signature: None,
+        }
+    }
 
     #[test]
     fn test_overload_resolution_in_symbol_resolver() {
@@ -1346,6 +1556,218 @@ mod tests {
                 assert_eq!(owner.as_ref(), "org/cubewhy/ChainCheck$Box");
             }
             _ => panic!("expected class resolution"),
+        }
+    }
+
+    #[test]
+    fn test_static_access_prefers_static_field_before_member_type() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.add_jar_classes(
+            scope,
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ChainCheck"),
+                    internal_name: Arc::from("org/cubewhy/ChainCheck"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![make_field(
+                        "Box",
+                        "Ljava/lang/String;",
+                        ACC_PUBLIC | ACC_STATIC,
+                    )],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/ChainCheck$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    inner_class_of: Some(Arc::from("org/cubewhy/ChainCheck")),
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let ctx = SemanticContext::new(
+            CursorLocation::StaticAccess {
+                class_internal_name: Arc::from("org/cubewhy/ChainCheck"),
+                member_prefix: "Box".to_string(),
+            },
+            "Box",
+            vec![],
+            Some(Arc::from("ChainCheck")),
+            Some(Arc::from("org/cubewhy/ChainCheck")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        );
+
+        let resolved = resolver
+            .resolve(&ctx)
+            .expect("resolve static field before nested type");
+        match resolved {
+            ResolvedSymbol::Field { owner, summary } => {
+                assert_eq!(owner.as_ref(), "org/cubewhy/ChainCheck");
+                assert_eq!(summary.name.as_ref(), "Box");
+            }
+            other => panic!("expected field resolution, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_name_prefers_static_field_before_member_type() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.add_jar_classes(
+            scope,
+            vec![
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("ChainCheck"),
+                    internal_name: Arc::from("org/cubewhy/ChainCheck"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![make_field(
+                        "Box",
+                        "Ljava/lang/String;",
+                        ACC_PUBLIC | ACC_STATIC,
+                    )],
+                    access_flags: ACC_PUBLIC,
+                    inner_class_of: None,
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+                ClassMetadata {
+                    package: Some(Arc::from("org/cubewhy")),
+                    name: Arc::from("Box"),
+                    internal_name: Arc::from("org/cubewhy/ChainCheck$Box"),
+                    super_name: None,
+                    interfaces: vec![],
+                    annotations: vec![],
+                    methods: vec![],
+                    fields: vec![],
+                    access_flags: ACC_PUBLIC | ACC_STATIC,
+                    inner_class_of: Some(Arc::from("org/cubewhy/ChainCheck")),
+                    generic_signature: None,
+                    origin: ClassOrigin::Unknown,
+                },
+            ],
+        );
+
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let type_ctx = Arc::new(SourceTypeCtx::new(
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+            Some(view.build_name_table()),
+        ));
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            Some(Arc::from("ChainCheck")),
+            Some(Arc::from("org/cubewhy/ChainCheck")),
+            Some(Arc::from("org/cubewhy")),
+            vec![],
+        )
+        .with_extension(type_ctx);
+
+        let classified = resolver
+            .classify_name(&ctx, "ChainCheck.Box")
+            .expect("classify static field chain");
+        match classified {
+            NameClassification::Expression { ty, base } => {
+                assert_eq!(ty.erased_internal(), "java/lang/String");
+                assert!(matches!(
+                    base,
+                    ExpressionNameBase::Field {
+                        owner,
+                        name,
+                        is_static: true
+                    } if owner.as_ref() == "org/cubewhy/ChainCheck" && name.as_ref() == "Box"
+                ));
+            }
+            other => panic!("expected expression classification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_classify_name_resolves_static_import_field_as_expression() {
+        let idx = WorkspaceIndex::new();
+        let scope = IndexScope {
+            module: ModuleId::ROOT,
+        };
+        idx.add_jar_classes(
+            scope,
+            vec![ClassMetadata {
+                package: Some(Arc::from("java/lang")),
+                name: Arc::from("Math"),
+                internal_name: Arc::from("java/lang/Math"),
+                super_name: None,
+                interfaces: vec![],
+                annotations: vec![],
+                methods: vec![],
+                fields: vec![make_field("PI", "D", ACC_PUBLIC | ACC_STATIC)],
+                access_flags: ACC_PUBLIC,
+                inner_class_of: None,
+                generic_signature: None,
+                origin: ClassOrigin::Unknown,
+            }],
+        );
+
+        let view = idx.view(scope);
+        let resolver = SymbolResolver::new(&view);
+        let ctx = SemanticContext::new(
+            CursorLocation::Expression {
+                prefix: "".to_string(),
+            },
+            "",
+            vec![],
+            None,
+            None,
+            None,
+            vec![],
+        )
+        .with_static_imports(vec![Arc::from("java.lang.Math.PI")]);
+
+        let classified = resolver
+            .classify_name(&ctx, "PI")
+            .expect("classify static-imported field");
+        match classified {
+            NameClassification::Expression { ty, base } => {
+                assert_eq!(ty.erased_internal(), "double");
+                assert!(matches!(
+                    base,
+                    ExpressionNameBase::Field {
+                        owner,
+                        name,
+                        is_static: true
+                    } if owner.as_ref() == "java/lang/Math" && name.as_ref() == "PI"
+                ));
+            }
+            other => panic!("expected expression classification, got {other:?}"),
         }
     }
 
