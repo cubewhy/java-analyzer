@@ -96,6 +96,7 @@ pub(super) fn location_has_newline(loc: &CursorLocation) -> bool {
             ..
         } => qualifier_expr.contains('\n') || member_prefix.contains('\n'),
         CursorLocation::Annotation { prefix, .. } => prefix.contains('\n'),
+        CursorLocation::AnnotationParam { prefix, .. } => prefix.contains('\n'),
         CursorLocation::Import { prefix } => prefix.contains('\n'),
         CursorLocation::StringLiteral { prefix } => prefix.contains('\n'),
         _ => false,

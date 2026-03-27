@@ -1,4 +1,6 @@
-use rust_asm::constants::{ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_VARARGS};
+use rust_asm::constants::{
+    ACC_ABSTRACT, ACC_PRIVATE, ACC_PROTECTED, ACC_PUBLIC, ACC_STATIC, ACC_VARARGS,
+};
 use std::sync::{Arc, OnceLock};
 use tree_sitter::{Node, Query};
 use tree_sitter_utils::traversal::{ancestor_of_kind, first_child_of_kind, first_child_of_kinds};
@@ -86,6 +88,35 @@ fn is_method_return_type_kind(kind: &str) -> bool {
             | "array_type"
             | "generic_type"
     )
+}
+
+fn declared_return_type_text(ctx: &JavaContextExtractor, node: Node, default_type: &str) -> String {
+    let mut ret_type = node
+        .child_by_field_name("type")
+        .filter(|child| is_method_return_type_kind(child.kind()))
+        .or_else(|| {
+            first_child_of_kinds(
+                node,
+                &[
+                    "void_type",
+                    "integral_type",
+                    "floating_point_type",
+                    "boolean_type",
+                    "type_identifier",
+                    "scoped_type_identifier",
+                    "array_type",
+                    "generic_type",
+                ],
+            )
+        })
+        .map(|child| ctx.node_text(child).to_string())
+        .unwrap_or_else(|| default_type.to_string());
+
+    if let Some(dimensions) = node.child_by_field_name("dimensions") {
+        ret_type.push_str(ctx.node_text(dimensions));
+    }
+
+    ret_type
 }
 
 /// Extract members from a class body using two-phase approach:
@@ -286,6 +317,15 @@ fn collect_valid_members_impl(
             result
         })
         .for_kinds(&["method_declaration"]),
+    )
+    .or(
+        handler_fn(|inp: Input<MemberCtx>| -> Vec<CurrentClassMember> {
+            let (ctx, type_ctx, _) = inp.ctx;
+            parse_annotation_element_node(ctx, type_ctx, inp.node)
+                .into_iter()
+                .collect()
+        })
+        .for_kinds(&["annotation_type_element_declaration"]),
     )
     .or(
         // Field declarations
@@ -579,7 +619,6 @@ pub fn parse_method_node(
     node: Node,
 ) -> Option<CurrentClassMember> {
     let mut flags = 0;
-    let mut ret_type = "void";
     let mut method_annos: Vec<AnnotationSummary> = Vec::new();
 
     // Use traversal utilities where applicable
@@ -590,23 +629,8 @@ pub fn parse_method_node(
 
     let name = first_child_of_kind(node, "identifier").map(|n| ctx.node_text(n));
 
-    if let Some(ret_node) = first_child_of_kinds(
-        node,
-        &[
-            "void_type",
-            "integral_type",
-            "floating_point_type",
-            "boolean_type",
-            "type_identifier",
-            "scoped_type_identifier",
-            "array_type",
-            "generic_type",
-        ],
-    ) {
-        ret_type = ctx.node_text(ret_node);
-    }
-
     let params_node = first_child_of_kind(node, "formal_parameters");
+    let ret_type = declared_return_type_text(ctx, node, "void");
 
     if flags == 0 {
         flags = ACC_PUBLIC;
@@ -619,10 +643,10 @@ pub fn parse_method_node(
     {
         flags |= ACC_VARARGS;
     }
-    let descriptor = build_java_descriptor(params_text, ret_type, type_ctx);
+    let descriptor = build_java_descriptor(params_text, ret_type.as_str(), type_ctx);
 
     let generic_signature =
-        build_source_method_generic_signature(ctx, type_ctx, node, params_text, ret_type)
+        build_source_method_generic_signature(ctx, type_ctx, node, params_text, ret_type.as_str())
             .or_else(|| extract_generic_signature(node, ctx.bytes(), &descriptor, Some(type_ctx)));
 
     let params = params_node
@@ -648,6 +672,42 @@ pub fn parse_method_node(
         access_flags: flags,
         is_synthetic: false,
         generic_signature,
+        return_type: parse_return_type_from_descriptor(&descriptor),
+    })))
+}
+
+pub fn parse_annotation_element_node(
+    ctx: &JavaContextExtractor,
+    type_ctx: &SourceTypeCtx,
+    node: Node,
+) -> Option<CurrentClassMember> {
+    let mut flags = ACC_PUBLIC | ACC_ABSTRACT;
+    let mut method_annos: Vec<AnnotationSummary> = Vec::new();
+
+    if let Some(modifiers) = first_child_of_kind(node, "modifiers") {
+        flags |= parse_java_modifiers(ctx.node_text(modifiers));
+        method_annos = parse_annotations_in_node(ctx, modifiers, type_ctx);
+    }
+
+    let name = node
+        .child_by_field_name("name")
+        .or_else(|| first_child_of_kind(node, "identifier"))
+        .map(|child| ctx.node_text(child))
+        .filter(|name| !is_java_keyword(name))?;
+    let ret_type = declared_return_type_text(ctx, node, "");
+    if ret_type.is_empty() {
+        return None;
+    }
+
+    let descriptor = build_java_descriptor("()", ret_type.as_str(), type_ctx);
+
+    Some(CurrentClassMember::Method(Arc::new(MethodSummary {
+        name: Arc::from(name),
+        params: MethodParams::empty(),
+        annotations: method_annos,
+        access_flags: flags,
+        is_synthetic: false,
+        generic_signature: None,
         return_type: parse_return_type_from_descriptor(&descriptor),
     })))
 }

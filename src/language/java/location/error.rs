@@ -43,6 +43,13 @@ pub(super) fn handle_error(
         return handlers::handle_argument_list(ctx, p);
     }
 
+    if parent_kind == "annotation_argument_list" {
+        let p = error_node.parent().unwrap();
+        if let Some(result) = handlers::detect_annotation_param_location(ctx, p, None) {
+            return result;
+        }
+    }
+
     // ERROR inside class_body (case 5: `prote`)
     if parent_kind == "class_body" {
         return handle_error_in_class_body(ctx, error_node, cursor_node);

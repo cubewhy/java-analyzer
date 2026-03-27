@@ -283,6 +283,17 @@ fn convert_cursor_location(data: &CursorLocationData) -> CursorLocation {
             prefix: prefix.to_string(),
             target_element_type: target_element_type.clone(),
         },
+        CursorLocationData::AnnotationParam {
+            prefix,
+            annotation_name,
+            used_keys,
+            fresh_slot,
+        } => CursorLocation::AnnotationParam {
+            prefix: prefix.to_string(),
+            annotation_name: annotation_name.clone(),
+            used_keys: used_keys.clone(),
+            fresh_slot: *fresh_slot,
+        },
         CursorLocationData::StatementLabel { kind, prefix } => {
             use crate::semantic::context::StatementLabelCompletionKind;
 

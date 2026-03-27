@@ -280,6 +280,17 @@ fn convert_rich_location(location: &CursorLocation) -> CursorLocationData {
             prefix: Arc::from(prefix.as_str()),
             target_element_type: target_element_type.clone(),
         },
+        CursorLocation::AnnotationParam {
+            prefix,
+            annotation_name,
+            used_keys,
+            fresh_slot,
+        } => CursorLocationData::AnnotationParam {
+            prefix: Arc::from(prefix.as_str()),
+            annotation_name: annotation_name.clone(),
+            used_keys: used_keys.clone(),
+            fresh_slot: *fresh_slot,
+        },
         CursorLocation::StatementLabel { kind, prefix } => CursorLocationData::StatementLabel {
             kind: match kind {
                 crate::semantic::context::StatementLabelCompletionKind::Break => {

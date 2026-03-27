@@ -262,6 +262,7 @@ fn is_broad_query(ctx: &SemanticContext, short_prefix_len: usize) -> bool {
         | CursorLocation::StatementLabel { .. }
         | CursorLocation::VariableName { .. }
         | CursorLocation::Annotation { .. }
+        | CursorLocation::AnnotationParam { .. }
         | CursorLocation::StringLiteral { .. }
         | CursorLocation::Unknown => false,
     }

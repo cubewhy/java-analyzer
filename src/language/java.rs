@@ -4,12 +4,13 @@ use super::Language;
 use crate::completion::provider::CompletionProvider;
 use crate::index::{ClassMetadata, ClassOrigin, IndexScope, IndexView, NameTable};
 use crate::language::java::completion::providers::{
-    annotation::AnnotationProvider, constructor::ConstructorProvider,
-    expression::ExpressionProvider, import::ImportProvider, import_static::ImportStaticProvider,
-    intrinsic_member::IntrinsicMemberProvider, keyword::KeywordProvider,
-    local_var::LocalVarProvider, member::MemberProvider, name_suggestion::NameSuggestionProvider,
-    override_member::OverrideProvider, package::PackageProvider, snippet::SnippetProvider,
-    statement_label::StatementLabelProvider, static_import_member::StaticImportMemberProvider,
+    annotation::AnnotationProvider, annotation_param::AnnotationParamProvider,
+    constructor::ConstructorProvider, expression::ExpressionProvider, import::ImportProvider,
+    import_static::ImportStaticProvider, intrinsic_member::IntrinsicMemberProvider,
+    keyword::KeywordProvider, local_var::LocalVarProvider, member::MemberProvider,
+    name_suggestion::NameSuggestionProvider, override_member::OverrideProvider,
+    package::PackageProvider, snippet::SnippetProvider, statement_label::StatementLabelProvider,
+    static_import_member::StaticImportMemberProvider,
 };
 use crate::language::java::inlay_hints::{JavaInlayHintKind, collect_java_inlay_hints};
 use crate::language::java::symbols::collect_java_symbols;
@@ -45,7 +46,7 @@ pub mod synthetic;
 pub mod type_ctx;
 pub mod utils;
 
-static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 15] = [
+static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 16] = [
     &LocalVarProvider,
     &StatementLabelProvider,
     &IntrinsicMemberProvider,
@@ -59,6 +60,7 @@ static JAVA_COMPLETION_PROVIDERS: [&dyn CompletionProvider; 15] = [
     &OverrideProvider,
     &KeywordProvider,
     &AnnotationProvider,
+    &AnnotationParamProvider,
     &SnippetProvider,
     &NameSuggestionProvider,
 ];

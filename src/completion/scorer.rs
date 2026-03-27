@@ -156,6 +156,7 @@ impl<'idx> Scorer<'idx> {
             StatementLabel => 5.5,
             Keyword => 5.0,
             Annotation => 3.0,
+            AnnotationElement => 4.0,
             Snippet => 2.0,
             NameSuggestion => 1.0,
         }
@@ -202,6 +203,7 @@ fn candidate_value_type(candidate: &super::candidate::CompletionCandidate) -> Op
         | CandidateKind::Snippet
         | CandidateKind::Keyword
         | CandidateKind::Annotation
+        | CandidateKind::AnnotationElement
         | CandidateKind::NameSuggestion => None,
     }
 }

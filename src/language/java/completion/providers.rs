@@ -1,4 +1,5 @@
 pub mod annotation;
+pub mod annotation_param;
 pub mod constructor;
 pub mod expression;
 pub mod import;

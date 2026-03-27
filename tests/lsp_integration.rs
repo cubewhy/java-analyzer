@@ -197,7 +197,6 @@ public class User {
     }
 }
 
-#[tokio::test]
 async fn test_completion_with_empty_workspace() {
     let workspace = create_test_workspace();
     let engine = Arc::new(CompletionEngine::new());
@@ -967,4 +966,78 @@ public class PositionTest {
     );
 
     // Both should return results (different cache entries due to different positions)
+}
+
+#[tokio::test]
+async fn test_completion_annotation_param_fresh_slot_filters_used_keys() {
+    let workspace = create_test_workspace();
+    let engine = Arc::new(CompletionEngine::new());
+    let registry = Arc::new(LanguageRegistry::new());
+
+    let (content, position) = strip_cursor_marker(
+        r#"
+package org.example;
+
+@interface ConfigAnno {
+    String name();
+    String value();
+}
+
+@ConfigAnno(name = "x", /*caret*/)
+class A {}
+"#,
+    );
+
+    open_document(&workspace, "file:///test/A.java", &content).await;
+    let uri = Url::parse("file:///test/A.java").unwrap();
+
+    let params = CompletionParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            position,
+        },
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: PartialResultParams::default(),
+        context: None,
+    };
+
+    let response = run_completion(
+        Arc::clone(&workspace),
+        Arc::clone(&engine),
+        Arc::clone(&registry),
+        params,
+    )
+    .await;
+
+    assert!(
+        response.is_some(),
+        "expected annotation parameter completion results"
+    );
+
+    if let Some(CompletionResponse::List(list)) = response {
+        let labels: Vec<&str> = list.items.iter().map(|item| item.label.as_str()).collect();
+        assert!(
+            labels.iter().any(|label| *label == "value"),
+            "labels={labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| *label == "name"),
+            "labels={labels:?}"
+        );
+
+        let value_item = list
+            .items
+            .iter()
+            .find(|item| item.label == "value")
+            .expect("expected value annotation element");
+
+        assert_eq!(value_item.kind, Some(CompletionItemKind::PROPERTY));
+        assert_eq!(value_item.filter_text.as_deref(), Some("value"));
+
+        let new_text = value_item.text_edit.as_ref().and_then(|edit| match edit {
+            CompletionTextEdit::Edit(edit) => Some(edit.new_text.as_str()),
+            CompletionTextEdit::InsertAndReplace(edit) => Some(edit.new_text.as_str()),
+        });
+        assert_eq!(new_text, Some("value = "));
+    }
 }

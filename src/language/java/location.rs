@@ -107,6 +107,13 @@ fn determine_location_impl(
         .or(
             handler_fn(|inp: Input<(&JavaContextExtractor, Option<char>, Node)>| {
                 let (ctx, _, _) = inp.ctx;
+                handlers::handle_annotation_argument_list(ctx, inp.node)
+            })
+            .for_kinds(&["annotation_argument_list"]),
+        )
+        .or(
+            handler_fn(|inp: Input<(&JavaContextExtractor, Option<char>, Node)>| {
+                let (ctx, _, _) = inp.ctx;
                 handlers::handle_annotation(ctx, inp.node)
             })
             .for_kinds(&["marker_annotation", "annotation"]),
@@ -1203,6 +1210,140 @@ class A {
             "Expected Annotation with METHOD target, got {:?}",
             loc
         );
+    }
+
+    #[test]
+    fn test_annotation_param_empty_slot_location() {
+        let src = indoc::indoc! {r#"
+@interface ConfigAnno {
+    String name();
+    String value();
+}
+
+@ConfigAnno()
+class A {}
+"#};
+        let marker = "@ConfigAnno(";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(
+                &loc,
+                CursorLocation::AnnotationParam {
+                    prefix,
+                    annotation_name,
+                    used_keys,
+                    fresh_slot,
+                } if prefix.is_empty()
+                    && annotation_name.as_deref() == Some("ConfigAnno")
+                    && used_keys.is_empty()
+                    && *fresh_slot
+            ),
+            "Expected AnnotationParam empty slot, got {:?}",
+            loc
+        );
+        assert!(query.is_empty(), "query should be empty, got {query:?}");
+    }
+
+    #[test]
+    fn test_annotation_param_existing_key_location() {
+        let src = indoc::indoc! {r#"
+@interface ConfigAnno {
+    String name();
+    String value();
+}
+
+@ConfigAnno(na = "x")
+class A {}
+"#};
+        let offset = src.find("na =").unwrap() + 2;
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(
+                &loc,
+                CursorLocation::AnnotationParam {
+                    prefix,
+                    annotation_name,
+                    used_keys,
+                    fresh_slot,
+                } if prefix == "na"
+                    && annotation_name.as_deref() == Some("ConfigAnno")
+                    && used_keys.is_empty()
+                    && !fresh_slot
+            ),
+            "Expected AnnotationParam key edit site, got {:?}",
+            loc
+        );
+        assert_eq!(query, "na");
+    }
+
+    #[test]
+    fn test_annotation_param_trailing_comma_location() {
+        let src = indoc::indoc! {r#"
+@interface ConfigAnno {
+    String name();
+    String value();
+}
+
+@ConfigAnno(name = "x", )
+class A {}
+"#};
+        let marker = "name = \"x\", ";
+        let offset = src.find(marker).unwrap() + marker.len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(
+                &loc,
+                CursorLocation::AnnotationParam {
+                    prefix,
+                    annotation_name,
+                    used_keys,
+                    fresh_slot,
+                } if prefix.is_empty()
+                    && annotation_name.as_deref() == Some("ConfigAnno")
+                    && used_keys.iter().map(|k| k.as_ref()).collect::<Vec<_>>() == vec!["name"]
+                    && *fresh_slot
+            ),
+            "Expected AnnotationParam trailing comma site, got {:?}",
+            loc
+        );
+        assert!(query.is_empty(), "query should be empty, got {query:?}");
+    }
+
+    #[test]
+    fn test_annotation_param_value_identifier_stays_expression() {
+        let src = indoc::indoc! {r#"
+@interface ConfigAnno {
+    String name();
+}
+
+@ConfigAnno(name = valueRef)
+class A {}
+"#};
+        let offset = src.find("val").unwrap() + "val".len();
+        let (ctx, tree) = setup_with(src, offset);
+        let cursor_node = ctx.find_cursor_node(tree.root_node());
+
+        let (loc, query) = determine_location(&ctx, cursor_node, None);
+
+        assert!(
+            matches!(loc, CursorLocation::Expression { .. }),
+            "Expected Expression in annotation value position, got {:?}",
+            loc
+        );
+        assert_eq!(query, "val");
     }
 
     #[test]

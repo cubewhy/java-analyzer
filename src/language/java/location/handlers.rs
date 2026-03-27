@@ -11,6 +11,7 @@ use crate::language::java::{
     utils::{is_comment_kind, is_in_name_position, is_in_type_position},
 };
 use crate::semantic::CursorLocation;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tree_sitter::Node;
 use tree_sitter_utils::traversal::is_descendant_of;
@@ -113,6 +114,175 @@ pub(super) fn handle_annotation(
         },
         prefix,
     )
+}
+
+pub(super) fn detect_annotation_param_location(
+    ctx: &JavaContextExtractor,
+    arg_list: Node,
+    orig: Option<Node>,
+) -> Option<(CursorLocation, String)> {
+    if arg_list.kind() != "annotation_argument_list" {
+        return None;
+    }
+
+    let annotation = arg_list.parent()?;
+    if annotation.kind() != "annotation" {
+        return None;
+    }
+
+    if let Some(orig) = orig {
+        if let Some(pair) = ancestor_of_kind(orig, "element_value_pair").filter(|pair| {
+            pair.parent()
+                .is_some_and(|parent| parent.id() == arg_list.id())
+        }) {
+            let key = pair.child_by_field_name("key")?;
+            if orig.id() == key.id() || is_descendant_of(orig, key) {
+                let prefix = strip_sentinel(&cursor_truncated_text(ctx, key));
+                let used_keys = collect_annotation_param_keys(ctx, arg_list, Some(pair.id()));
+                return Some(annotation_param_location(
+                    ctx, annotation, prefix, used_keys, false,
+                ));
+            }
+            return None;
+        }
+
+        if !annotation_argument_list_has_pairs(arg_list) {
+            return None;
+        }
+
+        let prefix = strip_sentinel(&cursor_truncated_text(ctx, orig));
+        if !is_annotation_param_prefix(&prefix) {
+            return None;
+        }
+
+        let used_keys = collect_annotation_param_keys(ctx, arg_list, None);
+        return Some(annotation_param_location(
+            ctx, annotation, prefix, used_keys, true,
+        ));
+    }
+
+    if is_fresh_annotation_param_position(ctx, arg_list) {
+        let used_keys = collect_annotation_param_keys(ctx, arg_list, None);
+        return Some(annotation_param_location(
+            ctx,
+            annotation,
+            String::new(),
+            used_keys,
+            true,
+        ));
+    }
+
+    let mut walker = arg_list.walk();
+    for child in arg_list.named_children(&mut walker) {
+        if !node_contains_cursor(ctx, child) {
+            continue;
+        }
+        if child.kind() != "element_value_pair" {
+            return None;
+        }
+        let key = child.child_by_field_name("key")?;
+        if ctx.offset > key.end_byte() {
+            return None;
+        }
+        let prefix = strip_sentinel(&cursor_truncated_text(ctx, key));
+        let used_keys = collect_annotation_param_keys(ctx, arg_list, Some(child.id()));
+        return Some(annotation_param_location(
+            ctx, annotation, prefix, used_keys, false,
+        ));
+    }
+
+    None
+}
+
+pub(super) fn handle_annotation_argument_list(
+    ctx: &JavaContextExtractor,
+    node: Node,
+) -> (CursorLocation, String) {
+    detect_annotation_param_location(ctx, node, None).unwrap_or_else(|| {
+        (
+            CursorLocation::Expression {
+                prefix: String::new(),
+            },
+            String::new(),
+        )
+    })
+}
+
+fn annotation_param_location(
+    ctx: &JavaContextExtractor,
+    annotation: Node,
+    prefix: String,
+    used_keys: Vec<Arc<str>>,
+    fresh_slot: bool,
+) -> (CursorLocation, String) {
+    let annotation_name = annotation
+        .child_by_field_name("name")
+        .map(|name| Arc::from(ctx.node_text(name)));
+    (
+        CursorLocation::AnnotationParam {
+            prefix: prefix.clone(),
+            annotation_name,
+            used_keys,
+            fresh_slot,
+        },
+        prefix,
+    )
+}
+
+fn collect_annotation_param_keys(
+    ctx: &JavaContextExtractor,
+    arg_list: Node,
+    skip_pair_id: Option<usize>,
+) -> Vec<Arc<str>> {
+    let mut seen = HashSet::new();
+    let mut keys = Vec::new();
+    let mut walker = arg_list.walk();
+    for child in arg_list.named_children(&mut walker) {
+        if child.kind() != "element_value_pair" {
+            continue;
+        }
+        if skip_pair_id.is_some_and(|id| id == child.id()) {
+            continue;
+        }
+        let Some(key) = child.child_by_field_name("key") else {
+            continue;
+        };
+        let text = ctx.node_text(key).trim();
+        if text.is_empty() || !seen.insert(text.to_string()) {
+            continue;
+        }
+        keys.push(Arc::from(text));
+    }
+    keys
+}
+
+fn annotation_argument_list_has_pairs(arg_list: Node) -> bool {
+    let mut walker = arg_list.walk();
+    arg_list
+        .named_children(&mut walker)
+        .any(|child| child.kind() == "element_value_pair")
+}
+
+fn is_fresh_annotation_param_position(ctx: &JavaContextExtractor, arg_list: Node) -> bool {
+    let start = arg_list.start_byte();
+    if ctx.offset <= start {
+        return false;
+    }
+    let raw = &ctx.source[start..ctx.offset];
+    let clean = strip_sentinel(raw);
+    let last_non_ws = clean.chars().rev().find(|c| !c.is_whitespace());
+    matches!(last_non_ws, Some(',') | Some('('))
+}
+
+fn node_contains_cursor(ctx: &JavaContextExtractor, node: Node) -> bool {
+    node.start_byte() <= ctx.offset && ctx.offset <= node.end_byte().saturating_add(1)
+}
+
+fn is_annotation_param_prefix(prefix: &str) -> bool {
+    !prefix.is_empty()
+        && prefix
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$')
 }
 
 fn infer_annotation_target(node: Node) -> Option<Arc<str>> {
@@ -760,185 +930,199 @@ pub(super) fn handle_identifier(
     // stop-kind is reached.
     type Ctx<'a> = (&'a JavaContextExtractor, Node<'a>);
 
-    let id_handler = handler_fn(|inp: Input<Ctx<'_>>| handle_annotation(inp.ctx.0, inp.node))
-        .for_kinds(&["marker_annotation", "annotation"])
-        .or(
-            handler_fn(|inp: Input<Ctx<'_>>| handle_member_access(inp.ctx.0, inp.node))
-                .for_kinds(&["field_access", "method_invocation"]),
-        )
-        .or(
-            handler_fn(|inp: Input<Ctx<'_>>| handle_method_reference(inp.ctx.0, inp.node))
-                .for_kinds(&["method_reference"]),
-        )
-        .or(
-            handler_fn(|inp: Input<Ctx<'_>>| handle_import(inp.ctx.0, inp.node))
-                .for_kinds(&["import_declaration"]),
-        )
-        .or((|inp: Input<Ctx<'_>>| {
-            let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
-            if is_in_constructor_type_arguments(orig, inp.node) {
-                let text = cursor_truncated_text(ctx, orig);
-                return Some((
-                    CursorLocation::TypeAnnotation {
-                        prefix: text.clone(),
-                    },
-                    text,
-                ));
-            }
-            Some(handle_constructor(ctx, inp.node))
-        })
-        .for_kinds(&["object_creation_expression"]))
-        .or((|inp: Input<Ctx<'_>>| {
-            let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
-            if is_misread_expression_in_local_decl(orig, inp.node, ctx) {
-                let text = cursor_truncated_text(ctx, orig);
-                let clean = strip_sentinel(&text);
-                return Some((
-                    CursorLocation::Expression {
-                        prefix: clean.clone(),
-                    },
-                    clean,
-                ));
-            }
-            if is_variable_name_after_complete_type(orig, inp.node, ctx) {
-                let type_name = extract_type_from_decl(ctx, inp.node);
-                return Some((CursorLocation::VariableName { type_name }, String::new()));
-            }
-            if let Some((receiver_expr, member_prefix)) =
-                detect_member_tail_in_misread_local_decl(ctx, orig, inp.node)
-            {
-                return Some((
-                    CursorLocation::MemberAccess {
-                        receiver_semantic_type: None,
-                        receiver_type: None,
-                        member_prefix: member_prefix.clone(),
-                        receiver_expr,
-                        arguments: None,
-                    },
-                    member_prefix,
-                ));
-            }
-            if is_in_type_position(orig, inp.node) {
-                let text = cursor_truncated_text(ctx, orig);
-                return Some((
-                    CursorLocation::TypeAnnotation {
-                        prefix: text.clone(),
-                    },
-                    text,
-                ));
-            }
-            if is_in_name_position(orig, inp.node) {
-                let type_name = extract_type_from_decl(ctx, inp.node);
-                return Some((CursorLocation::VariableName { type_name }, String::new()));
-            }
-            if is_in_type_subtree(orig, inp.node) {
-                let text = cursor_truncated_text(ctx, orig);
-                return Some((
-                    CursorLocation::TypeAnnotation {
-                        prefix: text.clone(),
-                    },
-                    text,
-                ));
-            }
+    let id_handler = (|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        let Some(name) = inp.node.child_by_field_name("name") else {
+            return None;
+        };
+        if orig.id() == name.id() || is_descendant_of(orig, name) {
+            return Some(handle_annotation(ctx, inp.node));
+        }
+        None
+    })
+    .for_kinds(&["marker_annotation", "annotation"])
+    .or(
+        handler_fn(|inp: Input<Ctx<'_>>| handle_member_access(inp.ctx.0, inp.node))
+            .for_kinds(&["field_access", "method_invocation"]),
+    )
+    .or(
+        handler_fn(|inp: Input<Ctx<'_>>| handle_method_reference(inp.ctx.0, inp.node))
+            .for_kinds(&["method_reference"]),
+    )
+    .or(
+        handler_fn(|inp: Input<Ctx<'_>>| handle_import(inp.ctx.0, inp.node))
+            .for_kinds(&["import_declaration"]),
+    )
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        if is_in_constructor_type_arguments(orig, inp.node) {
             let text = cursor_truncated_text(ctx, orig);
-            let clean = strip_sentinel(&text);
-            Some((
-                CursorLocation::Expression {
-                    prefix: clean.clone(),
-                },
-                clean,
-            ))
-        })
-        .for_kinds(&["local_variable_declaration"]))
-        .or((|inp: Input<Ctx<'_>>| {
-            let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
-            if is_in_formal_param_name_position(orig, inp.node) {
-                let type_name = inp
-                    .node
-                    .child_by_field_name("type")
-                    .map(|n| ctx.node_text(n).trim().to_string())
-                    .unwrap_or_default();
-                return Some((CursorLocation::VariableName { type_name }, String::new()));
-            }
-            let text = cursor_truncated_text(ctx, orig);
-            Some((
+            return Some((
                 CursorLocation::TypeAnnotation {
                     prefix: text.clone(),
                 },
                 text,
-            ))
-        })
-        .for_kinds(&["formal_parameter", "spread_parameter"]))
-        .or((|inp: Input<Ctx<'_>>| {
-            let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
-            if let Some(parent) = orig.parent()
-                && parent.kind() == "method_invocation"
-                && ctx.offset <= inp.node.start_byte()
-            {
-                return Some(handle_member_access(ctx, parent));
-            }
-            Some(handle_argument_list(ctx, inp.node))
-        })
-        .for_kinds(&["argument_list"]))
-        .or((|inp: Input<Ctx<'_>>| {
-            let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
-            if let Some(result) = recover_error_location_ast_first(ctx, inp.node) {
-                return Some(result);
-            }
-            let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
-            if is_import_context(before) {
-                return Some(handle_import_from_text(ctx, before));
-            }
-            if let Some((receiver_expr, member_prefix)) = detect_trailing_dot_in_text(before) {
-                return Some((
-                    CursorLocation::MemberAccess {
-                        receiver_semantic_type: None,
-                        receiver_type: None,
-                        member_prefix: member_prefix.clone(),
-                        receiver_expr,
-                        arguments: None,
-                    },
-                    member_prefix,
-                ));
-            }
-            if let Some(detected) = detect_new_keyword_before_cursor(before) {
-                return Some((
-                    CursorLocation::ConstructorCall {
-                        class_prefix: detected.class_prefix.clone(),
-                        expected_type: None,
-                        qualifier_expr: detected.qualifier_expr,
-                        qualifier_owner_internal: None,
-                    },
-                    detected.class_prefix,
-                ));
-            }
+            ));
+        }
+        Some(handle_constructor(ctx, inp.node))
+    })
+    .for_kinds(&["object_creation_expression"]))
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        if is_misread_expression_in_local_decl(orig, inp.node, ctx) {
             let text = cursor_truncated_text(ctx, orig);
             let clean = strip_sentinel(&text);
-            Some((
+            return Some((
                 CursorLocation::Expression {
                     prefix: clean.clone(),
                 },
                 clean,
-            ))
-        })
-        .for_kinds(&["ERROR"]))
-        .or((|inp: Input<Ctx<'_>>| {
-            let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
-            if inp.node.kind() == "class_body" {
-                let text = cursor_truncated_text(ctx, orig);
-                let clean = strip_sentinel(&text);
-                return Some((
-                    CursorLocation::Expression {
-                        prefix: clean.clone(),
-                    },
-                    clean,
-                ));
-            }
-            // block/program: stop climbing (return None)
-            None
-        })
-        .for_kinds(&["block", "class_body", "program"]))
-        .climb(&["block", "class_body", "program"]);
+            ));
+        }
+        if is_variable_name_after_complete_type(orig, inp.node, ctx) {
+            let type_name = extract_type_from_decl(ctx, inp.node);
+            return Some((CursorLocation::VariableName { type_name }, String::new()));
+        }
+        if let Some((receiver_expr, member_prefix)) =
+            detect_member_tail_in_misread_local_decl(ctx, orig, inp.node)
+        {
+            return Some((
+                CursorLocation::MemberAccess {
+                    receiver_semantic_type: None,
+                    receiver_type: None,
+                    member_prefix: member_prefix.clone(),
+                    receiver_expr,
+                    arguments: None,
+                },
+                member_prefix,
+            ));
+        }
+        if is_in_type_position(orig, inp.node) {
+            let text = cursor_truncated_text(ctx, orig);
+            return Some((
+                CursorLocation::TypeAnnotation {
+                    prefix: text.clone(),
+                },
+                text,
+            ));
+        }
+        if is_in_name_position(orig, inp.node) {
+            let type_name = extract_type_from_decl(ctx, inp.node);
+            return Some((CursorLocation::VariableName { type_name }, String::new()));
+        }
+        if is_in_type_subtree(orig, inp.node) {
+            let text = cursor_truncated_text(ctx, orig);
+            return Some((
+                CursorLocation::TypeAnnotation {
+                    prefix: text.clone(),
+                },
+                text,
+            ));
+        }
+        let text = cursor_truncated_text(ctx, orig);
+        let clean = strip_sentinel(&text);
+        Some((
+            CursorLocation::Expression {
+                prefix: clean.clone(),
+            },
+            clean,
+        ))
+    })
+    .for_kinds(&["local_variable_declaration"]))
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        if is_in_formal_param_name_position(orig, inp.node) {
+            let type_name = inp
+                .node
+                .child_by_field_name("type")
+                .map(|n| ctx.node_text(n).trim().to_string())
+                .unwrap_or_default();
+            return Some((CursorLocation::VariableName { type_name }, String::new()));
+        }
+        let text = cursor_truncated_text(ctx, orig);
+        Some((
+            CursorLocation::TypeAnnotation {
+                prefix: text.clone(),
+            },
+            text,
+        ))
+    })
+    .for_kinds(&["formal_parameter", "spread_parameter"]))
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        detect_annotation_param_location(ctx, inp.node, Some(orig))
+    })
+    .for_kinds(&["annotation_argument_list"]))
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        if let Some(parent) = orig.parent()
+            && parent.kind() == "method_invocation"
+            && ctx.offset <= inp.node.start_byte()
+        {
+            return Some(handle_member_access(ctx, parent));
+        }
+        Some(handle_argument_list(ctx, inp.node))
+    })
+    .for_kinds(&["argument_list"]))
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        if let Some(result) = recover_error_location_ast_first(ctx, inp.node) {
+            return Some(result);
+        }
+        let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
+        if is_import_context(before) {
+            return Some(handle_import_from_text(ctx, before));
+        }
+        if let Some((receiver_expr, member_prefix)) = detect_trailing_dot_in_text(before) {
+            return Some((
+                CursorLocation::MemberAccess {
+                    receiver_semantic_type: None,
+                    receiver_type: None,
+                    member_prefix: member_prefix.clone(),
+                    receiver_expr,
+                    arguments: None,
+                },
+                member_prefix,
+            ));
+        }
+        if let Some(detected) = detect_new_keyword_before_cursor(before) {
+            return Some((
+                CursorLocation::ConstructorCall {
+                    class_prefix: detected.class_prefix.clone(),
+                    expected_type: None,
+                    qualifier_expr: detected.qualifier_expr,
+                    qualifier_owner_internal: None,
+                },
+                detected.class_prefix,
+            ));
+        }
+        let text = cursor_truncated_text(ctx, orig);
+        let clean = strip_sentinel(&text);
+        Some((
+            CursorLocation::Expression {
+                prefix: clean.clone(),
+            },
+            clean,
+        ))
+    })
+    .for_kinds(&["ERROR"]))
+    .or((|inp: Input<Ctx<'_>>| {
+        let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+        if inp.node.kind() == "class_body" {
+            let text = cursor_truncated_text(ctx, orig);
+            let clean = strip_sentinel(&text);
+            return Some((
+                CursorLocation::Expression {
+                    prefix: clean.clone(),
+                },
+                clean,
+            ));
+        }
+        // block/program: stop climbing (return None)
+        None
+    })
+    .for_kinds(&["block", "class_body", "program"]))
+    .climb(&["block", "class_body", "program"]);
 
     // combinator from the parent node to preserve identical semantics.
     let ctx_pair: Ctx<'_> = (ctx, node);

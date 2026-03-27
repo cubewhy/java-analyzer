@@ -32,6 +32,7 @@ pub enum CandidateKind {
     StatementLabel,
     Keyword,
     Annotation,
+    AnnotationElement,
     NameSuggestion,
 }
 

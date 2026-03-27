@@ -2385,6 +2385,25 @@ public class Foo {
     }
 
     #[test]
+    fn test_annotation_type_elements_are_indexed_as_methods() {
+        let src = r#"
+public @interface Ann {
+    String value();
+    int count() default 1;
+    String[] names();
+}
+"#;
+        let classes = parse_test_classes(src);
+        let ann = classes.iter().find(|c| c.name.as_ref() == "Ann").unwrap();
+
+        let mut method_names: Vec<&str> = ann.methods.iter().map(|m| m.name.as_ref()).collect();
+        method_names.sort_unstable();
+
+        assert_eq!(method_names, vec!["count", "names", "value"]);
+        assert!(ann.methods.iter().all(|m| m.params.items.is_empty()));
+    }
+
+    #[test]
     fn test_access_flags_super_on_class_like_decls() {
         let src = r#"
 public class C {}

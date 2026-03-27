@@ -122,6 +122,13 @@ pub enum CursorLocation {
         /// None = position unknown, show everything.
         target_element_type: Option<Arc<str>>,
     },
+    /// Annotation element key position inside `@Anno(name = value)`.
+    AnnotationParam {
+        prefix: String,
+        annotation_name: Option<Arc<str>>,
+        used_keys: Vec<Arc<str>>,
+        fresh_slot: bool,
+    },
     /// Variable name position: `String |name|` — suggest variable names based on type
     VariableName {
         type_name: String,

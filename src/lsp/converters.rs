@@ -129,6 +129,7 @@ fn map_kind(kind: &CandidateKind) -> CompletionItemKind {
         CandidateKind::StatementLabel => CompletionItemKind::REFERENCE,
         CandidateKind::Keyword => CompletionItemKind::KEYWORD,
         CandidateKind::Annotation => CompletionItemKind::EVENT,
+        CandidateKind::AnnotationElement => CompletionItemKind::PROPERTY,
         CandidateKind::NameSuggestion => CompletionItemKind::VARIABLE,
     }
 }

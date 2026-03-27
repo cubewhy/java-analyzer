@@ -532,6 +532,32 @@ mod tests {
     }
 
     #[test]
+    fn test_map_candidate_item_annotation_element_uses_property_kind_and_assignment_edit() {
+        let c = CompletionCandidate::new(
+            Arc::from("name"),
+            "name = ",
+            CandidateKind::AnnotationElement,
+            "annotation_param",
+        )
+        .with_filter_text("name");
+        let src = "@ConfigAnno(value = \"x\", )";
+        let pos = Position {
+            line: 0,
+            character: "@ConfigAnno(value = \"x\", ".len() as u32,
+        };
+
+        let item = map_candidate_item(&c, src, pos);
+        let edit = item.text_edit.expect("text_edit expected");
+        let range = edit_range(&edit);
+
+        assert_eq!(item.kind, Some(CompletionItemKind::PROPERTY));
+        assert_eq!(item.filter_text.as_deref(), Some("name"));
+        assert_eq!(range.start.character, pos.character);
+        assert_eq!(range.end.character, pos.character);
+        assert_eq!(edit_text(&edit), "name = ");
+    }
+
+    #[test]
     fn test_member_access_cast_rewrite_uses_narrow_primary_edit_and_additional_edits() {
         let c = CompletionCandidate::new(
             Arc::from("append"),
