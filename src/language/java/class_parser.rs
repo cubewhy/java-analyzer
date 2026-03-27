@@ -11,7 +11,7 @@ use tree_sitter_utils::{
 use crate::index::{AnnotationSummary, BucketIndex, ClassMetadata, ClassOrigin};
 use crate::jvm::descriptor::consume_one_descriptor_type;
 use crate::language::java::type_ctx::{SourceTypeCtx, build_java_descriptor};
-use crate::language::java::utils::extract_generic_signature;
+use crate::language::java::utils::{extract_type_parameters_prefix, source_type_to_signature};
 use crate::{
     index::{IndexView, intern_str},
     language::java::{
@@ -444,6 +444,42 @@ fn extract_super_name_and_interfaces(
     recovered_kind: Option<&str>,
 ) -> (Option<Arc<str>>, Vec<Arc<str>>) {
     let decl_kind = declaration_kind(node, recovered_kind);
+    let (super_name, mut interfaces) = extract_declared_inheritance_types(ctx, node, decl_kind);
+
+    let super_name = super_name
+        .map(|super_name_simple| {
+            type_ctx
+                .resolve_simple_strict(&super_name_simple)
+                .map(|resolved| intern_str(&resolved))
+                .unwrap_or(super_name_simple)
+        })
+        .or_else(|| match decl_kind {
+            Some(kind) => kind.default_super_name().map(intern_str),
+            None => None,
+        });
+
+    if let Some(kind) = decl_kind {
+        interfaces.extend(kind.default_interfaces().iter().map(|s| intern_str(s)));
+    }
+
+    let interfaces = interfaces
+        .into_iter()
+        .map(|interface_simple| {
+            type_ctx
+                .resolve_simple_strict(&interface_simple)
+                .map(|resolved| intern_str(&resolved))
+                .unwrap_or(interface_simple)
+        })
+        .collect();
+
+    (super_name, interfaces)
+}
+
+fn extract_declared_inheritance_types(
+    ctx: &JavaContextExtractor,
+    node: Node,
+    decl_kind: Option<TypeDeclarationKind>,
+) -> (Option<Arc<str>>, Vec<Arc<str>>) {
     let mut super_name = None;
     let mut interfaces = Vec::new();
 
@@ -485,33 +521,74 @@ fn extract_super_name_and_interfaces(
         }
     }
 
-    let super_name = super_name
-        .map(|super_name_simple| {
-            type_ctx
-                .resolve_simple_strict(&super_name_simple)
-                .map(|resolved| intern_str(&resolved))
-                .unwrap_or(super_name_simple)
-        })
-        .or_else(|| match decl_kind {
-            Some(kind) => kind.default_super_name().map(intern_str),
-            None => None,
-        });
+    (super_name, interfaces)
+}
 
-    if let Some(kind) = decl_kind {
-        interfaces.extend(kind.default_interfaces().iter().map(|s| intern_str(s)));
+fn class_signature_super_suffix(
+    type_ctx: &SourceTypeCtx,
+    decl_kind: TypeDeclarationKind,
+    internal_name: &str,
+    declared_super: Option<&str>,
+) -> String {
+    if let Some(declared_super) = declared_super {
+        return source_type_to_signature(type_ctx, declared_super);
     }
 
-    let interfaces = interfaces
-        .into_iter()
-        .map(|interface_simple| {
-            type_ctx
-                .resolve_simple_strict(&interface_simple)
-                .map(|resolved| intern_str(&resolved))
-                .unwrap_or(interface_simple)
-        })
-        .collect();
+    match decl_kind {
+        TypeDeclarationKind::Class
+        | TypeDeclarationKind::Interface
+        | TypeDeclarationKind::Annotation => "Ljava/lang/Object;".to_string(),
+        TypeDeclarationKind::Enum => format!("Ljava/lang/Enum<L{};>;", internal_name),
+        TypeDeclarationKind::Record => "Ljava/lang/Record;".to_string(),
+    }
+}
 
-    (super_name, interfaces)
+fn source_type_needs_generic_signature(ty: &str) -> bool {
+    ty.contains('<')
+}
+
+fn build_class_generic_signature(
+    ctx: &JavaContextExtractor,
+    type_ctx: &SourceTypeCtx,
+    node: Node,
+    internal_name: &str,
+    recovered_kind: Option<&str>,
+) -> Option<Arc<str>> {
+    let decl_kind = declaration_kind(node, recovered_kind)?;
+    let prefix = extract_type_parameters_prefix(node, ctx.bytes(), Some(type_ctx));
+    let (declared_super, declared_interfaces) =
+        extract_declared_inheritance_types(ctx, node, Some(decl_kind));
+
+    let needs_signature = prefix.is_some()
+        || declared_super
+            .as_deref()
+            .map(source_type_needs_generic_signature)
+            .unwrap_or(false)
+        || declared_interfaces
+            .iter()
+            .any(|ty| source_type_needs_generic_signature(ty.as_ref()));
+
+    if !needs_signature {
+        return None;
+    }
+
+    let mut sig = prefix.unwrap_or_default();
+    sig.push_str(&class_signature_super_suffix(
+        type_ctx,
+        decl_kind,
+        internal_name,
+        declared_super.as_deref(),
+    ));
+
+    for interface in declared_interfaces {
+        sig.push_str(&source_type_to_signature(type_ctx, interface.as_ref()));
+    }
+
+    if matches!(decl_kind, TypeDeclarationKind::Annotation) {
+        sig.push_str("Ljava/lang/annotation/Annotation;");
+    }
+
+    Some(Arc::from(sig))
 }
 
 fn extract_single_type_from_clause(
@@ -797,12 +874,8 @@ fn parse_java_error_class(
         _ => 0,
     };
 
-    let generic_signature = extract_generic_signature(
-        error_node,
-        ctx.bytes(),
-        "Ljava/lang/Object;",
-        Some(type_ctx),
-    );
+    let generic_signature =
+        build_class_generic_signature(ctx, type_ctx, error_node, &internal_name, Some(kind));
     if let Some(sig) = generic_signature.as_deref() {
         let class_type_params = parse_class_type_parameters(sig);
         if !class_type_params.is_empty() {
@@ -990,7 +1063,7 @@ fn parse_java_class(
     let annos = extract_class_annotations(ctx, node, type_ctx);
 
     let class_generic_signature =
-        extract_generic_signature(node, ctx.bytes(), "Ljava/lang/Object;", Some(type_ctx));
+        build_class_generic_signature(ctx, type_ctx, node, &internal_name, None);
     if let Some(sig) = class_generic_signature.as_deref() {
         let class_type_params = parse_class_type_parameters(sig);
         if !class_type_params.is_empty() {
@@ -1795,6 +1868,65 @@ public class Main {
         assert_eq!(
             meta.generic_signature.as_deref(),
             Some("<T:Ljava/io/Closeable;:Ljava/lang/Runnable;>Ljava/lang/Object;")
+        );
+    }
+
+    #[test]
+    fn test_extract_java_class_generic_signature_preserves_parameterized_superclass() {
+        let src = indoc::indoc! {r#"
+            package org.example;
+            class Base<U> {}
+            class Demo<T> extends Base<T> {}
+        "#};
+        let classes = parse_test_classes(src);
+        let meta = classes
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Demo")
+            .unwrap();
+
+        assert_eq!(
+            meta.generic_signature.as_deref(),
+            Some("<T:Ljava/lang/Object;>Lorg/example/Base<TT;>;")
+        );
+    }
+
+    #[test]
+    fn test_extract_java_class_generic_signature_preserves_parameterized_superclass_without_own_type_params()
+     {
+        let src = indoc::indoc! {r#"
+            package org.example;
+            class Base<U> {}
+            class Demo extends Base<java.lang.String> {}
+        "#};
+        let classes = parse_test_classes(src);
+        let meta = classes
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Demo")
+            .unwrap();
+
+        assert_eq!(
+            meta.generic_signature.as_deref(),
+            Some("Lorg/example/Base<Ljava/lang/String;>;")
+        );
+    }
+
+    #[test]
+    fn test_extract_java_interface_generic_signature_preserves_parameterized_superinterface_without_own_type_params()
+     {
+        let src = indoc::indoc! {r#"
+            package org.example;
+            interface Base<T> {}
+            interface Demo extends Base<java.lang.String> {}
+        "#};
+        let classes = parse_test_classes(src);
+        let meta = classes
+            .iter()
+            .find(|c| c.internal_name.as_ref() == "org/example/Demo")
+            .unwrap();
+
+        assert_eq!(
+            meta.generic_signature.as_deref(),
+            Some("Ljava/lang/Object;Lorg/example/Base<Ljava/lang/String;>;")
         );
     }
 
