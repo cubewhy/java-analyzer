@@ -2,7 +2,7 @@ use crate::language::java::JavaContextExtractor;
 use crate::language::java::location::heuristics::{
     detect_new_keyword_before_cursor, detect_trailing_dot_in_text,
     detect_variable_name_after_type_text, detect_variable_name_position,
-    detect_variable_name_position_in_error, scoped_type_to_member_access,
+    recover_error_location_ast_first,
 };
 use crate::semantic::CursorLocation;
 use tree_sitter::Node;
@@ -68,21 +68,8 @@ fn handle_error_as_last_block_child(
     ctx: &JavaContextExtractor,
     error_node: Node,
 ) -> (CursorLocation, String) {
-    // Case 9: `a.put` → ERROR contains scoped_type_identifier
-    {
-        let mut wc = error_node.walk();
-        for child in error_node.named_children(&mut wc) {
-            if child.kind() == "scoped_type_identifier"
-                && let Some(r) = scoped_type_to_member_access(ctx, child)
-            {
-                return r;
-            }
-        }
-    }
-
-    // Type awaiting variable name: `String |`, `int |`, `String[] |`, `List<String> |`
-    if let Some(type_name) = detect_variable_name_position_in_error(ctx, error_node) {
-        return (CursorLocation::VariableName { type_name }, String::new());
+    if let Some(result) = recover_error_location_ast_first(ctx, error_node) {
+        return result;
     }
 
     let before = &ctx.source[..ctx.offset.min(ctx.source.len())];

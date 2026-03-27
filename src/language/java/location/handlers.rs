@@ -1,9 +1,9 @@
 use crate::language::java::JavaContextExtractor;
 use crate::language::java::location::heuristics::{
     detect_member_tail_in_misread_local_decl, detect_new_keyword_before_cursor,
-    detect_trailing_dot_in_text, detect_variable_name_position_in_error, handle_import_from_text,
-    is_import_context, is_misread_expression_in_local_decl, is_variable_name_after_complete_type,
-    is_variable_name_after_previous_declaration,
+    detect_trailing_dot_in_text, handle_import_from_text, is_import_context,
+    is_misread_expression_in_local_decl, is_variable_name_after_complete_type,
+    is_variable_name_after_previous_declaration, recover_error_location_ast_first,
 };
 use crate::language::java::utils::strip_sentinel;
 use crate::language::java::{
@@ -749,12 +749,10 @@ pub(super) fn handle_identifier(
     if let Some(type_name) = is_variable_name_after_previous_declaration(node, ctx) {
         return (CursorLocation::VariableName { type_name }, String::new());
     }
-    // Heuristic: an ERROR node that only contains a type with trailing whitespace
-    // indicates we're waiting for a variable name.
     if let Some(err) = ancestor_of_kind(node, "ERROR")
-        && let Some(type_name) = detect_variable_name_position_in_error(ctx, err)
+        && let Some(result) = recover_error_location_ast_first(ctx, err)
     {
-        return (CursorLocation::VariableName { type_name }, String::new());
+        return result;
     }
     // Dispatch each ancestor kind to its handler using a combinator chain.
     // Context carries (extractor, original_identifier_node).
@@ -884,6 +882,9 @@ pub(super) fn handle_identifier(
         .for_kinds(&["argument_list"]))
         .or((|inp: Input<Ctx<'_>>| {
             let (ctx, orig): (&JavaContextExtractor, Node) = inp.ctx;
+            if let Some(result) = recover_error_location_ast_first(ctx, inp.node) {
+                return Some(result);
+            }
             let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
             if is_import_context(before) {
                 return Some(handle_import_from_text(ctx, before));

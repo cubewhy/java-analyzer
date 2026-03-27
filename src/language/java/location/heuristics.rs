@@ -33,6 +33,27 @@ pub(super) struct DetectedConstructorCall {
     pub qualifier_expr: Option<String>,
 }
 
+fn local_decl_parts(decl_node: Node) -> Option<(Node, Node, Node)> {
+    let mut walker = decl_node.walk();
+    let type_node = decl_node
+        .named_children(&mut walker)
+        .find(|child| child.kind() != "modifiers" && child.kind() != "variable_declarator")?;
+
+    let mut walker = decl_node.walk();
+    let declarator = decl_node
+        .named_children(&mut walker)
+        .find(|child| child.kind() == "variable_declarator")?;
+
+    let name_node = declarator.child_by_field_name("name").or_else(|| {
+        let mut walker = declarator.walk();
+        declarator
+            .named_children(&mut walker)
+            .find(|child| matches!(child.kind(), "identifier" | "type_identifier"))
+    })?;
+
+    Some((type_node, declarator, name_node))
+}
+
 /// Detect trailing-dot pattern in source text before the cursor.
 ///
 /// What it does:
@@ -366,37 +387,13 @@ pub(super) fn is_misread_expression_in_local_decl(
         }
     }
 
-    let type_node = {
-        let mut walker = decl_node.walk();
-        decl_node
-            .named_children(&mut walker)
-            .find(|child| child.kind() != "modifiers" && child.kind() != "variable_declarator")
-    };
-    let Some(type_node) = type_node else {
+    let Some((type_node, declarator, name_node)) = local_decl_parts(decl_node) else {
         return false;
     };
     if !is_descendant_of(node, type_node) {
         return false;
     }
 
-    let declarator = {
-        let mut walker = decl_node.walk();
-        decl_node
-            .named_children(&mut walker)
-            .find(|child| child.kind() == "variable_declarator")
-    };
-    let Some(declarator) = declarator else {
-        return false;
-    };
-    let name_node = declarator.child_by_field_name("name").or_else(|| {
-        let mut walker = declarator.walk();
-        declarator
-            .named_children(&mut walker)
-            .find(|child| matches!(child.kind(), "identifier" | "type_identifier"))
-    });
-    let Some(name_node) = name_node else {
-        return false;
-    };
     let declarator_name = ctx.node_text(name_node).trim();
     if declarator_name != "super" && declarator_name != "this" {
         let declarator_gap = &ctx.source[type_node.end_byte()..name_node.start_byte()];
@@ -513,11 +510,26 @@ pub(super) fn detect_member_tail_in_misread_local_decl(
         return None;
     }
 
+    if let Some((type_node, _declarator, name_node)) = local_decl_parts(decl_node) {
+        let gap_start = type_node.end_byte().min(ctx.source.len());
+        let gap_end = name_node.start_byte().min(ctx.source.len());
+        if gap_start < gap_end {
+            let gap = &ctx.source[gap_start..gap_end];
+            let compact_gap: String = gap.chars().filter(|c| !c.is_whitespace()).collect();
+            if compact_gap == "." && ctx.offset >= name_node.start_byte() {
+                let receiver_expr = strip_sentinel(ctx.node_text(type_node).trim());
+                let member_prefix = strip_sentinel(&cursor_truncated_text(ctx, name_node));
+                if !receiver_expr.is_empty() && !member_prefix.contains('\n') {
+                    return Some((receiver_expr, member_prefix));
+                }
+            }
+        }
+    }
+
     let start = decl_node.start_byte();
     if ctx.offset <= start {
         return None;
     }
-
     let raw = &ctx.source[start..ctx.offset];
     let clean = strip_sentinel(raw).trim_end().to_string();
 
@@ -531,6 +543,60 @@ pub(super) fn detect_member_tail_in_misread_local_decl(
     }
 
     Some((receiver_expr, member_prefix))
+}
+
+fn detect_constructor_in_error_ast(
+    ctx: &JavaContextExtractor,
+    error_node: Node,
+) -> Option<DetectedConstructorCall> {
+    let segment_start = find_last_semicolon_before(error_node, ctx.offset)
+        .unwrap_or_else(|| error_node.start_byte());
+    let segment_end =
+        find_next_semicolon_after(error_node, ctx.offset).unwrap_or_else(|| error_node.end_byte());
+
+    let mut walker = error_node.walk();
+    let children: Vec<Node> = error_node.children(&mut walker).collect();
+    let new_idx = children.iter().rposition(|child| {
+        child.kind() == "new"
+            && child.start_byte() >= segment_start
+            && child.end_byte() <= segment_end
+            && child.start_byte() < ctx.offset
+    })?;
+
+    let class_node = children[new_idx + 1..].iter().find(|child| {
+        child.start_byte() >= segment_start
+            && child.end_byte() <= segment_end
+            && child.start_byte() < ctx.offset
+            && matches!(
+                child.kind(),
+                "identifier"
+                    | "type_identifier"
+                    | "generic_type"
+                    | "scoped_type_identifier"
+                    | "annotated_type"
+            )
+    })?;
+
+    let class_prefix = strip_sentinel(&cursor_truncated_text(ctx, *class_node));
+    if class_prefix.is_empty() {
+        return None;
+    }
+
+    let qualifier_expr = if new_idx >= 2 && children[new_idx - 1].kind() == "." {
+        children[..new_idx - 1]
+            .iter()
+            .rev()
+            .find(|child| child.is_named() && !child.is_extra())
+            .map(|child| ctx.node_text(*child).trim().to_string())
+            .filter(|text| !text.is_empty())
+    } else {
+        None
+    };
+
+    Some(DetectedConstructorCall {
+        class_prefix,
+        qualifier_expr,
+    })
 }
 
 /// Detects if the cursor is in a variable-name position after a *previous*
@@ -1113,56 +1179,6 @@ fn last_identifier_token(s: &str) -> Option<String> {
     Some(s[i..end].to_string())
 }
 
-/// Convert a misparsed `scoped_type_identifier` into member access.
-///
-/// What it does:
-/// - Treats `a.b` parsed as a scoped type as `receiver=a` and `member=b`.
-///
-/// Why it exists:
-/// - Error recovery often promotes `a.b` into a type when it is actually
-///   member access.
-///
-/// Effect on behavior:
-/// - Routes completion to `MemberAccess` instead of type completion.
-pub(super) fn scoped_type_to_member_access(
-    ctx: &JavaContextExtractor,
-    scoped: Node,
-) -> Option<(CursorLocation, String)> {
-    let mut wc = scoped.walk();
-    let parts: Vec<Node> = scoped.named_children(&mut wc).collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let member_node = *parts.last()?;
-    // dot is one byte before member_node
-    let receiver_end = member_node.start_byte().saturating_sub(1);
-    let receiver_start = scoped.start_byte();
-    if receiver_end <= receiver_start {
-        return None;
-    }
-    let receiver_expr = ctx.source[receiver_start..receiver_end].trim().to_string();
-    if receiver_expr.is_empty() || receiver_expr.contains(' ') || receiver_expr.contains('\t') {
-        return None;
-    }
-
-    let member_prefix = strip_sentinel(&cursor_truncated_text(ctx, member_node));
-
-    if receiver_expr.is_empty() {
-        return None;
-    }
-
-    Some((
-        CursorLocation::MemberAccess {
-            receiver_semantic_type: None,
-            receiver_type: None,
-            member_prefix: member_prefix.clone(),
-            receiver_expr,
-            arguments: None,
-        },
-        member_prefix,
-    ))
-}
-
 /// Detect member access when a scoped type is actually a member access.
 ///
 /// What it does:
@@ -1305,7 +1321,8 @@ pub(super) fn detect_constructor_in_local_decl_error(
     }
 
     let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
-    let detected = detect_new_keyword_before_cursor(before)?;
+    let detected = detect_constructor_in_error_ast(ctx, error_child)
+        .or_else(|| detect_new_keyword_before_cursor(before))?;
 
     let expected_type = {
         let mut wc3 = decl_node.walk();
@@ -1325,6 +1342,47 @@ pub(super) fn detect_constructor_in_local_decl_error(
         },
         detected.class_prefix,
     ))
+}
+
+pub(super) fn recover_error_location_ast_first(
+    ctx: &JavaContextExtractor,
+    error_node: Node,
+) -> Option<(CursorLocation, String)> {
+    {
+        let mut walker = error_node.walk();
+        for child in error_node.named_children(&mut walker) {
+            if child.start_byte() > ctx.offset {
+                break;
+            }
+            if child.kind() == "scoped_type_identifier"
+                && let Some(result) = detect_member_access_in_scoped_type(ctx, child)
+            {
+                return Some(result);
+            }
+        }
+    }
+
+    if let Some(result) = detect_dot_after_expression_child(ctx, error_node) {
+        return Some(result);
+    }
+
+    if let Some(detected) = detect_constructor_in_error_ast(ctx, error_node) {
+        return Some((
+            CursorLocation::ConstructorCall {
+                class_prefix: detected.class_prefix.clone(),
+                expected_type: None,
+                qualifier_expr: detected.qualifier_expr,
+                qualifier_owner_internal: None,
+            },
+            detected.class_prefix,
+        ));
+    }
+
+    if let Some(type_name) = detect_variable_name_position_in_error(ctx, error_node) {
+        return Some((CursorLocation::VariableName { type_name }, String::new()));
+    }
+
+    None
 }
 
 /// Detect `expr .` pattern inside an ERROR node and turn it into member access.

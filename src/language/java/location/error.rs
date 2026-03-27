@@ -5,9 +5,8 @@ use tree_sitter_utils::traversal;
 
 use super::handlers;
 use super::heuristics::{
-    detect_dot_after_expression_child, detect_new_keyword_before_cursor,
-    detect_trailing_dot_in_text, detect_variable_name_position_in_error, handle_import_from_text,
-    is_import_context,
+    detect_new_keyword_before_cursor, detect_trailing_dot_in_text, handle_import_from_text,
+    is_import_context, recover_error_location_ast_first,
 };
 use super::utils::cursor_truncated_text;
 
@@ -52,6 +51,10 @@ pub(super) fn handle_error(
     // Source text analysis for ERROR in block or at program level
     let before = &ctx.source[..ctx.offset.min(ctx.source.len())];
 
+    if let Some(result) = recover_error_location_ast_first(ctx, error_node) {
+        return result;
+    }
+
     if is_import_context(before) {
         return handle_import_from_text(ctx, before);
     }
@@ -83,17 +86,7 @@ pub(super) fn handle_error(
         );
     }
 
-    // Priority 3: expression child followed by dot (cases 6, 8)
-    if let Some(r) = detect_dot_after_expression_child(ctx, error_node) {
-        return r;
-    }
-
-    // Priority 4: type-like ERROR awaiting variable name
-    if let Some(type_name) = detect_variable_name_position_in_error(ctx, error_node) {
-        return (CursorLocation::VariableName { type_name }, String::new());
-    }
-
-    // Priority 5: cursor is on identifier → Expression
+    // Priority 3: cursor is on identifier → Expression
     if matches!(cursor_node.kind(), "identifier" | "type_identifier") {
         return handlers::handle_identifier(ctx, cursor_node, trigger_char);
     }
