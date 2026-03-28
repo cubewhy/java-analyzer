@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::index::{
@@ -13,20 +13,14 @@ use crate::index::{
 struct IndexViewCaches {
     class_by_internal: DashMap<Arc<str>, Option<Arc<ClassMetadata>>>,
     source_type_names: DashMap<Arc<str>, Arc<str>>,
-    classes_by_simple_name: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
-    classes_in_package: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
-    direct_inner_classes: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
-    inherited_members: DashMap<Arc<str>, Arc<InheritedMembers>>,
-    mro: DashMap<Arc<str>, Arc<Vec<Arc<ClassMetadata>>>>,
+    classes_by_simple_name: DashMap<Arc<str>, Arc<Vec<Arc<str>>>>,
+    classes_in_package: DashMap<Arc<str>, Arc<Vec<Arc<str>>>>,
+    direct_inner_classes: DashMap<Arc<str>, Arc<Vec<Arc<str>>>>,
+    hierarchy_order: DashMap<Arc<str>, Arc<Vec<Arc<str>>>>,
     methods_by_name: DashMap<(Arc<str>, Arc<str>), Arc<Vec<Arc<MethodSummary>>>>,
     fields_by_name: DashMap<(Arc<str>, Arc<str>), Option<Arc<FieldSummary>>>,
-    declaring_method_owner: DashMap<(Arc<str>, Arc<str>, Arc<str>), Option<Arc<ClassMetadata>>>,
-    all_classes: OnceLock<Arc<Vec<Arc<ClassMetadata>>>>,
-}
-
-struct InheritedMembers {
-    methods: Vec<Arc<MethodSummary>>,
-    fields: Vec<Arc<FieldSummary>>,
+    declaring_method_owner: DashMap<(Arc<str>, Arc<str>, Arc<str>), Option<Arc<str>>>,
+    all_classes: OnceLock<Arc<Vec<Arc<str>>>>,
 }
 
 #[derive(Clone)]
@@ -40,24 +34,91 @@ impl IndexView {
         self.scope.layers()
     }
 
-    fn merge_classes<F>(&self, mut fetch: F) -> Vec<Arc<ClassMetadata>>
+    fn merge_class_internals<F>(&self, mut fetch: F) -> Vec<Arc<str>>
     where
         F: FnMut(&BucketIndex) -> Vec<Arc<ClassMetadata>>,
     {
-        let mut by_internal: FxHashMap<Arc<str>, Arc<ClassMetadata>> = Default::default();
+        let mut seen: FxHashSet<Arc<str>> = Default::default();
+        let mut merged = Vec::new();
         for layer in self.layers() {
             for class in fetch(layer) {
                 let key = Arc::clone(&class.internal_name);
-                if let Some(current) = by_internal.get(&key) {
-                    if Self::should_replace(current, &class) {
-                        by_internal.insert(key, class);
-                    }
-                } else {
-                    by_internal.insert(key, class);
+                if seen.insert(Arc::clone(&key)) {
+                    merged.push(key);
                 }
             }
         }
-        by_internal.into_values().collect()
+        merged
+    }
+
+    fn resolve_class_internals(&self, internals: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {
+        internals
+            .iter()
+            .filter_map(|internal| self.get_class(internal.as_ref()))
+            .collect()
+    }
+
+    fn hierarchy_order(&self, class_internal: &str) -> Arc<Vec<Arc<str>>> {
+        if let Some(cached) = self.caches.hierarchy_order.get(class_internal) {
+            return Arc::clone(cached.value());
+        }
+
+        let mut order = Vec::new();
+        let mut seen: FxHashSet<Arc<str>> = Default::default();
+        let mut queue: VecDeque<Arc<str>> = VecDeque::new();
+
+        queue.push_back(Arc::from(class_internal));
+        while let Some(internal) = queue.pop_front() {
+            if !seen.insert(Arc::clone(&internal)) {
+                continue;
+            }
+            let meta = match self.get_class(&internal) {
+                Some(meta) => meta,
+                None => continue,
+            };
+
+            order.push(Arc::clone(&meta.internal_name));
+
+            if let Some(ref super_name) = meta.super_name
+                && !super_name.is_empty()
+            {
+                queue.push_back(Arc::clone(super_name));
+            }
+            for iface in &meta.interfaces {
+                if !iface.is_empty() {
+                    queue.push_back(Arc::clone(iface));
+                }
+            }
+        }
+
+        let order = Arc::new(order);
+        self.caches
+            .hierarchy_order
+            .insert(Arc::from(class_internal), Arc::clone(&order));
+        order
+    }
+
+    fn project_hierarchy_classes(&self, hierarchy_order: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {
+        let mut result = Vec::new();
+        let mut seen_methods: FxHashSet<(Arc<str>, Arc<str>)> = Default::default();
+        let mut seen_fields: FxHashSet<Arc<str>> = Default::default();
+
+        for internal in hierarchy_order {
+            let Some(meta) = self.get_class(internal.as_ref()) else {
+                continue;
+            };
+
+            let mut projected = (*meta).clone();
+            projected
+                .methods
+                .retain(|method| seen_methods.insert(Self::method_shadow_key(method)));
+            projected
+                .fields
+                .retain(|field| seen_fields.insert(Arc::clone(&field.name)));
+            result.push(Arc::new(projected));
+        }
+
+        result
     }
 
     fn resolve_internal_hint_to_class(&self, internal_hint: &str) -> Option<Arc<ClassMetadata>> {
@@ -219,27 +280,28 @@ impl IndexView {
 
     pub fn get_classes_by_simple_name(&self, simple_name: &str) -> Vec<Arc<ClassMetadata>> {
         if let Some(cached) = self.caches.classes_by_simple_name.get(simple_name) {
-            return cached.value().as_ref().clone();
+            return self.resolve_class_internals(cached.value().as_ref());
         }
 
-        let merged =
-            Arc::new(self.merge_classes(|layer| layer.get_classes_by_simple_name(simple_name)));
+        let merged = Arc::new(
+            self.merge_class_internals(|layer| layer.get_classes_by_simple_name(simple_name)),
+        );
         self.caches
             .classes_by_simple_name
             .insert(Arc::from(simple_name), Arc::clone(&merged));
-        merged.as_ref().clone()
+        self.resolve_class_internals(merged.as_ref())
     }
 
     pub fn classes_in_package(&self, pkg: &str) -> Vec<Arc<ClassMetadata>> {
         if let Some(cached) = self.caches.classes_in_package.get(pkg) {
-            return cached.value().as_ref().clone();
+            return self.resolve_class_internals(cached.value().as_ref());
         }
 
-        let merged = Arc::new(self.merge_classes(|layer| layer.classes_in_package(pkg)));
+        let merged = Arc::new(self.merge_class_internals(|layer| layer.classes_in_package(pkg)));
         self.caches
             .classes_in_package
             .insert(Arc::from(pkg), Arc::clone(&merged));
-        merged.as_ref().clone()
+        self.resolve_class_internals(merged.as_ref())
     }
 
     /// Returns classes directly declared in the package (excludes nested/inner classes).
@@ -256,16 +318,17 @@ impl IndexView {
     pub fn direct_inner_classes_of(&self, owner_internal: &str) -> Vec<Arc<ClassMetadata>> {
         let key = Arc::from(owner_internal);
         if let Some(cached) = self.caches.direct_inner_classes.get(&key) {
-            return cached.value().as_ref().clone();
+            return self.resolve_class_internals(cached.value().as_ref());
         }
 
-        let merged = Arc::new(
-            self.merge_classes(|layer| layer.direct_inner_classes_by_owner(owner_internal)),
-        );
+        let merged =
+            Arc::new(self.merge_class_internals(|layer| {
+                layer.direct_inner_classes_by_owner(owner_internal)
+            }));
         self.caches
             .direct_inner_classes
             .insert(Arc::clone(&key), Arc::clone(&merged));
-        merged.as_ref().clone()
+        self.resolve_class_internals(merged.as_ref())
     }
 
     /// Resolves a direct nested class by simple name under `owner_internal`.
@@ -379,27 +442,15 @@ impl IndexView {
         &self,
         class_internal: &str,
     ) -> (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>) {
-        if let Some(cached) = self.caches.inherited_members.get(class_internal) {
-            return (cached.methods.clone(), cached.fields.clone());
-        }
-
         let mut methods: Vec<Arc<MethodSummary>> = Vec::new();
         let mut fields: Vec<Arc<FieldSummary>> = Vec::new();
         let mut seen_methods: FxHashSet<(Arc<str>, Arc<str>)> = Default::default();
         let mut seen_fields: FxHashSet<Arc<str>> = Default::default();
-        let mut seen_classes: FxHashSet<Arc<str>> = Default::default();
-        let mut queue: VecDeque<Arc<str>> = Default::default();
+        let hierarchy_order = self.hierarchy_order(class_internal);
 
-        queue.push_back(Arc::from(class_internal));
-
-        while let Some(internal) = queue.pop_front() {
-            if !seen_classes.insert(Arc::clone(&internal)) {
+        for internal in hierarchy_order.iter() {
+            let Some(meta) = self.get_class(internal.as_ref()) else {
                 continue;
-            }
-
-            let meta = match self.get_class(&internal) {
-                Some(m) => m,
-                None => continue,
             };
 
             for method in &meta.methods {
@@ -413,71 +464,13 @@ impl IndexView {
                     fields.push(Arc::new(field.clone()));
                 }
             }
-
-            if let Some(ref super_name) = meta.super_name
-                && !super_name.is_empty()
-            {
-                queue.push_back(super_name.clone());
-            }
-            for iface in &meta.interfaces {
-                if !iface.is_empty() {
-                    queue.push_back(Arc::clone(iface));
-                }
-            }
         }
-        let cached = Arc::new(InheritedMembers {
-            methods: methods.clone(),
-            fields: fields.clone(),
-        });
-        self.caches
-            .inherited_members
-            .insert(Arc::from(class_internal), cached);
         (methods, fields)
     }
 
     pub fn mro(&self, class_internal: &str) -> Vec<Arc<ClassMetadata>> {
-        if let Some(cached) = self.caches.mro.get(class_internal) {
-            return cached.as_ref().clone();
-        }
-
-        let mut result = Vec::new();
-        let mut seen: std::collections::HashSet<Arc<str>> = std::collections::HashSet::new();
-        let mut seen_methods: FxHashSet<(Arc<str>, Arc<str>)> = Default::default();
-        let mut seen_fields: FxHashSet<Arc<str>> = Default::default();
-        let mut queue: VecDeque<Arc<str>> = VecDeque::new();
-
-        queue.push_back(Arc::from(class_internal));
-        while let Some(internal) = queue.pop_front() {
-            if !seen.insert(internal.clone()) {
-                continue;
-            }
-            let meta = match self.get_class(&internal) {
-                Some(m) => m,
-                None => continue,
-            };
-            if let Some(ref super_name) = meta.super_name
-                && !super_name.is_empty()
-            {
-                queue.push_back(super_name.clone());
-            }
-            for iface in &meta.interfaces {
-                if !iface.is_empty() {
-                    queue.push_back(iface.clone());
-                }
-            }
-            let mut projected = (*meta).clone();
-            projected
-                .methods
-                .retain(|m| seen_methods.insert(Self::method_shadow_key(m)));
-            projected
-                .fields
-                .retain(|f| seen_fields.insert(Arc::clone(&f.name)));
-            result.push(Arc::new(projected));
-        }
-        self.caches
-            .mro
-            .insert(Arc::from(class_internal), Arc::new(result.clone()));
-        result
+        let hierarchy_order = self.hierarchy_order(class_internal);
+        self.project_hierarchy_classes(hierarchy_order.as_ref())
     }
 
     pub fn lookup_methods_in_hierarchy(
@@ -526,9 +519,10 @@ impl IndexView {
         class_internal: &str,
         simple_name: &str,
     ) -> Option<Arc<ClassMetadata>> {
-        for owner in self.mro(class_internal) {
+        let hierarchy_order = self.hierarchy_order(class_internal);
+        for owner_internal in hierarchy_order.iter() {
             if let Some(inner) =
-                self.resolve_direct_inner_class(owner.internal_name.as_ref(), simple_name)
+                self.resolve_direct_inner_class(owner_internal.as_ref(), simple_name)
             {
                 return Some(inner);
             }
@@ -548,19 +542,26 @@ impl IndexView {
             Arc::from(method_desc),
         );
         if let Some(cached) = self.caches.declaring_method_owner.get(&key) {
-            return cached.clone();
+            return cached
+                .clone()
+                .and_then(|owner_internal| self.get_class(&owner_internal));
         }
 
-        let owner = self.mro(class_internal).into_iter().find(|class| {
+        let hierarchy_order = self.hierarchy_order(class_internal);
+        let owner_internal = hierarchy_order.iter().find_map(|internal| {
+            let class = self.get_class(internal.as_ref())?;
             class
                 .methods
                 .iter()
-                .any(|m| m.name.as_ref() == method_name && m.desc().as_ref() == method_desc)
+                .any(|method| {
+                    method.name.as_ref() == method_name && method.desc().as_ref() == method_desc
+                })
+                .then(|| Arc::clone(&class.internal_name))
         });
         self.caches
             .declaring_method_owner
-            .insert(key, owner.clone());
-        owner
+            .insert(key, owner_internal.clone());
+        owner_internal.and_then(|owner_internal| self.get_class(&owner_internal))
     }
 
     pub fn get_unique_class_by_simple_name(&self, simple_name: &str) -> Option<Arc<ClassMetadata>> {
@@ -609,11 +610,11 @@ impl IndexView {
     }
 
     pub fn iter_all_classes(&self) -> Vec<Arc<ClassMetadata>> {
-        self.caches
+        let all_classes = self
+            .caches
             .all_classes
-            .get_or_init(|| Arc::new(self.merge_classes(|layer| layer.iter_all_classes())))
-            .as_ref()
-            .clone()
+            .get_or_init(|| Arc::new(self.merge_class_internals(|layer| layer.iter_all_classes())));
+        self.resolve_class_internals(all_classes.as_ref())
     }
 
     pub fn build_name_table(&self) -> Arc<NameTable> {
