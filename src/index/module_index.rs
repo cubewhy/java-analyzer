@@ -5,16 +5,22 @@ use parking_lot::RwLock;
 
 use crate::build_integration::SourceRootId;
 use crate::index::scope::{ClasspathId, ModuleId};
-use crate::index::{BucketIndex, ClassMetadata, ClassOrigin};
+use crate::index::{ArtifactId, BucketIndex, ClassMetadata, ClassOrigin};
+
+#[derive(Clone)]
+pub enum ClasspathEntry {
+    Artifact(ArtifactId),
+    Overlay(Arc<BucketIndex>),
+}
 
 pub struct ClasspathIndex {
     pub jars: Vec<Arc<str>>,
-    pub buckets: Vec<Arc<BucketIndex>>,
+    pub entries: Vec<ClasspathEntry>,
 }
 
 impl ClasspathIndex {
-    fn new(jars: Vec<Arc<str>>, buckets: Vec<Arc<BucketIndex>>) -> Self {
-        Self { jars, buckets }
+    fn new(jars: Vec<Arc<str>>, entries: Vec<ClasspathEntry>) -> Self {
+        Self { jars, entries }
     }
 }
 
@@ -146,12 +152,12 @@ impl ModuleIndex {
         &self,
         id: ClasspathId,
         jars: Vec<Arc<str>>,
-        buckets: Vec<Arc<BucketIndex>>,
+        entries: Vec<ClasspathEntry>,
     ) {
         let mut state = self.state.write();
         state
             .classpaths
-            .insert(id, ClasspathIndex::new(jars, buckets));
+            .insert(id, ClasspathIndex::new(jars, entries));
     }
 
     pub fn add_classpath_bucket(&self, id: ClasspathId, bucket: Arc<BucketIndex>) {
@@ -160,19 +166,19 @@ impl ModuleIndex {
             .classpaths
             .entry(id)
             .or_insert_with(|| ClasspathIndex::new(Vec::new(), Vec::new()));
-        entry.buckets.push(bucket);
+        entry.entries.push(ClasspathEntry::Overlay(bucket));
     }
 
     pub fn set_active_classpath(&self, id: ClasspathId) {
         self.state.write().active_classpath = id;
     }
 
-    pub fn active_classpath_layers(&self) -> Vec<Arc<BucketIndex>> {
+    pub fn active_classpath_entries(&self) -> Vec<ClasspathEntry> {
         let state = self.state.read();
         state
             .classpaths
             .get(&state.active_classpath)
-            .map(|cp| cp.buckets.clone())
+            .map(|cp| cp.entries.clone())
             .unwrap_or_default()
     }
 
@@ -254,12 +260,12 @@ impl ModuleIndex {
         packages.into_iter().collect()
     }
 
-    pub fn classpath_layers(&self, id: ClasspathId) -> Vec<Arc<BucketIndex>> {
+    pub fn classpath_entries(&self, id: ClasspathId) -> Vec<ClasspathEntry> {
         let state = self.state.read();
         state
             .classpaths
             .get(&id)
-            .map(|cp| cp.buckets.clone())
+            .map(|cp| cp.entries.clone())
             .unwrap_or_default()
     }
 
@@ -281,14 +287,20 @@ impl ModuleIndex {
             .collect()
     }
 
-    pub(crate) fn all_bucket_refs(&self) -> Vec<Arc<BucketIndex>> {
+    pub(crate) fn all_overlay_bucket_refs(&self) -> Vec<Arc<BucketIndex>> {
         let state = self.state.read();
         let mut buckets = Vec::with_capacity(
             1 + state.source_roots.len()
                 + state
                     .classpaths
                     .values()
-                    .map(|classpath| classpath.buckets.len())
+                    .map(|classpath| {
+                        classpath
+                            .entries
+                            .iter()
+                            .filter(|entry| matches!(entry, ClasspathEntry::Overlay(_)))
+                            .count()
+                    })
                     .sum::<usize>(),
         );
         buckets.push(Arc::clone(&self.source));
@@ -299,7 +311,10 @@ impl ModuleIndex {
                 .map(|root| Arc::clone(&root.bucket)),
         );
         for classpath in state.classpaths.values() {
-            buckets.extend(classpath.buckets.iter().cloned());
+            buckets.extend(classpath.entries.iter().filter_map(|entry| match entry {
+                ClasspathEntry::Artifact(_) => None,
+                ClasspathEntry::Overlay(bucket) => Some(Arc::clone(bucket)),
+            }));
         }
         buckets
     }
@@ -322,8 +337,10 @@ impl ModuleIndex {
             root.bucket.clear_query_caches();
         }
         for classpath in state.classpaths.values() {
-            for bucket in &classpath.buckets {
-                bucket.clear_query_caches();
+            for entry in &classpath.entries {
+                if let ClasspathEntry::Overlay(bucket) = entry {
+                    bucket.clear_query_caches();
+                }
             }
         }
     }

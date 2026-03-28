@@ -11,14 +11,16 @@ use tower_lsp::lsp_types::Url;
 use tracing::info;
 
 use crate::build_integration::{SourceRootId, WorkspaceModelSnapshot, WorkspaceRootKind};
+use crate::index::cache;
 use crate::index::codebase::{
     SourceScanMode, collect_source_files, collect_source_files_for_root, load_source_inputs,
     should_index_source_path,
 };
 use crate::index::incremental::{SourceTextInput, prepare_source_inputs};
 use crate::index::{
-    ClassMetadata, ClassOrigin, ClasspathId, IndexScope, IndexedArchiveData, IndexedJavaModule,
-    ModuleId, WorkspaceIndex, WorkspaceIndexHandle,
+    ArtifactKind, ArtifactMetadata, ClassMetadata, ClassOrigin, ClasspathId, IndexScope,
+    IndexedArchiveData, IndexedJavaModule, ModuleId, StoredArtifact, WorkspaceIndex,
+    WorkspaceIndexHandle,
 };
 use crate::language::Language;
 use crate::language::java::module_info::JavaModuleDescriptor;
@@ -167,6 +169,23 @@ pub(crate) enum JavaModuleTarget {
     Bytecode { module: Arc<IndexedJavaModule> },
 }
 
+#[derive(Debug, Clone)]
+struct ActiveJdkArtifact {
+    metadata: ArtifactMetadata,
+    class_count: usize,
+    module_count: usize,
+}
+
+impl ActiveJdkArtifact {
+    fn from_stored(artifact: &StoredArtifact) -> Self {
+        Self {
+            metadata: artifact.metadata.clone(),
+            class_count: artifact.data.classes.len(),
+            module_count: artifact.data.modules.len(),
+        }
+    }
+}
+
 pub struct Workspace {
     pub documents: DocumentStore,
     /// Published workspace state. Reads load the current index snapshot, and
@@ -185,8 +204,7 @@ pub struct Workspace {
     /// Keyed by content hash, automatically invalidated when content changes
     semantic_cache: Arc<parking_lot::RwLock<SemanticCache>>,
     java_modules: Arc<parking_lot::RwLock<JavaModuleRegistry>>,
-    jdk_classes: RwLock<Vec<ClassMetadata>>,
-    jdk_modules: RwLock<Vec<IndexedJavaModule>>,
+    active_jdk: RwLock<Option<ActiveJdkArtifact>>,
     full_reindex_in_progress: Arc<AtomicUsize>,
     full_reindex_serial: Arc<AtomicUsize>,
     watched_roots_tx: watch::Sender<Vec<WatchedSourceRoot>>,
@@ -271,8 +289,7 @@ impl Workspace {
             workspace_root: Arc::new(parking_lot::RwLock::new(None)),
             semantic_cache: Arc::new(parking_lot::RwLock::new(SemanticCache::default())),
             java_modules: Arc::new(parking_lot::RwLock::new(JavaModuleRegistry::default())),
-            jdk_classes: RwLock::new(Vec::new()),
-            jdk_modules: RwLock::new(Vec::new()),
+            active_jdk: RwLock::new(None),
             full_reindex_in_progress: Arc::new(AtomicUsize::new(0)),
             full_reindex_serial: Arc::new(AtomicUsize::new(0)),
             watched_roots_tx,
@@ -542,8 +559,20 @@ impl Workspace {
             db.cache_stats()
         };
         let index_stats = self.index.load().memory_stats();
-        let jdk_class_count = self.jdk_classes.read().await.len();
-        let jdk_module_count = self.jdk_modules.read().await.len();
+        let active_jdk = self.active_jdk.read().await.clone();
+        let active_jdk_artifact = usize::from(active_jdk.is_some());
+        let active_jdk_byte_len = active_jdk
+            .as_ref()
+            .map(|artifact| artifact.metadata.byte_len)
+            .unwrap_or_default();
+        let active_jdk_class_count = active_jdk
+            .as_ref()
+            .map(|artifact| artifact.class_count)
+            .unwrap_or_default();
+        let active_jdk_module_count = active_jdk
+            .as_ref()
+            .map(|artifact| artifact.module_count)
+            .unwrap_or_default();
         let interned_string_count = crate::index::intern_pool_len();
 
         format!(
@@ -569,6 +598,7 @@ impl Workspace {
                 "salsa.extracted_classes={extracted_class_count}\n",
                 "index.modules={index_modules}\n",
                 "index.jar_cache_entries={jar_cache_entries}\n",
+                "index.artifact_projection_entries={artifact_projection_entries}\n",
                 "index.scope_cache_entries={scope_cache_entries}\n",
                 "index.classpath_jar_refs={classpath_jar_refs}\n",
                 "index.unique_buckets={unique_bucket_count}\n",
@@ -580,8 +610,10 @@ impl Workspace {
                 "index.owner_entries={index_owner_entry_count}\n",
                 "index.name_table_entries={index_name_table_entries}\n",
                 "index.mro_cache_entries={index_mro_cache_entries}\n",
-                "index.jdk_classes_cloned={jdk_class_count}\n",
-                "index.jdk_modules_cloned={jdk_module_count}\n",
+                "index.active_jdk_artifact={active_jdk_artifact}\n",
+                "index.active_jdk_bytes={active_jdk_byte_len}\n",
+                "index.active_jdk_classes={active_jdk_class_count}\n",
+                "index.active_jdk_modules={active_jdk_module_count}\n",
                 "interned_strings={interned_string_count}\n"
             ),
             open_documents = document_stats.open_document_count,
@@ -606,6 +638,7 @@ impl Workspace {
             extracted_class_count = salsa_cache_stats.extracted_class_count,
             index_modules = index_stats.module_count,
             jar_cache_entries = index_stats.jar_cache_entries,
+            artifact_projection_entries = index_stats.artifact_projection_entries,
             scope_cache_entries = index_stats.scope_cache_entries,
             classpath_jar_refs = index_stats.classpath_jar_refs,
             unique_bucket_count = index_stats.unique_bucket_count,
@@ -617,8 +650,10 @@ impl Workspace {
             index_owner_entry_count = index_stats.owner_entry_count,
             index_name_table_entries = index_stats.name_table_entries,
             index_mro_cache_entries = index_stats.mro_cache_entries,
-            jdk_class_count = jdk_class_count,
-            jdk_module_count = jdk_module_count,
+            active_jdk_artifact = active_jdk_artifact,
+            active_jdk_byte_len = active_jdk_byte_len,
+            active_jdk_class_count = active_jdk_class_count,
+            active_jdk_module_count = active_jdk_module_count,
             interned_string_count = interned_string_count,
         )
     }
@@ -664,22 +699,41 @@ impl Workspace {
     }
 
     pub async fn set_jdk_classes(&self, classes: Vec<ClassMetadata>) {
-        *self.jdk_classes.write().await = classes.clone();
-        self.jdk_modules.write().await.clear();
-        self.index.update(|index| index.add_jdk_classes(classes));
+        self.set_jdk_archive(IndexedArchiveData {
+            classes,
+            modules: Vec::new(),
+        })
+        .await;
     }
 
     pub async fn set_jdk_archive(&self, data: IndexedArchiveData) {
-        *self.jdk_classes.write().await = data.classes.clone();
-        *self.jdk_modules.write().await = data.modules.clone();
-        self.index.update(|index| index.add_jdk_archive(data));
+        match cache::store_generated_artifact(
+            "workspace://active-jdk",
+            ArtifactKind::Unknown,
+            &data,
+        ) {
+            Some(artifact) => self.set_jdk_artifact(artifact).await,
+            None => {
+                tracing::warn!(
+                    "failed to persist active JDK artifact, falling back to in-memory activation"
+                );
+                *self.active_jdk.write().await = None;
+                self.index.update(|index| index.add_jdk_archive(data));
+            }
+        }
+    }
+
+    pub async fn set_jdk_artifact(&self, artifact: StoredArtifact) {
+        let active = ActiveJdkArtifact::from_stored(&artifact);
+        *self.active_jdk.write().await = Some(active.clone());
+        self.index
+            .update(|index| index.set_jdk_artifact(active.metadata.id));
     }
 
     pub async fn apply_workspace_model(&self, snapshot: WorkspaceModelSnapshot) -> Result<()> {
         let _reindex_guard = self.begin_full_reindex();
         self.set_workspace_root(snapshot.root.path.clone());
-        let jdk_classes = self.jdk_classes.read().await.clone();
-        let jdk_modules = self.jdk_modules.read().await.clone();
+        let active_jdk = self.active_jdk.read().await.clone();
         let open_doc_overlays = self
             .documents
             .snapshot_documents()
@@ -741,11 +795,8 @@ impl Workspace {
         .await?;
 
         let new_index = WorkspaceIndex::new();
-        if !jdk_classes.is_empty() || !jdk_modules.is_empty() {
-            new_index.add_jdk_archive(IndexedArchiveData {
-                classes: jdk_classes,
-                modules: jdk_modules,
-            });
+        if let Some(active_jdk) = active_jdk.as_ref() {
+            new_index.set_jdk_artifact(active_jdk.metadata.id);
         }
 
         for module in &snapshot.modules {
@@ -956,13 +1007,8 @@ impl Workspace {
             module: ModuleId::ROOT,
         };
         let index = WorkspaceIndex::new();
-        let jdk_classes = self.jdk_classes.read().await.clone();
-        let jdk_modules = self.jdk_modules.read().await.clone();
-        if !jdk_classes.is_empty() || !jdk_modules.is_empty() {
-            index.add_jdk_archive(IndexedArchiveData {
-                classes: jdk_classes,
-                modules: jdk_modules,
-            });
+        if let Some(active_jdk) = self.active_jdk.read().await.clone() {
+            index.set_jdk_artifact(active_jdk.metadata.id);
         }
         let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
             std::collections::HashMap::new();

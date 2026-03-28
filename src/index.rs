@@ -41,11 +41,12 @@ pub use archive_stub::ArchiveClassStub;
 pub use bucket::BucketIndex;
 pub use handle::WorkspaceIndexHandle;
 pub use module_graph::ModuleGraph;
-pub use module_index::{ClasspathIndex, ModuleIndex, ModuleQueryCache};
+pub use module_index::{ClasspathEntry, ClasspathIndex, ModuleIndex, ModuleQueryCache};
 pub use scope::{ClasspathId, IndexScope, ModuleId};
 pub use scope_snapshot::{AnalysisContextKey, ScopeSnapshot};
 pub use store::{
-    ArtifactId, ArtifactKind, ArtifactMetadata, ArtifactSource, IndexStore, LmdbIndexStore,
+    ArtifactId, ArtifactKind, ArtifactMetadata, ArtifactSource, ArtifactStore, IndexStore,
+    LmdbIndexStore, StoredArtifact,
 };
 pub use view::IndexView;
 pub use workspace_index::WorkspaceIndex;

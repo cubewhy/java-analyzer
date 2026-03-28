@@ -5,14 +5,15 @@ use tracing::{debug, warn};
 
 use crate::index::IndexedArchiveData;
 use crate::index::store::{
-    ArtifactKind, ArtifactSource, ArtifactStore, LmdbIndexStore, shared_store_root,
+    ArtifactId, ArtifactKind, ArtifactSource, ArtifactStore, LmdbIndexStore, StoredArtifact,
+    fingerprint_archive_data, shared_store_root,
 };
 
 pub fn cache_dir() -> Option<PathBuf> {
     shared_store_root()
 }
 
-fn shared_store() -> Option<&'static LmdbIndexStore> {
+pub(crate) fn shared_store() -> Option<&'static LmdbIndexStore> {
     static STORE: OnceLock<Option<LmdbIndexStore>> = OnceLock::new();
 
     STORE
@@ -30,6 +31,10 @@ fn shared_store() -> Option<&'static LmdbIndexStore> {
 }
 
 pub fn load_cached(source_path: &Path) -> Option<IndexedArchiveData> {
+    load_cached_artifact(source_path).map(|artifact| artifact.data)
+}
+
+pub fn load_cached_artifact(source_path: &Path) -> Option<StoredArtifact> {
     let source = ArtifactSource::from_path(source_path, detect_artifact_kind(source_path)).ok()?;
     let store = shared_store()?;
     let loaded = store.load_artifact(&source).ok()?;
@@ -41,26 +46,83 @@ pub fn load_cached(source_path: &Path) -> Option<IndexedArchiveData> {
             module_count = artifact.data.modules.len(),
             "loaded artifact from LMDB index store"
         );
-        return Some(artifact.data);
+        return Some(artifact);
     }
     None
 }
 
 pub fn save_cache(source_path: &Path, data: &IndexedArchiveData) {
+    let _ = save_cached_artifact(source_path, data);
+}
+
+pub fn save_cached_artifact(
+    source_path: &Path,
+    data: &IndexedArchiveData,
+) -> Option<StoredArtifact> {
     let Some(store) = shared_store() else {
-        return;
+        return None;
     };
     let Ok(source) = ArtifactSource::from_path(source_path, detect_artifact_kind(source_path))
     else {
-        return;
+        return None;
     };
 
-    if let Err(err) = store.store_artifact(&source, data) {
-        warn!(
-            path = %source_path.display(),
-            error = %err,
-            "failed to persist artifact into LMDB index store"
-        );
+    match store.store_artifact(&source, data) {
+        Ok(artifact) => Some(artifact),
+        Err(err) => {
+            warn!(
+                path = %source_path.display(),
+                error = %err,
+                "failed to persist artifact into LMDB index store"
+            );
+            None
+        }
+    }
+}
+
+pub fn load_artifact_by_id(id: ArtifactId) -> Option<StoredArtifact> {
+    let store = shared_store()?;
+    match store.load_artifact_by_id(id) {
+        Ok(artifact) => artifact,
+        Err(err) => {
+            warn!(artifact_id = id.0, error = %err, "failed to load artifact by id");
+            None
+        }
+    }
+}
+
+pub fn store_generated_artifact(
+    source_name: &str,
+    kind: ArtifactKind,
+    data: &IndexedArchiveData,
+) -> Option<StoredArtifact> {
+    let Some(store) = shared_store() else {
+        return None;
+    };
+    let fingerprint = match fingerprint_archive_data(data) {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            warn!(
+                source = source_name,
+                error = %err,
+                "failed to fingerprint generated artifact payload"
+            );
+            return None;
+        }
+    };
+    let source = ArtifactSource::synthetic(source_name, kind, fingerprint);
+
+    match store.store_artifact(&source, data) {
+        Ok(artifact) => Some(artifact),
+        Err(err) => {
+            warn!(
+                source = source_name,
+                kind = ?kind,
+                error = %err,
+                "failed to persist generated artifact into LMDB index store"
+            );
+            None
+        }
     }
 }
 

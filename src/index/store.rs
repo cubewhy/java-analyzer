@@ -40,6 +40,18 @@ impl ArtifactSource {
             fingerprint: fingerprint_path(path)?,
         })
     }
+
+    pub fn synthetic(
+        source_path: impl Into<PathBuf>,
+        kind: ArtifactKind,
+        fingerprint: ArtifactFingerprint,
+    ) -> Self {
+        Self {
+            source_path: source_path.into(),
+            kind,
+            fingerprint,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,11 +77,16 @@ pub trait IndexStore: Send + Sync {
 
 pub trait ArtifactStore: IndexStore {
     fn load_artifact(&self, source: &ArtifactSource) -> Result<Option<StoredArtifact>>;
+    fn load_artifact_by_id(&self, id: ArtifactId) -> Result<Option<StoredArtifact>>;
     fn store_artifact(
         &self,
         source: &ArtifactSource,
         data: &IndexedArchiveData,
     ) -> Result<StoredArtifact>;
+}
+
+pub fn fingerprint_archive_data(data: &IndexedArchiveData) -> Result<ArtifactFingerprint> {
+    artifact::fingerprint_payload(data)
 }
 
 fn fingerprint_path(path: &Path) -> Result<ArtifactFingerprint> {

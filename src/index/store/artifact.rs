@@ -3,7 +3,7 @@ use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 
 use crate::index::{ArchiveClassStub, IndexedArchiveData, IndexedJavaModule};
 
-use super::{ArtifactId, ArtifactKind, ArtifactMetadata};
+use super::{ArtifactFingerprint, ArtifactId, ArtifactKind, ArtifactMetadata};
 
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Debug, Clone, PartialEq, Eq)]
 #[archive(check_bytes)]
@@ -125,4 +125,18 @@ pub(crate) fn serialize_payload(payload: &ArtifactPayloadV1) -> Result<Vec<u8>> 
 pub(crate) fn deserialize_payload(bytes: &[u8]) -> Result<ArtifactPayloadV1> {
     rkyv::from_bytes::<ArtifactPayloadV1>(bytes)
         .map_err(|err| anyhow::anyhow!("deserialize artifact payload: {err:?}"))
+}
+
+pub(crate) fn fingerprint_payload(data: &IndexedArchiveData) -> Result<ArtifactFingerprint> {
+    use std::hash::Hasher;
+
+    let payload = ArtifactPayloadV1::from(data);
+    let bytes = serialize_payload(&payload)?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(bytes.as_ref());
+
+    Ok(ArtifactFingerprint {
+        content_hash: hasher.finish(),
+        byte_len: bytes.len() as u64,
+    })
 }

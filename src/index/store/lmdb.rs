@@ -234,6 +234,11 @@ impl ArtifactStore for LmdbIndexStore {
         }
     }
 
+    fn load_artifact_by_id(&self, id: ArtifactId) -> Result<Option<StoredArtifact>> {
+        let rtxn = self.env.read_txn().context("open LMDB read txn")?;
+        self.load_by_id_read(&rtxn, id)
+    }
+
     fn store_artifact(
         &self,
         source: &ArtifactSource,

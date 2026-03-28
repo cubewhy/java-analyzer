@@ -11,15 +11,16 @@ use smallvec::SmallVec;
 use crate::build_integration::SourceRootId;
 use crate::index::view::IndexView;
 use crate::index::{
-    AnalysisContextKey, BucketIndex, ClassMetadata, ClassOrigin, ClasspathId, IndexScope,
-    IndexedArchiveData, IndexedJavaModule, ModuleGraph, ModuleId, ModuleIndex, NameTable,
-    ScopeSnapshot, index_jar,
+    AnalysisContextKey, ArtifactId, BucketIndex, ClassMetadata, ClassOrigin, ClasspathEntry,
+    ClasspathId, IndexScope, IndexedArchiveData, IndexedJavaModule, ModuleGraph, ModuleId,
+    ModuleIndex, NameTable, ScopeSnapshot, cache, index_jar,
 };
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorkspaceIndexStats {
     pub module_count: usize,
     pub jar_cache_entries: usize,
+    pub artifact_projection_entries: usize,
     pub scope_cache_entries: usize,
     pub classpath_jar_refs: usize,
     pub unique_bucket_count: usize,
@@ -33,10 +34,17 @@ pub(crate) struct WorkspaceIndexStats {
     pub mro_cache_entries: usize,
 }
 
+#[derive(Default)]
+struct JdkIndexState {
+    overlay: Option<Arc<BucketIndex>>,
+    artifact_id: Option<ArtifactId>,
+}
+
 pub struct WorkspaceIndex {
     modules: DashMap<ModuleId, Arc<ModuleIndex>>,
-    jdk: Arc<BucketIndex>,
-    jar_cache: DashMap<Arc<str>, Arc<BucketIndex>>,
+    jdk: RwLock<JdkIndexState>,
+    jar_cache: DashMap<Arc<str>, ClasspathEntry>,
+    artifact_projection_cache: DashMap<ArtifactId, Arc<BucketIndex>>,
     scope_cache: DashMap<AnalysisContextKey, (u64, Arc<ScopeSnapshot>)>,
     graph: RwLock<ModuleGraph>,
     /// Version counter that increments on every mutation
@@ -51,8 +59,9 @@ impl WorkspaceIndex {
         modules.insert(ModuleId::ROOT, root);
         Self {
             modules,
-            jdk: Arc::new(BucketIndex::new()),
+            jdk: RwLock::new(JdkIndexState::default()),
             jar_cache: DashMap::new(),
+            artifact_projection_cache: DashMap::new(),
             scope_cache: DashMap::new(),
             graph: RwLock::new(ModuleGraph::new()),
             version: AtomicU64::new(0),
@@ -72,6 +81,12 @@ impl WorkspaceIndex {
 
     fn invalidate_analysis_caches(&self) {
         self.scope_cache.clear();
+        self.increment_version();
+    }
+
+    fn invalidate_dependency_caches(&self) {
+        self.scope_cache.clear();
+        self.artifact_projection_cache.clear();
         self.increment_version();
     }
 
@@ -139,14 +154,32 @@ impl WorkspaceIndex {
     }
 
     pub fn add_jdk_classes(&self, classes: Vec<ClassMetadata>) {
-        self.jdk.add_archive_classes(classes);
-        self.invalidate_analysis_caches();
+        let bucket = Arc::new(BucketIndex::new());
+        bucket.add_archive_classes(classes);
+        *self.jdk.write() = JdkIndexState {
+            overlay: Some(bucket),
+            artifact_id: None,
+        };
+        self.invalidate_dependency_caches();
     }
 
     pub fn add_jdk_archive(&self, data: IndexedArchiveData) {
-        self.jdk.add_archive_classes(data.classes);
-        self.jdk.add_modules(data.modules);
-        self.invalidate_analysis_caches();
+        let bucket = Arc::new(BucketIndex::new());
+        bucket.add_archive_classes(data.classes);
+        bucket.add_modules(data.modules);
+        *self.jdk.write() = JdkIndexState {
+            overlay: Some(bucket),
+            artifact_id: None,
+        };
+        self.invalidate_dependency_caches();
+    }
+
+    pub fn set_jdk_artifact(&self, artifact_id: ArtifactId) {
+        *self.jdk.write() = JdkIndexState {
+            overlay: None,
+            artifact_id: Some(artifact_id),
+        };
+        self.invalidate_dependency_caches();
     }
 
     pub fn add_jar_classes(&self, scope: IndexScope, classes: Vec<ClassMetadata>) {
@@ -157,25 +190,33 @@ impl WorkspaceIndex {
         self.invalidate_analysis_caches();
     }
 
-    pub fn get_or_index_jar(&self, path: Arc<str>) -> Arc<BucketIndex> {
+    pub fn get_or_index_jar(&self, path: Arc<str>) -> ClasspathEntry {
         if let Some(existing) = self.jar_cache.get(&path) {
-            return Arc::clone(existing.value());
+            return existing.value().clone();
         }
 
-        let bucket = Arc::new(BucketIndex::new());
-        match index_jar(Path::new(path.as_ref())) {
-            Ok(data) => {
-                bucket.add_archive_classes(data.classes);
-                bucket.add_modules(data.modules);
-            }
-            Err(err) => {
-                tracing::warn!(path = path.as_ref(), error = %err, "failed to index jar");
-            }
-        }
+        let resolved = match cache::load_cached_artifact(Path::new(path.as_ref())) {
+            Some(artifact) => ClasspathEntry::Artifact(artifact.metadata.id),
+            None => match index_jar(Path::new(path.as_ref())) {
+                Ok(data) => match cache::save_cached_artifact(Path::new(path.as_ref()), &data) {
+                    Some(artifact) => ClasspathEntry::Artifact(artifact.metadata.id),
+                    None => {
+                        tracing::warn!(
+                            path = path.as_ref(),
+                            "failed to persist jar artifact, falling back to in-memory bucket"
+                        );
+                        ClasspathEntry::Overlay(Self::bucket_from_archive_data(data))
+                    }
+                },
+                Err(err) => {
+                    tracing::warn!(path = path.as_ref(), error = %err, "failed to index jar");
+                    ClasspathEntry::Overlay(Arc::new(BucketIndex::new()))
+                }
+            },
+        };
 
-        self.jar_cache
-            .insert(Arc::clone(&path), Arc::clone(&bucket));
-        bucket
+        self.jar_cache.insert(Arc::clone(&path), resolved.clone());
+        resolved
     }
 
     pub fn set_module_classpath(
@@ -184,13 +225,13 @@ impl WorkspaceIndex {
         classpath_id: ClasspathId,
         jar_paths: Vec<Arc<str>>,
     ) {
-        let buckets = jar_paths
+        let entries = jar_paths
             .iter()
             .map(|p| self.get_or_index_jar(Arc::clone(p)))
             .collect();
         let module = self.ensure_module(module, default_module_name(module));
-        module.set_classpath(classpath_id, jar_paths, buckets);
-        self.invalidate_analysis_caches();
+        module.set_classpath(classpath_id, jar_paths, entries);
+        self.invalidate_dependency_caches();
     }
 
     pub fn set_module_dependencies(&self, module: ModuleId, deps: Vec<ModuleId>) {
@@ -348,6 +389,7 @@ impl WorkspaceIndex {
         let mut stats = WorkspaceIndexStats {
             module_count: self.modules.len(),
             jar_cache_entries: self.jar_cache.len(),
+            artifact_projection_entries: self.artifact_projection_cache.len(),
             scope_cache_entries: self.scope_cache.len(),
             ..WorkspaceIndexStats::default()
         };
@@ -371,18 +413,26 @@ impl WorkspaceIndex {
             stats.mro_cache_entries += bucket_stats.mro_cache_entries;
         };
 
-        accumulate_bucket(Arc::clone(&self.jdk));
+        if let Some(bucket) = self.jdk.read().overlay.as_ref() {
+            accumulate_bucket(Arc::clone(bucket));
+        }
 
         for module in &self.modules {
             let module = module.value();
             stats.classpath_jar_refs += module.classpath_jar_count();
-            for bucket in module.all_bucket_refs() {
+            for bucket in module.all_overlay_bucket_refs() {
                 accumulate_bucket(bucket);
             }
         }
 
-        for bucket in &self.jar_cache {
+        for bucket in &self.artifact_projection_cache {
             accumulate_bucket(Arc::clone(bucket.value()));
+        }
+
+        for cached in &self.jar_cache {
+            if let ClasspathEntry::Overlay(bucket) = cached.value() {
+                accumulate_bucket(Arc::clone(bucket));
+            }
         }
 
         stats
@@ -390,14 +440,14 @@ impl WorkspaceIndex {
 
     pub(crate) fn clear_analysis_caches(&self) {
         self.scope_cache.clear();
-        self.jdk.clear_query_caches();
+        self.artifact_projection_cache.clear();
+
+        if let Some(bucket) = self.jdk.read().overlay.as_ref() {
+            bucket.clear_query_caches();
+        }
 
         for module in &self.modules {
             module.value().clear_query_caches();
-        }
-
-        for bucket in &self.jar_cache {
-            bucket.value().clear_query_caches();
         }
     }
 
@@ -435,9 +485,7 @@ impl WorkspaceIndex {
         for bucket in module.visible_source_layers(classpath_id, source_root) {
             layers.push(bucket);
         }
-        for bucket in module.classpath_layers(classpath_id) {
-            layers.push(bucket);
-        }
+        self.extend_classpath_layers(&mut layers, &module.classpath_entries(classpath_id));
 
         let graph = self.graph.read();
         let mut queue: VecDeque<ModuleId> = VecDeque::new();
@@ -453,13 +501,14 @@ impl WorkspaceIndex {
             for bucket in dep_module.visible_source_layers(ClasspathId::Main, None) {
                 layers.push(bucket);
             }
-            for bucket in dep_module.classpath_layers(ClasspathId::Main) {
-                layers.push(bucket);
-            }
+            self.extend_classpath_layers(
+                &mut layers,
+                &dep_module.classpath_entries(ClasspathId::Main),
+            );
             queue.extend(graph.deps_of(dep).iter().copied());
         }
 
-        layers.push(Arc::clone(&self.jdk));
+        self.extend_jdk_layer(&mut layers);
         layers
     }
 
@@ -481,6 +530,55 @@ impl WorkspaceIndex {
 impl Default for WorkspaceIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl WorkspaceIndex {
+    fn bucket_from_archive_data(data: IndexedArchiveData) -> Arc<BucketIndex> {
+        let bucket = Arc::new(BucketIndex::new());
+        bucket.add_archive_classes(data.classes);
+        bucket.add_modules(data.modules);
+        bucket
+    }
+
+    fn project_artifact_bucket(&self, artifact_id: ArtifactId) -> Option<Arc<BucketIndex>> {
+        if let Some(existing) = self.artifact_projection_cache.get(&artifact_id) {
+            return Some(Arc::clone(existing.value()));
+        }
+
+        let stored = cache::load_artifact_by_id(artifact_id)?;
+        let bucket = Self::bucket_from_archive_data(stored.data);
+        self.artifact_projection_cache
+            .insert(artifact_id, Arc::clone(&bucket));
+        Some(bucket)
+    }
+
+    fn extend_classpath_layers(
+        &self,
+        layers: &mut SmallVec<Arc<BucketIndex>, 8>,
+        entries: &[ClasspathEntry],
+    ) {
+        for entry in entries {
+            match entry {
+                ClasspathEntry::Artifact(artifact_id) => {
+                    if let Some(bucket) = self.project_artifact_bucket(*artifact_id) {
+                        layers.push(bucket);
+                    }
+                }
+                ClasspathEntry::Overlay(bucket) => layers.push(Arc::clone(bucket)),
+            }
+        }
+    }
+
+    fn extend_jdk_layer(&self, layers: &mut SmallVec<Arc<BucketIndex>, 8>) {
+        let jdk = self.jdk.read();
+        if let Some(artifact_id) = jdk.artifact_id {
+            if let Some(bucket) = self.project_artifact_bucket(artifact_id) {
+                layers.push(bucket);
+            }
+        } else if let Some(bucket) = jdk.overlay.as_ref() {
+            layers.push(Arc::clone(bucket));
+        }
     }
 }
 
