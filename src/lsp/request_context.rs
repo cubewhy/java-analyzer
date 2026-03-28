@@ -147,6 +147,7 @@ impl<'a> PreparedRequest<'a> {
         }
 
         let origin = crate::index::ClassOrigin::SourceFile(Arc::from(uri.as_str()));
+        let overlay_started = Instant::now();
         let overlay_classes = {
             let db = workspace.salsa_db.lock();
             workspace.extract_salsa_classes_for_index_context(
@@ -157,6 +158,12 @@ impl<'a> PreparedRequest<'a> {
                 analysis,
             )
         };
+        request
+            .metrics()
+            .record_phase_duration("request_setup.overlay_classes", overlay_started.elapsed());
+        request
+            .metrics()
+            .record_event("request_setup.overlay_class_extract");
         let overlay_class_count = overlay_classes.len();
         let view = view.with_overlay_classes(overlay_classes);
         tracing::debug!(
@@ -236,6 +243,12 @@ impl<'a> PreparedRequest<'a> {
             workspace: Some(Arc::clone(&self.workspace)),
             file_uri: Some(Arc::from(self.uri.as_str())),
             request: Some(Arc::clone(&self.request)),
+            semantic_request_scope: Some(crate::language::SemanticRequestScope {
+                uri: self.uri.clone(),
+                document_version: self.file.version,
+                overlay_class_count: self.overlay_class_count,
+                request_analysis: self.request_analysis.clone(),
+            }),
         }
     }
 

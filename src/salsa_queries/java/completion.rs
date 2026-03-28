@@ -140,12 +140,6 @@ pub fn extract_java_semantic_context_at_offset(
     view: crate::index::IndexView,
     workspace: Option<&crate::workspace::Workspace>,
 ) -> Option<SemanticContext> {
-    let content = file.content(db);
-    if is_in_comment(content, offset.min(content.len())) {
-        return None;
-    }
-
-    let context = extract_java_completion_context_at_offset(db, file, offset, None);
     let analysis = RequestAnalysisState {
         analysis: workspace
             .map(|workspace| workspace.analysis_context_for_uri(file.file_id(db).uri()))
@@ -161,12 +155,29 @@ pub fn extract_java_semantic_context_at_offset(
             .unwrap_or_else(|| db.workspace_index().version()),
     };
 
+    extract_java_semantic_context_at_offset_with_analysis(db, file, offset, &analysis, workspace)
+}
+
+pub fn extract_java_semantic_context_at_offset_with_analysis(
+    db: &dyn Db,
+    file: SourceFile,
+    offset: usize,
+    analysis: &RequestAnalysisState,
+    workspace: Option<&crate::workspace::Workspace>,
+) -> Option<SemanticContext> {
+    let content = file.content(db);
+    if is_in_comment(content, offset.min(content.len())) {
+        return None;
+    }
+
+    let context = extract_java_completion_context_at_offset(db, file, offset, None);
+
     Some(build_java_semantic_context(
         db,
         file,
         context.as_ref().clone(),
         workspace,
-        &analysis,
+        analysis,
     ))
 }
 

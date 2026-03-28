@@ -389,6 +389,15 @@ pub struct ParseEnv {
     pub workspace: Option<Arc<crate::workspace::Workspace>>,
     pub file_uri: Option<Arc<str>>,
     pub request: Option<Arc<RequestContext>>,
+    pub semantic_request_scope: Option<SemanticRequestScope>,
+}
+
+#[derive(Clone)]
+pub struct SemanticRequestScope {
+    pub uri: tower_lsp::lsp_types::Url,
+    pub document_version: i32,
+    pub overlay_class_count: usize,
+    pub request_analysis: crate::salsa_queries::conversion::RequestAnalysisState,
 }
 
 impl ParseEnv {
@@ -621,6 +630,7 @@ pub(crate) mod test_helpers {
                     workspace: None,
                     file_uri: None,
                     request: None,
+                    semantic_request_scope: None,
                 },
             )
             .expect("java semantic context");

@@ -11,13 +11,14 @@ mod scope;
 pub use completion::{
     build_java_semantic_context, extract_java_completion_context,
     extract_java_completion_context_at_offset, extract_java_semantic_context_at_offset,
+    extract_java_semantic_context_at_offset_with_analysis,
     extract_java_semantic_context_from_source_at_offset,
 };
 pub use hints::{compute_java_inlay_hints, infer_java_variable_type};
 pub use indexing::{
     extract_java_imports, extract_java_module_descriptor, extract_java_package,
     extract_java_static_imports, extract_java_static_imports_from_source, parse_java_classes,
-    parse_java_classes_with_index_view,
+    parse_java_classes_for_analysis_context, parse_java_classes_with_index_view,
 };
 pub use resolve::{is_java_local_variable, resolve_java_symbol};
 pub use scope::{

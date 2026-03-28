@@ -21,6 +21,7 @@ use crate::index::{
 use crate::language::Language;
 use crate::language::java::module_info::JavaModuleDescriptor;
 use crate::salsa_db::{Database as SalsaDatabase, FileId};
+use crate::salsa_queries::Db;
 use crate::salsa_queries::semantic::CachedMethodLocal;
 use crate::semantic::context::CurrentClassMember;
 use document::DocumentStore;
@@ -1043,6 +1044,22 @@ impl Workspace {
         else {
             return crate::salsa_queries::index::get_extracted_classes(db, salsa_file);
         };
+
+        let live_index = db.workspace_index();
+        let can_use_live_salsa_context = std::ptr::eq(index, live_index.as_ref());
+
+        if salsa_file.language_id(db).as_ref() == "java" && can_use_live_salsa_context {
+            return crate::salsa_queries::java::parse_java_classes_for_analysis_context(
+                db,
+                salsa_file,
+                context.module,
+                context.classpath,
+                context.source_root,
+                index.version(),
+            )
+            .as_ref()
+            .clone();
+        }
 
         let view =
             index.view_for_analysis_context(context.module, context.classpath, context.source_root);

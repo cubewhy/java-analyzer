@@ -180,6 +180,7 @@ pub(crate) struct JavaSemanticRequestContext<'a> {
     salsa_file: Option<crate::salsa_db::SourceFile>,
     enricher: ContextEnricher<'a>,
     request: Option<Arc<RequestContext>>,
+    request_scope: Option<crate::language::SemanticRequestScope>,
     semantic_context_cache: RefCell<HashMap<usize, Option<SemanticContext>>>,
 }
 
@@ -190,8 +191,9 @@ impl<'a> JavaSemanticRequestContext<'a> {
         root: Node<'a>,
         view: &'a IndexView,
         request: Option<Arc<RequestContext>>,
+        request_scope: Option<crate::language::SemanticRequestScope>,
     ) -> Self {
-        Self::new_with_salsa(source, rope, root, view, request, None, None)
+        Self::new_with_salsa(source, rope, root, view, request, request_scope, None, None)
     }
 
     pub(crate) fn new_with_salsa(
@@ -200,6 +202,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
         root: Node<'a>,
         view: &'a IndexView,
         request: Option<Arc<RequestContext>>,
+        request_scope: Option<crate::language::SemanticRequestScope>,
         salsa_db: Option<&'a dyn crate::salsa_queries::Db>,
         salsa_file: Option<crate::salsa_db::SourceFile>,
     ) -> Self {
@@ -212,6 +215,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
             salsa_file,
             enricher: ContextEnricher::new(view),
             request,
+            request_scope,
             semantic_context_cache: RefCell::new(HashMap::new()),
         }
     }
@@ -307,48 +311,38 @@ impl<'a> JavaSemanticRequestContext<'a> {
         offset: usize,
     ) -> RequestResult<Option<SemanticContext>> {
         if let Some(cached) = self.semantic_context_cache.borrow().get(&offset).cloned() {
+            if let Some(metrics) = self.metrics() {
+                metrics.record_event("inlay.semantic_context.request_cache_hit");
+            }
             return Ok(cached);
         }
 
-        let (uri, document_version, cache_key) = {
-            let db = workspace.salsa_db.lock();
-            let uri = salsa_file.file_id(&*db).uri().clone();
-            let document_version = workspace.documents.with_doc(&uri, |doc| doc.version());
-            let analysis = workspace.analysis_context_for_uri(&uri);
-            let index_snapshot = workspace.index.load();
-            let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-            let overlay_class_count = if salsa_file.language_id(&*db).as_ref() == "java" {
-                workspace
-                    .extract_salsa_classes_for_index_context(
-                        &*db,
-                        salsa_file,
-                        &origin,
-                        index_snapshot.as_ref(),
-                        analysis,
-                    )
-                    .len()
-            } else {
-                0
-            };
-            let cache_key = document_version.map(|document_version| SemanticContextCacheKey {
-                document_version,
-                workspace_version: index_snapshot.version(),
-                module: analysis.module,
-                classpath: analysis.classpath,
-                source_root: analysis.source_root,
-                overlay_class_count,
-                offset,
-                trigger: None,
-            });
-            (uri, document_version, cache_key)
-        };
+        let prepared_cache = self.request_scope.as_ref().map(|scope| {
+            (
+                scope.uri.clone(),
+                scope.document_version,
+                SemanticContextCacheKey {
+                    document_version: scope.document_version,
+                    workspace_version: scope.request_analysis.workspace_version,
+                    module: scope.request_analysis.analysis.module,
+                    classpath: scope.request_analysis.analysis.classpath,
+                    source_root: scope.request_analysis.analysis.source_root,
+                    overlay_class_count: scope.overlay_class_count,
+                    offset,
+                    trigger: None,
+                },
+            )
+        });
 
-        if let Some(cache_key) = cache_key
+        if let Some((uri, _, cache_key)) = prepared_cache.as_ref()
             && let Some(cached) = workspace
                 .documents
-                .with_doc(&uri, |doc| doc.cached_semantic_context(&cache_key))
+                .with_doc(uri, |doc| doc.cached_semantic_context(cache_key))
                 .flatten()
         {
+            if let Some(metrics) = self.metrics() {
+                metrics.record_event("inlay.semantic_context.document_cache_hit");
+            }
             let mut ctx = (*cached).clone();
             let db = workspace.salsa_db.lock();
             if self.indexed_source_class_covers_file(
@@ -369,22 +363,18 @@ impl<'a> JavaSemanticRequestContext<'a> {
         self.check_cancelled("inlay.salsa_context.before_extract")?;
         if let Some(metrics) = self.metrics() {
             metrics.record_semantic_context_lookup("inlay_scope_context", offset);
+            metrics.record_event("inlay.semantic_context.build");
         }
         let db = workspace.salsa_db.lock();
-        let analysis = workspace.analysis_context_for_uri(&uri);
-        let origin = ClassOrigin::SourceFile(Arc::from(uri.as_str()));
-        let overlay_classes = if salsa_file.language_id(&*db).as_ref() == "java" {
-            workspace.extract_salsa_classes_for_index_context(
-                &*db,
-                salsa_file,
-                &origin,
-                workspace.index.load().as_ref(),
-                analysis,
-            )
-        } else {
-            Vec::new()
-        };
-        let view = self.view.with_overlay_classes(overlay_classes);
+        let analysis = self
+            .request_scope
+            .as_ref()
+            .map(|scope| scope.request_analysis.clone())
+            .unwrap_or_else(|| crate::salsa_queries::conversion::RequestAnalysisState {
+                analysis: workspace.analysis_context_for_uri(salsa_file.file_id(&*db).uri()),
+                view: self.view.clone(),
+                workspace_version: workspace.index.load().version(),
+            });
         if let Some(metrics) = self.metrics() {
             metrics.record_parse_snapshot(
                 "inlay.salsa_context",
@@ -392,13 +382,15 @@ impl<'a> JavaSemanticRequestContext<'a> {
             );
         }
         let started = std::time::Instant::now();
-        let Some(mut ctx) = crate::salsa_queries::java::extract_java_semantic_context_at_offset(
-            &*db,
-            salsa_file,
-            offset,
-            view,
-            Some(workspace),
-        ) else {
+        let Some(mut ctx) =
+            crate::salsa_queries::java::extract_java_semantic_context_at_offset_with_analysis(
+                &*db,
+                salsa_file,
+                offset,
+                &analysis,
+                Some(workspace),
+            )
+        else {
             return Ok(None);
         };
         let raw_ctx = ctx.clone();
@@ -418,7 +410,7 @@ impl<'a> JavaSemanticRequestContext<'a> {
             );
         }
         self.check_cancelled("inlay.salsa_context.after_extract")?;
-        if let (Some(document_version), Some(cache_key)) = (document_version, cache_key) {
+        if let Some((uri, document_version, cache_key)) = prepared_cache {
             let cached = Arc::new(raw_ctx);
             workspace.documents.with_doc_mut(&uri, |doc| {
                 if doc.version() == document_version {
@@ -1390,7 +1382,7 @@ class Test {
             )
         };
 
-        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None);
+        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None, None);
         let ctx = semantic
             .inlay_context_at_offset(&workspace, salsa_file, offset)
             .expect("inlay request")
@@ -1435,7 +1427,7 @@ class Test {
             )
         };
 
-        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None);
+        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None, None);
         let ctx = semantic
             .inlay_context_at_offset(&workspace, salsa_file, offset)
             .expect("inlay request")
@@ -1475,7 +1467,7 @@ class Test {
             )
         };
 
-        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None);
+        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None, None);
         let ctx = semantic
             .inlay_context_at_offset(&workspace, salsa_file, offset)
             .expect("inlay request")
@@ -1523,7 +1515,7 @@ class Test {
             )
         };
 
-        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None);
+        let semantic = JavaSemanticRequestContext::new(source, &rope, root, &view, None, None);
         let ctx = semantic
             .inlay_context_at_offset(&workspace, salsa_file, offset)
             .expect("inlay request")

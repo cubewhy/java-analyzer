@@ -2286,17 +2286,13 @@ fn resolve_name_table_for_file(
     db: &dyn crate::salsa_queries::Db,
     file: SourceFile,
 ) -> Option<Arc<crate::index::NameTable>> {
-    let index = db.workspace_index();
     let _ = file;
-    tracing::debug!(
-        phase = "indexing",
-        file = %file.file_id(db).as_str(),
-        purpose = "incremental source parse/discovery",
-        "constructing NameTable for semantic parse helper"
-    );
-    Some(index.build_name_table(crate::index::IndexScope {
-        module: crate::index::ModuleId::ROOT,
-    }))
+    Some(crate::salsa_queries::get_name_table_for_context(
+        db,
+        crate::index::ModuleId::ROOT,
+        crate::index::ClasspathId::Main,
+        None,
+    ))
 }
 
 #[cfg(test)]

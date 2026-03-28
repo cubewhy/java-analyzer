@@ -16,6 +16,7 @@ pub struct RequestMetrics {
     uri: Arc<str>,
     index_view_acquisitions: AtomicUsize,
     semantic_context_lookups: AtomicUsize,
+    event_counts: Mutex<HashMap<&'static str, usize>>,
     phase_stats: Mutex<HashMap<&'static str, PhaseStat>>,
     hot_spots: Mutex<Vec<HotSpot>>,
     parse_snapshots: Mutex<HashMap<(&'static str, &'static str), usize>>,
@@ -42,6 +43,7 @@ impl RequestMetrics {
             uri: Arc::from(uri.as_str()),
             index_view_acquisitions: AtomicUsize::new(0),
             semantic_context_lookups: AtomicUsize::new(0),
+            event_counts: Mutex::new(HashMap::new()),
             phase_stats: Mutex::new(HashMap::new()),
             hot_spots: Mutex::new(Vec::new()),
             parse_snapshots: Mutex::new(HashMap::new()),
@@ -105,6 +107,11 @@ impl RequestMetrics {
 
     pub fn semantic_context_lookup_count(&self) -> usize {
         self.semantic_context_lookups.load(Ordering::Relaxed)
+    }
+
+    pub fn record_event(&self, event: &'static str) {
+        let mut event_counts = self.event_counts.lock().expect("event counts poisoned");
+        *event_counts.entry(event).or_insert(0) += 1;
     }
 
     pub fn record_parse_snapshot(&self, callsite: &'static str, origin: Option<ParseTreeOrigin>) {
@@ -211,6 +218,16 @@ impl RequestMetrics {
             items.join(",")
         };
 
+        let event_counts = {
+            let event_counts = self.event_counts.lock().expect("event counts poisoned");
+            let mut items: Vec<String> = event_counts
+                .iter()
+                .map(|(event, count)| format!("{event}={count}"))
+                .collect();
+            items.sort();
+            items.join(",")
+        };
+
         tracing::debug!(
             request_id = self.request_id,
             request_kind = self.request_kind,
@@ -222,6 +239,7 @@ impl RequestMetrics {
             semantic_context_lookups = self.semantic_context_lookup_count(),
             phase_breakdown,
             hottest,
+            event_counts,
             parse_snapshots,
             elapsed_ms,
             "request analysis summary"

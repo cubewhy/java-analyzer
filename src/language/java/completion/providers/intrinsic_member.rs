@@ -147,6 +147,7 @@ mod tests {
                 workspace: None,
                 file_uri: None,
                 request: None,
+                semantic_request_scope: None,
             },
         )
         .expect("java semantic context with view")

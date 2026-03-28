@@ -291,6 +291,7 @@ impl Language for JavaLanguage {
             index,
             byte_range,
             env.request.clone(),
+            env.semantic_request_scope.clone(),
             None,
             env.workspace.as_deref(),
             env.workspace
@@ -836,6 +837,7 @@ mod tests {
                 workspace: None,
                 file_uri: None,
                 request: None,
+                semantic_request_scope: None,
             },
         )
         .expect("java semantic context with view")

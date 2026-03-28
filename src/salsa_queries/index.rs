@@ -188,13 +188,21 @@ pub fn cached_name_table(
         hasher.finish()
     };
 
-    NameTableMetadata {
+    let metadata = NameTableMetadata {
         module_id,
         classpath,
         source_root,
         name_count: name_table.len(),
         content_hash,
-    }
+    };
+    tracing::debug!(
+        module = module_id.0,
+        classpath = ?classpath,
+        source_root = ?source_root.map(|id| id.0),
+        name_count = metadata.name_count,
+        "prepared cached NameTable metadata for analysis context"
+    );
+    metadata
 }
 
 /// Get the actual IndexView for a specific analysis context

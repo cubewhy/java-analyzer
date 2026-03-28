@@ -1,4 +1,5 @@
-use crate::index::{ClassMetadata, ClassOrigin, IndexView, NameTable};
+use crate::build_integration::SourceRootId;
+use crate::index::{ClassMetadata, ClassOrigin, ClasspathId, IndexView, ModuleId, NameTable};
 use crate::salsa_db::SourceFile;
 use crate::salsa_queries::Db;
 use std::{sync::Arc, time::Instant};
@@ -45,6 +46,36 @@ pub fn parse_java_classes(db: &dyn Db, file: SourceFile) -> Vec<ClassMetadata> {
     classes
 }
 
+#[salsa::tracked]
+pub fn parse_java_classes_for_analysis_context(
+    db: &dyn Db,
+    file: SourceFile,
+    module_id: ModuleId,
+    classpath: ClasspathId,
+    source_root: Option<SourceRootId>,
+    _workspace_version: u64,
+) -> Arc<Vec<ClassMetadata>> {
+    let started = Instant::now();
+    let file_id = file.file_id(db);
+    let name_table =
+        crate::salsa_queries::get_name_table_for_context(db, module_id, classpath, source_root);
+    let view =
+        crate::salsa_queries::get_index_view_for_context(db, module_id, classpath, source_root);
+    let origin = ClassOrigin::SourceFile(Arc::from(file_id.as_str()));
+    let classes =
+        parse_java_classes_with_index_view(db, file, &origin, Some(name_table), Some(&view));
+    tracing::debug!(
+        file = %file_id.as_str(),
+        module = module_id.0,
+        classpath = ?classpath,
+        source_root = ?source_root.map(|id| id.0),
+        class_count = classes.len(),
+        total_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "tracked java extraction for analysis context"
+    );
+    Arc::new(classes)
+}
+
 pub fn parse_java_classes_with_index_view(
     db: &dyn Db,
     file: SourceFile,
@@ -75,17 +106,13 @@ pub(super) fn get_name_table_for_java_file(
     db: &dyn Db,
     file: SourceFile,
 ) -> Option<Arc<NameTable>> {
-    let index = db.workspace_index();
     let _ = file;
-    tracing::debug!(
-        phase = "indexing",
-        file = %file.file_id(db).as_str(),
-        purpose = "java source indexing parse",
-        "constructing NameTable for Java file"
-    );
-    Some(index.build_name_table(crate::index::IndexScope {
-        module: crate::index::ModuleId::ROOT,
-    }))
+    Some(crate::salsa_queries::get_name_table_for_context(
+        db,
+        ModuleId::ROOT,
+        ClasspathId::Main,
+        None,
+    ))
 }
 
 pub fn extract_java_package(db: &dyn Db, file: SourceFile) -> Option<Arc<str>> {
