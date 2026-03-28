@@ -173,7 +173,8 @@ pub(crate) fn enrich_java_semantic_context(
         .and_then(|ws| ws.java_module_descriptor_for_uri(file.file_id(db).uri()))
         .map(|descriptor| Arc::clone(&descriptor.name));
     let java_module_names = workspace
-        .map(crate::workspace::Workspace::java_module_names)
+        .zip(analysis.map(|request_analysis| request_analysis.analysis))
+        .map(|(workspace, analysis)| workspace.visible_java_module_names(analysis))
         .unwrap_or_default();
     let java_module_packages = analysis
         .map(|request_analysis| {

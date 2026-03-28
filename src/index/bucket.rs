@@ -9,7 +9,8 @@ use parking_lot::RwLock;
 use rustc_hash::FxHashSet;
 
 use crate::index::{
-    ClassMetadata, ClassOrigin, FieldSummary, MethodSummary, NameTable, intern_str,
+    ClassMetadata, ClassOrigin, FieldSummary, IndexedJavaModule, MethodSummary, NameTable,
+    intern_str,
 };
 
 type MroCacheMap = HashMap<Arc<str>, (Vec<Arc<MethodSummary>>, Vec<Arc<FieldSummary>>)>;
@@ -17,6 +18,7 @@ type OwnerKey = Arc<str>;
 
 struct BucketState {
     classes: HashMap<Arc<str>, Arc<ClassMetadata>>,
+    modules: HashMap<Arc<str>, Arc<IndexedJavaModule>>,
     by_origin: HashMap<ClassOrigin, Vec<Arc<str>>>,
     simple_name_index: HashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
     package_index: HashMap<Arc<str>, Vec<Arc<ClassMetadata>>>,
@@ -33,6 +35,7 @@ impl BucketIndex {
     pub fn new() -> Self {
         let state = BucketState {
             classes: HashMap::with_capacity(100_000),
+            modules: HashMap::new(),
             by_origin: HashMap::new(),
             simple_name_index: HashMap::with_capacity(100_000),
             package_index: HashMap::with_capacity(10_000),
@@ -95,6 +98,14 @@ impl BucketIndex {
         inner.mro_cache.clear();
     }
 
+    pub fn add_modules(&self, modules: Vec<IndexedJavaModule>) {
+        let mut inner = self.inner.write();
+        for module in modules {
+            let name = Arc::from(module.name());
+            inner.modules.insert(name, Arc::new(module));
+        }
+    }
+
     pub fn update_source(&self, origin: ClassOrigin, classes: Vec<ClassMetadata>) -> bool {
         let mut filtered = Vec::new();
 
@@ -126,6 +137,11 @@ impl BucketIndex {
     pub fn get_class(&self, internal_name: &str) -> Option<Arc<ClassMetadata>> {
         let inner = self.inner.read();
         inner.classes.get(internal_name).cloned()
+    }
+
+    pub fn get_module(&self, module_name: &str) -> Option<Arc<IndexedJavaModule>> {
+        let inner = self.inner.read();
+        inner.modules.get(module_name).cloned()
     }
 
     pub fn get_source_type_name(&self, internal: &str) -> Option<String> {
@@ -193,6 +209,11 @@ impl BucketIndex {
     pub fn package_names(&self) -> Vec<Arc<str>> {
         let inner = self.inner.read();
         inner.package_index.keys().cloned().collect()
+    }
+
+    pub fn module_names(&self) -> Vec<Arc<str>> {
+        let inner = self.inner.read();
+        inner.modules.keys().cloned().collect()
     }
 
     pub fn resolve_imports(&self, imports: &[Arc<str>]) -> Vec<Arc<ClassMetadata>> {

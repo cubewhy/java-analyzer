@@ -15,7 +15,7 @@ arc-swap = "1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 rayon = "1.11.0"
-rust-asm = "0.1.5"
+rust-asm = "0.2.0"
 zip = "8.4.0"
 tower-lsp = "0.20.0"
 serde = { version = "1", features = ["derive", "rc"] }

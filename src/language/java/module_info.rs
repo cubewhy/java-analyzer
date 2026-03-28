@@ -11,26 +11,26 @@ pub(crate) const MODULE_DIRECTIVE_KEYWORDS: &[&str] =
     &["requires", "exports", "opens", "uses", "provides"];
 pub(crate) const REQUIRES_MODIFIERS: &[&str] = &["static", "transitive"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct JavaModuleRequires {
     pub module_name: Arc<str>,
     pub is_static: bool,
     pub is_transitive: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct JavaModulePackageDirective {
     pub package_name: Arc<str>,
     pub target_modules: Vec<Arc<str>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct JavaModuleProvides {
     pub service: Arc<str>,
     pub implementations: Vec<Arc<str>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct JavaModuleDescriptor {
     pub name: Arc<str>,
     pub is_open: bool,
@@ -39,6 +39,143 @@ pub struct JavaModuleDescriptor {
     pub opens: Vec<JavaModulePackageDirective>,
     pub uses: Vec<Arc<str>>,
     pub provides: Vec<JavaModuleProvides>,
+}
+
+pub fn extract_module_descriptor_from_class_node(
+    class_node: &rust_asm::nodes::ClassNode,
+) -> Option<Arc<JavaModuleDescriptor>> {
+    let module = class_node.module.as_ref()?;
+
+    Some(Arc::new(JavaModuleDescriptor {
+        name: Arc::from(module.name.as_str()),
+        is_open: (module.access_flags & rust_asm::constants::ACC_OPEN) != 0,
+        requires: module
+            .requires
+            .iter()
+            .map(|require| JavaModuleRequires {
+                module_name: Arc::from(require.module.as_str()),
+                is_static: (require.access_flags & rust_asm::constants::ACC_STATIC_PHASE) != 0,
+                is_transitive: (require.access_flags & rust_asm::constants::ACC_TRANSITIVE) != 0,
+            })
+            .collect(),
+        exports: module
+            .exports
+            .iter()
+            .map(|export| JavaModulePackageDirective {
+                package_name: slash_name_to_dotted_arc(&export.package),
+                target_modules: export
+                    .modules
+                    .iter()
+                    .map(|module| Arc::from(module.as_str()))
+                    .collect(),
+            })
+            .collect(),
+        opens: module
+            .opens
+            .iter()
+            .map(|open| JavaModulePackageDirective {
+                package_name: slash_name_to_dotted_arc(&open.package),
+                target_modules: open
+                    .modules
+                    .iter()
+                    .map(|module| Arc::from(module.as_str()))
+                    .collect(),
+            })
+            .collect(),
+        uses: module
+            .uses
+            .iter()
+            .map(|service| slash_name_to_dotted_arc(service))
+            .collect(),
+        provides: module
+            .provides
+            .iter()
+            .map(|provide| JavaModuleProvides {
+                service: slash_name_to_dotted_arc(&provide.service),
+                implementations: provide
+                    .providers
+                    .iter()
+                    .map(|provider| slash_name_to_dotted_arc(provider))
+                    .collect(),
+            })
+            .collect(),
+    }))
+}
+
+pub fn render_module_descriptor_source(descriptor: &JavaModuleDescriptor) -> String {
+    let mut lines = vec![format!(
+        "{}module {} {{",
+        if descriptor.is_open { "open " } else { "" },
+        descriptor.name
+    )];
+
+    for require in &descriptor.requires {
+        let mut line = String::from("    requires");
+        if require.is_static {
+            line.push_str(" static");
+        }
+        if require.is_transitive {
+            line.push_str(" transitive");
+        }
+        line.push(' ');
+        line.push_str(require.module_name.as_ref());
+        line.push(';');
+        lines.push(line);
+    }
+
+    for export in &descriptor.exports {
+        let mut line = format!("    exports {}", export.package_name);
+        if !export.target_modules.is_empty() {
+            line.push_str(" to ");
+            line.push_str(
+                &export
+                    .target_modules
+                    .iter()
+                    .map(|module| module.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        line.push(';');
+        lines.push(line);
+    }
+
+    for open in &descriptor.opens {
+        let mut line = format!("    opens {}", open.package_name);
+        if !open.target_modules.is_empty() {
+            line.push_str(" to ");
+            line.push_str(
+                &open
+                    .target_modules
+                    .iter()
+                    .map(|module| module.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        line.push(';');
+        lines.push(line);
+    }
+
+    for service in &descriptor.uses {
+        lines.push(format!("    uses {};", service));
+    }
+
+    for provide in &descriptor.provides {
+        let implementations = provide
+            .implementations
+            .iter()
+            .map(|implementation| implementation.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "    provides {} with {};",
+            provide.service, implementations
+        ));
+    }
+
+    lines.push("}".to_string());
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +283,10 @@ pub fn extract_module_descriptor_from_source(source: &str) -> Option<Arc<JavaMod
     let mut parser = crate::language::java::make_java_parser();
     let tree = parser.parse(source, None)?;
     extract_module_descriptor_from_root(source, tree.root_node())
+}
+
+fn slash_name_to_dotted_arc(name: &str) -> Arc<str> {
+    Arc::from(name.replace('/', ".").as_str())
 }
 
 pub(crate) fn infer_module_completion_context(

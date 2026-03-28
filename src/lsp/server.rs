@@ -94,16 +94,22 @@ impl Backend {
                 "java-analyzer/index/jdk",
                 "Indexing JDK",
                 || async {
-                    let jdk_classes = tokio::task::spawn_blocking(|| {
+                    let jdk_index = tokio::task::spawn_blocking(|| {
                         let indexer = JdkIndexer::new(jdk_path);
 
                         indexer.index()
                     })
                     .await;
-                    match jdk_classes {
-                        Ok(classes) if !classes.is_empty() => {
-                            let msg = format!("✓ JDK: {} classes", classes.len());
-                            workspace.set_jdk_classes(classes).await;
+                    match jdk_index {
+                        Ok(indexed)
+                            if !indexed.classes.is_empty() || !indexed.modules.is_empty() =>
+                        {
+                            let msg = format!(
+                                "✓ JDK: {} classes, {} modules",
+                                indexed.classes.len(),
+                                indexed.modules.len()
+                            );
+                            workspace.set_jdk_archive(indexed).await;
                             client.log_message(MessageType::INFO, msg).await;
                         }
                         Ok(_) => {

@@ -15,6 +15,9 @@ use zip::ZipArchive;
 
 use crate::jvm::constant_pool::{cp_utf8, cp_utf8_desc_to_internal, parse_const_value};
 use crate::jvm::descriptor::consume_one_descriptor_type;
+use crate::language::java::module_info::{
+    JavaModuleDescriptor, extract_module_descriptor_from_class_node,
+};
 use crate::semantic::types::{SymbolProvider, parse_return_type_from_descriptor};
 
 pub mod bucket;
@@ -55,6 +58,24 @@ pub struct ClassMetadata {
     /// Authoritative owner internal name for member classes, e.g. `pkg/Outer$Inner`.
     pub inner_class_of: Option<Arc<str>>,
     pub origin: ClassOrigin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexedJavaModule {
+    pub descriptor: Arc<JavaModuleDescriptor>,
+    pub origin: ClassOrigin,
+}
+
+impl IndexedJavaModule {
+    pub fn name(&self) -> &str {
+        self.descriptor.name.as_ref()
+    }
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IndexedArchiveData {
+    pub classes: Vec<ClassMetadata>,
+    pub modules: Vec<IndexedJavaModule>,
 }
 
 impl ClassMetadata {
@@ -563,7 +584,7 @@ fn merge_param_annos(
     }
 }
 
-pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> {
+pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<IndexedArchiveData> {
     let path = path.as_ref();
     // Try to load from cache
     if let Some(cached) = cache::load_cached(path) {
@@ -582,7 +603,7 @@ pub fn index_jar<P: AsRef<Path>>(path: P) -> anyhow::Result<Vec<ClassMetadata>> 
     Ok(classes)
 }
 
-fn index_jar_uncached(path: &Path) -> anyhow::Result<Vec<ClassMetadata>> {
+fn index_jar_uncached(path: &Path) -> anyhow::Result<IndexedArchiveData> {
     let jar_str = Arc::from(path.to_string_lossy().as_ref());
     let file = std::fs::File::open(path)?;
     let mut archive = ZipArchive::new(std::io::BufReader::new(file))?;
@@ -604,6 +625,17 @@ fn index_jar_uncached(path: &Path) -> anyhow::Result<Vec<ClassMetadata>> {
         }
     }
 
+    let (module_files, class_files): (Vec<_>, Vec<_>) = class_files
+        .into_iter()
+        .partition(|(name, _)| name.ends_with("module-info.class"));
+
+    let modules: Vec<IndexedJavaModule> = module_files
+        .into_par_iter()
+        .filter_map(|(_, bytes)| {
+            parse_module_data_with_origin(&bytes, ClassOrigin::Jar(Arc::clone(&jar_str)))
+        })
+        .collect();
+
     // 解析字节码（跳过已有源文件的类）
     let mut bytecode_results: Vec<ClassMetadata> = class_files
         .into_par_iter()
@@ -613,7 +645,10 @@ fn index_jar_uncached(path: &Path) -> anyhow::Result<Vec<ClassMetadata>> {
     let source_results = parse_source_files_parallel(&source_files, &jar_str);
     merge_source_into_bytecode(&mut bytecode_results, source_results);
 
-    Ok(bytecode_results)
+    Ok(IndexedArchiveData {
+        classes: bytecode_results,
+        modules,
+    })
 }
 
 /// Parse class bytes with an explicit origin.
@@ -630,6 +665,9 @@ pub(crate) fn parse_class_data_bytes(
 fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<ClassMetadata> {
     let cr = ClassReader::new(bytes);
     let cn = cr.to_class_node().ok()?;
+    if cn.name == "module-info" {
+        return None;
+    }
 
     let internal_name: Arc<str> = Arc::from(cn.name.as_str());
     let rsp: Vec<_> = cn.name.rsplitn(2, '/').collect();
@@ -776,6 +814,16 @@ fn parse_class_data_with_origin(bytes: &[u8], origin: ClassOrigin) -> Option<Cla
         inner_class_of,
         origin,
     })
+}
+
+pub(crate) fn parse_module_data_with_origin(
+    bytes: &[u8],
+    origin: ClassOrigin,
+) -> Option<IndexedJavaModule> {
+    let cr = ClassReader::new(bytes);
+    let cn = cr.to_class_node().ok()?;
+    let descriptor = extract_module_descriptor_from_class_node(&cn)?;
+    Some(IndexedJavaModule { descriptor, origin })
 }
 
 fn bytecode_declared_name_and_owner(
@@ -1071,10 +1119,17 @@ fn parse_source_files_parallel(
 
 #[cfg(test)]
 mod tests {
-    use rust_asm::constants::ACC_PUBLIC;
+    use rust_asm::class_writer::ClassWriter;
+    use rust_asm::constants::{
+        ACC_MANDATED, ACC_MODULE, ACC_OPEN, ACC_PUBLIC, ACC_STATIC_PHASE, ACC_TRANSITIVE, V9,
+    };
+    use std::fs::File;
+    use std::io::Write;
 
     use super::*;
     use crate::semantic::types::count_params;
+    use tempfile::tempdir;
+    use zip::write::SimpleFileOptions;
 
     fn make_class(pkg: &str, name: &str, origin: ClassOrigin) -> ClassMetadata {
         let internal = format!("{}/{}", pkg, name);
@@ -1106,6 +1161,26 @@ mod tests {
         }
     }
 
+    fn make_module_info_bytes() -> Vec<u8> {
+        let mut writer = ClassWriter::new(0);
+        writer.visit(V9, 0, ACC_MODULE, "module-info", None, &[]);
+
+        let mut module = writer.visit_module("com.example.lib", ACC_OPEN, Some("1.0"));
+        module.visit_require("java.base", ACC_MANDATED, None);
+        module.visit_require(
+            "com.example.dep",
+            ACC_TRANSITIVE | ACC_STATIC_PHASE,
+            Some("2.0"),
+        );
+        module.visit_export("com/example/api", 0, &["com.example.consumer"]);
+        module.visit_open("com/example/internal", 0, &["com.example.runtime"]);
+        module.visit_use("com/example/spi/Service");
+        module.visit_provide("com/example/spi/Service", &["com/example/impl/ServiceImpl"]);
+        module.visit_end(&mut writer);
+
+        writer.to_bytes().expect("module-info should encode")
+    }
+
     // TODO: field tests
 
     // fn make_field(name: &str, descriptor: &str) -> FieldSummary {
@@ -1123,6 +1198,65 @@ mod tests {
         idx.add_classes(vec![make_class("com/example", "Foo", ClassOrigin::Unknown)]);
         assert!(idx.get_class("com/example/Foo").is_some());
         assert!(idx.get_class("com/example/Bar").is_none());
+    }
+
+    #[test]
+    fn test_index_jar_extracts_module_info_into_modules_not_classes() {
+        let dir = tempdir().expect("tempdir");
+        let jar_path = dir.path().join("modules.jar");
+        let file = File::create(&jar_path).expect("jar file");
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("module-info.class", SimpleFileOptions::default())
+            .expect("module entry");
+        zip.write_all(&make_module_info_bytes())
+            .expect("module bytes");
+        zip.finish().expect("finish jar");
+
+        let archive = index_jar_uncached(&jar_path).expect("index jar");
+
+        assert!(
+            archive
+                .classes
+                .iter()
+                .all(|class| class.internal_name.as_ref() != "module-info"),
+            "module-info.class should not be exposed as a class symbol"
+        );
+        assert_eq!(archive.modules.len(), 1, "{archive:?}");
+
+        let module = &archive.modules[0];
+        assert_eq!(module.name(), "com.example.lib");
+        assert!(module.descriptor.is_open);
+        assert_eq!(module.descriptor.requires.len(), 2);
+        assert_eq!(
+            module.descriptor.requires[0].module_name.as_ref(),
+            "java.base"
+        );
+        assert_eq!(
+            module.descriptor.requires[1].module_name.as_ref(),
+            "com.example.dep"
+        );
+        assert!(module.descriptor.requires[1].is_static);
+        assert!(module.descriptor.requires[1].is_transitive);
+        assert_eq!(
+            module.descriptor.exports[0].package_name.as_ref(),
+            "com.example.api"
+        );
+        assert_eq!(
+            module.descriptor.opens[0].package_name.as_ref(),
+            "com.example.internal"
+        );
+        assert_eq!(
+            module.descriptor.uses[0].as_ref(),
+            "com.example.spi.Service"
+        );
+        assert_eq!(
+            module.descriptor.provides[0].service.as_ref(),
+            "com.example.spi.Service"
+        );
+        assert_eq!(
+            module.descriptor.provides[0].implementations[0].as_ref(),
+            "com.example.impl.ServiceImpl"
+        );
     }
 
     #[test]

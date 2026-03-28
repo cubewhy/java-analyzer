@@ -5,15 +5,15 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tracing::{debug, warn};
 
-use crate::index::ClassMetadata;
+use crate::index::IndexedArchiveData;
 
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CacheFile {
     version: u32,
     source_hash: u64,
-    classes: Vec<ClassMetadata>,
+    data: IndexedArchiveData,
 }
 
 fn source_hash(path: &Path) -> u64 {
@@ -40,7 +40,7 @@ fn cache_path_for(source_path: &Path) -> Option<PathBuf> {
     Some(cache_dir()?.join(format!("{:016x}.postcard", h.finish())))
 }
 
-pub fn load_cached(source_path: &Path) -> Option<Vec<ClassMetadata>> {
+pub fn load_cached(source_path: &Path) -> Option<IndexedArchiveData> {
     let cache_path = cache_path_for(source_path)?;
     let expected_hash = source_hash(source_path);
 
@@ -58,13 +58,14 @@ pub fn load_cached(source_path: &Path) -> Option<Vec<ClassMetadata>> {
 
     debug!(
         path = %source_path.display(),
-        count = cached.classes.len(),
+        class_count = cached.data.classes.len(),
+        module_count = cached.data.modules.len(),
         "loaded from cache"
     );
-    Some(cached.classes)
+    Some(cached.data)
 }
 
-pub fn save_cache(source_path: &Path, classes: &[ClassMetadata]) {
+pub fn save_cache(source_path: &Path, data: &IndexedArchiveData) {
     let Some(cache_path) = cache_path_for(source_path) else {
         return;
     };
@@ -78,7 +79,7 @@ pub fn save_cache(source_path: &Path, classes: &[ClassMetadata]) {
     let entry = CacheFile {
         version: CACHE_VERSION,
         source_hash: source_hash(source_path),
-        classes: classes.to_vec(),
+        data: data.clone(),
     };
 
     match postcard::to_allocvec(&entry) {

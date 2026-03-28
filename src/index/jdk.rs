@@ -3,7 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::index::{ClassOrigin, cache, merge_source_into_bytecode, parse_class_data_bytes};
+use crate::index::{
+    ClassOrigin, IndexedArchiveData, cache, merge_source_into_bytecode, parse_class_data_bytes,
+    parse_module_data_with_origin,
+};
 
 use super::incremental::{SourceTextInput, prepare_source_inputs, source_uri_for_origin};
 use super::{ClassMetadata, index_jar};
@@ -33,7 +36,7 @@ impl JdkIndexer {
 
     /// Try to find and index JDK classes.
     /// Returns empty vec if JAVA_HOME is not set or JDK cannot be parsed.
-    pub fn index(&self) -> Vec<ClassMetadata> {
+    pub fn index(&self) -> IndexedArchiveData {
         let java_home = &self.java_home;
 
         info!(java_home = %java_home.display(), "indexing JDK");
@@ -50,29 +53,29 @@ impl JdkIndexer {
         let modules = java_home.join("lib").join("modules");
         if modules.exists() {
             info!("detected JDK 9+ (jimage)");
-            let mut bytecode_classes = Self::index_jimage(&modules);
+            let mut indexed = Self::index_jimage(&modules);
             if src_zip.exists() {
-                let name_table = crate::index::NameTable::from_classes(&bytecode_classes);
+                let name_table = crate::index::NameTable::from_classes(&indexed.classes);
                 let source_classes = Self::parse_jdk_source_zip(&src_zip, Some(name_table));
-                merge_source_into_bytecode(&mut bytecode_classes, source_classes);
+                merge_source_into_bytecode(&mut indexed.classes, source_classes);
             }
-            return bytecode_classes;
+            return indexed;
         }
 
         // JDK 8: jre/lib/rt.jar
         let rt_jar = java_home.join("jre").join("lib").join("rt.jar");
         if rt_jar.exists() {
             info!("detected JDK 8 (rt.jar)");
-            let mut bytecode_classes = index_jar(&rt_jar).unwrap_or_else(|e| {
+            let mut indexed = index_jar(&rt_jar).unwrap_or_else(|e| {
                 warn!(error = %e, "failed to index rt.jar");
-                vec![]
+                IndexedArchiveData::default()
             });
             if src_zip.exists() {
-                let name_table = crate::index::NameTable::from_classes(&bytecode_classes);
+                let name_table = crate::index::NameTable::from_classes(&indexed.classes);
                 let source_classes = Self::parse_jdk_source_zip(&src_zip, Some(name_table));
-                merge_source_into_bytecode(&mut bytecode_classes, source_classes);
+                merge_source_into_bytecode(&mut indexed.classes, source_classes);
             }
-            return bytecode_classes;
+            return indexed;
         }
 
         // JDK 8 alternative layout (some distros)
@@ -82,7 +85,7 @@ impl JdkIndexer {
             info!("detected JDK 8 alt layout (lib/rt.jar)");
             return index_jar(&rt_jar_alt).unwrap_or_else(|e| {
                 warn!(error = %e, "failed to index rt.jar");
-                vec![]
+                IndexedArchiveData::default()
             });
         }
 
@@ -90,27 +93,32 @@ impl JdkIndexer {
             java_home = %java_home.display(),
             "could not find JDK class library (neither lib/modules nor jre/lib/rt.jar)"
         );
-        vec![]
+        IndexedArchiveData::default()
     }
 
-    fn index_jimage(path: &Path) -> Vec<ClassMetadata> {
+    fn index_jimage(path: &Path) -> IndexedArchiveData {
         // Try cache
         if let Some(cached) = crate::index::cache::load_cached(path) {
-            tracing::info!(count = cached.len(), "JDK index loaded from cache");
+            tracing::info!(
+                class_count = cached.classes.len(),
+                module_count = cached.modules.len(),
+                "JDK index loaded from cache"
+            );
             return cached;
         }
 
         let origin = Arc::from(JDK_ORIGIN);
+        let mut classes = Vec::new();
+        let mut modules = Vec::new();
 
         let jimage = match jimage_rs::JImage::open(path) {
             Ok(j) => j,
             Err(e) => {
                 warn!(error = %e, path = %path.display(), "failed to open jimage");
-                return vec![];
+                return IndexedArchiveData::default();
             }
         };
 
-        let mut results = Vec::new();
         let resource_names = jimage.resource_names_iter();
 
         for entry in resource_names {
@@ -124,11 +132,8 @@ impl JdkIndexer {
 
             let (module, path_in_module) = entry.get_full_name();
 
-            // Only process .class files, skip module-info
+            // Only process .class files.
             if !path_in_module.ends_with(".class") {
-                continue;
-            }
-            if path_in_module.ends_with("module-info.class") {
                 continue;
             }
 
@@ -145,23 +150,36 @@ impl JdkIndexer {
                 }
             };
 
+            if path_in_module.ends_with("module-info.class") {
+                match parse_module_data_with_origin(&bytes, ClassOrigin::Jar(Arc::clone(&origin))) {
+                    Some(module) => modules.push(module),
+                    None => debug!(path = resource_path, "failed to parse module descriptor"),
+                }
+                continue;
+            }
+
             // path_in_module: "java/lang/String.class"
             // file_name for parse_class_data is the path within the module
             match parse_class_data_bytes(&path_in_module, &bytes, Arc::clone(&origin)) {
-                Some(meta) => results.push(meta),
+                Some(meta) => classes.push(meta),
                 None => debug!(path = resource_path, "failed to parse class"),
             }
         }
 
         // cache index
-        let results_clone = results.clone();
+        let indexed = IndexedArchiveData { classes, modules };
+        let indexed_clone = indexed.clone();
         let path_buf = path.to_path_buf();
         std::thread::spawn(move || {
-            cache::save_cache(&path_buf, &results_clone);
+            cache::save_cache(&path_buf, &indexed_clone);
         });
 
-        info!(count = results.len(), "JDK jimage indexed");
-        results
+        info!(
+            class_count = indexed.classes.len(),
+            module_count = indexed.modules.len(),
+            "JDK jimage indexed"
+        );
+        indexed
     }
 
     fn parse_jdk_source_zip(
@@ -175,8 +193,11 @@ impl JdkIndexer {
         );
 
         if let Some(cached) = crate::index::cache::load_cached(path) {
-            tracing::info!(count = cached.len(), "JDK source index loaded from cache");
-            return cached;
+            tracing::info!(
+                count = cached.classes.len(),
+                "JDK source index loaded from cache"
+            );
+            return cached.classes;
         }
 
         let file = match std::fs::File::open(path) {
@@ -231,7 +252,13 @@ impl JdkIndexer {
         let results_clone = results.clone();
         let path_buf = path.to_path_buf();
         std::thread::spawn(move || {
-            crate::index::cache::save_cache(&path_buf, &results_clone);
+            crate::index::cache::save_cache(
+                &path_buf,
+                &IndexedArchiveData {
+                    classes: results_clone,
+                    modules: Vec::new(),
+                },
+            );
         });
 
         results
@@ -250,13 +277,14 @@ mod tests {
         let classes = JdkIndexer::from_env()
             .expect("Failed to create JDKIndexer")
             .index();
-        if classes.is_empty() {
+        if classes.classes.is_empty() {
             eprintln!("JAVA_HOME not set or JDK not found, skipping");
             return;
         }
-        eprintln!("JDK classes indexed: {}", classes.len());
+        eprintln!("JDK classes indexed: {}", classes.classes.len());
 
         let string_class = classes
+            .classes
             .iter()
             .find(|c| c.internal_name.as_ref() == "java/lang/String");
         assert!(
@@ -264,6 +292,7 @@ mod tests {
             "java/lang/String should be in JDK index. \
              First 10 classes: {:?}",
             classes
+                .classes
                 .iter()
                 .take(10)
                 .map(|c| c.internal_name.as_ref())
@@ -291,10 +320,11 @@ mod tests {
         let classes = JdkIndexer::from_env()
             .expect("Failed to create JDKIndexer")
             .index();
-        if classes.is_empty() {
+        if classes.classes.is_empty() {
             return;
         }
         let object = classes
+            .classes
             .iter()
             .find(|c| c.internal_name.as_ref() == "java/lang/Object");
         assert!(object.is_some(), "java/lang/Object should be indexed");
@@ -315,8 +345,15 @@ mod tests {
             .expect("Failed to create JDKIndexer")
             .index();
         assert!(
-            classes.iter().all(|c| c.name.as_ref() != "module-info"),
+            classes
+                .classes
+                .iter()
+                .all(|c| c.name.as_ref() != "module-info"),
             "module-info should be filtered out"
+        );
+        assert!(
+            !classes.modules.is_empty(),
+            "JDK modules should be indexed from module-info.class"
         );
     }
 
@@ -326,7 +363,7 @@ mod tests {
         let classes = JdkIndexer::from_env()
             .expect("Failed to create JDKIndexer")
             .index();
-        for cls in classes.iter().take(100) {
+        for cls in classes.classes.iter().take(100) {
             assert!(
                 !cls.internal_name.contains('.'),
                 "internal_name should use '/' not '.': {}",

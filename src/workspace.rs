@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,8 +15,8 @@ use crate::index::codebase::{
 };
 use crate::index::incremental::SourceTextInput;
 use crate::index::{
-    ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleId, WorkspaceIndex,
-    WorkspaceIndexHandle,
+    ClassMetadata, ClassOrigin, ClasspathId, IndexScope, IndexedArchiveData, IndexedJavaModule,
+    ModuleId, WorkspaceIndex, WorkspaceIndexHandle,
 };
 use crate::language::Language;
 use crate::language::java::module_info::JavaModuleDescriptor;
@@ -109,6 +109,12 @@ impl AnalysisContext {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum JavaModuleTarget {
+    Source { uri: Url },
+    Bytecode { module: Arc<IndexedJavaModule> },
+}
+
 pub struct Workspace {
     pub documents: DocumentStore,
     /// Published workspace state. Reads load the current index snapshot, and
@@ -128,6 +134,7 @@ pub struct Workspace {
     semantic_cache: Arc<parking_lot::RwLock<SemanticCache>>,
     java_modules: Arc<parking_lot::RwLock<JavaModuleRegistry>>,
     jdk_classes: RwLock<Vec<ClassMetadata>>,
+    jdk_modules: RwLock<Vec<IndexedJavaModule>>,
     full_reindex_in_progress: Arc<AtomicUsize>,
     full_reindex_serial: Arc<AtomicUsize>,
     watched_roots_tx: watch::Sender<Vec<WatchedSourceRoot>>,
@@ -213,6 +220,7 @@ impl Workspace {
             semantic_cache: Arc::new(parking_lot::RwLock::new(SemanticCache::default())),
             java_modules: Arc::new(parking_lot::RwLock::new(JavaModuleRegistry::default())),
             jdk_classes: RwLock::new(Vec::new()),
+            jdk_modules: RwLock::new(Vec::new()),
             full_reindex_in_progress: Arc::new(AtomicUsize::new(0)),
             full_reindex_serial: Arc::new(AtomicUsize::new(0)),
             watched_roots_tx,
@@ -474,13 +482,21 @@ impl Workspace {
 
     pub async fn set_jdk_classes(&self, classes: Vec<ClassMetadata>) {
         *self.jdk_classes.write().await = classes.clone();
+        self.jdk_modules.write().await.clear();
         self.index.update(|index| index.add_jdk_classes(classes));
+    }
+
+    pub async fn set_jdk_archive(&self, data: IndexedArchiveData) {
+        *self.jdk_classes.write().await = data.classes.clone();
+        *self.jdk_modules.write().await = data.modules.clone();
+        self.index.update(|index| index.add_jdk_archive(data));
     }
 
     pub async fn apply_workspace_model(&self, snapshot: WorkspaceModelSnapshot) -> Result<()> {
         let _reindex_guard = self.begin_full_reindex();
         self.set_workspace_root(snapshot.root.path.clone());
         let jdk_classes = self.jdk_classes.read().await.clone();
+        let jdk_modules = self.jdk_modules.read().await.clone();
         let open_doc_overlays = self
             .documents
             .snapshot_documents()
@@ -537,8 +553,11 @@ impl Workspace {
         .await?;
 
         let new_index = WorkspaceIndex::new();
-        if !jdk_classes.is_empty() {
-            new_index.add_jdk_classes(jdk_classes);
+        if !jdk_classes.is_empty() || !jdk_modules.is_empty() {
+            new_index.add_jdk_archive(IndexedArchiveData {
+                classes: jdk_classes,
+                modules: jdk_modules,
+            });
         }
 
         for module in &snapshot.modules {
@@ -726,8 +745,12 @@ impl Workspace {
         };
         let index = WorkspaceIndex::new();
         let jdk_classes = self.jdk_classes.read().await.clone();
-        if !jdk_classes.is_empty() {
-            index.add_jdk_classes(jdk_classes);
+        let jdk_modules = self.jdk_modules.read().await.clone();
+        if !jdk_classes.is_empty() || !jdk_modules.is_empty() {
+            index.add_jdk_archive(IndexedArchiveData {
+                classes: jdk_classes,
+                modules: jdk_modules,
+            });
         }
         let mut by_origin: std::collections::HashMap<ClassOrigin, Vec<_>> =
             std::collections::HashMap::new();
@@ -964,12 +987,48 @@ impl Workspace {
         self.java_modules.read().module_names()
     }
 
+    pub fn visible_java_module_names(&self, context: AnalysisContext) -> Vec<Arc<str>> {
+        let mut names = BTreeSet::new();
+        for name in self.java_modules.read().module_names() {
+            names.insert(name);
+        }
+        let index = self.index.load();
+        for name in index.visible_bytecode_module_names_for_analysis_context(
+            context.module,
+            context.classpath,
+            context.source_root,
+        ) {
+            names.insert(name);
+        }
+        names.into_iter().collect()
+    }
+
     pub fn java_module_descriptor_for_uri(&self, uri: &Url) -> Option<Arc<JavaModuleDescriptor>> {
         self.java_modules.read().descriptor_for_uri(uri)
     }
 
     pub fn java_module_uri(&self, module_name: &str) -> Option<Url> {
         self.java_modules.read().first_uri_for_name(module_name)
+    }
+
+    pub(crate) fn resolve_java_module_target(
+        &self,
+        context: AnalysisContext,
+        module_name: &str,
+    ) -> Option<JavaModuleTarget> {
+        if let Some(uri) = self.java_module_uri(module_name) {
+            return Some(JavaModuleTarget::Source { uri });
+        }
+
+        let index = self.index.load();
+        index
+            .find_visible_bytecode_module_for_analysis_context(
+                context.module,
+                context.classpath,
+                context.source_root,
+                module_name,
+            )
+            .map(|module| JavaModuleTarget::Bytecode { module })
     }
 
     pub(crate) fn extract_salsa_classes_for_index_context(
@@ -1467,6 +1526,21 @@ mod tests {
     use crate::workspace::document::Document;
     use tempfile::tempdir;
 
+    fn make_bytecode_module(name: &str, origin: ClassOrigin) -> IndexedJavaModule {
+        IndexedJavaModule {
+            descriptor: Arc::new(JavaModuleDescriptor {
+                name: Arc::from(name),
+                is_open: false,
+                requires: vec![],
+                exports: vec![],
+                opens: vec![],
+                uses: vec![],
+                provides: vec![],
+            }),
+            origin,
+        }
+    }
+
     #[test]
     fn managed_workspace_prefers_imported_source_root_context() {
         let workspace = Workspace::new();
@@ -1670,6 +1744,86 @@ mod tests {
                 .expect("module uri"),
             uri
         );
+    }
+
+    #[test]
+    fn visible_java_module_names_merge_source_and_bytecode_modules() {
+        let workspace = Workspace::new();
+        let uri = Url::parse("file:///workspace/module-info.java").expect("valid uri");
+        let salsa_file =
+            workspace.get_or_create_salsa_file(&uri, "module com.example.app { }", "java");
+
+        {
+            let db = workspace.salsa_db.lock();
+            workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+        }
+
+        workspace.index.update(|index| {
+            index.add_jdk_archive(IndexedArchiveData {
+                classes: vec![],
+                modules: vec![make_bytecode_module(
+                    "com.example.lib",
+                    ClassOrigin::Jar(Arc::from("jdk://builtin")),
+                )],
+            });
+        });
+
+        let names = workspace.visible_java_module_names(AnalysisContext {
+            module: ModuleId::ROOT,
+            classpath: ClasspathId::Main,
+            source_root: None,
+            root_kind: None,
+        });
+
+        assert_eq!(
+            names,
+            vec![
+                Arc::<str>::from("com.example.app"),
+                Arc::<str>::from("com.example.lib")
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_java_module_target_prefers_source_over_bytecode() {
+        let workspace = Workspace::new();
+        let uri = Url::parse("file:///workspace/shared/module-info.java").expect("valid uri");
+        let salsa_file =
+            workspace.get_or_create_salsa_file(&uri, "module com.example.shared { }", "java");
+
+        {
+            let db = workspace.salsa_db.lock();
+            workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+        }
+
+        workspace.index.update(|index| {
+            index.add_jdk_archive(IndexedArchiveData {
+                classes: vec![],
+                modules: vec![make_bytecode_module(
+                    "com.example.shared",
+                    ClassOrigin::Jar(Arc::from("/tmp/shared.jar")),
+                )],
+            });
+        });
+
+        let target = workspace
+            .resolve_java_module_target(
+                AnalysisContext {
+                    module: ModuleId::ROOT,
+                    classpath: ClasspathId::Main,
+                    source_root: None,
+                    root_kind: None,
+                },
+                "com.example.shared",
+            )
+            .expect("module target");
+
+        match target {
+            JavaModuleTarget::Source { uri: target_uri } => assert_eq!(target_uri, uri),
+            JavaModuleTarget::Bytecode { .. } => {
+                panic!("source module should win over bytecode module")
+            }
+        }
     }
 
     #[test]

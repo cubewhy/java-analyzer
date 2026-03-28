@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,8 +11,8 @@ use smallvec::SmallVec;
 use crate::build_integration::SourceRootId;
 use crate::index::view::IndexView;
 use crate::index::{
-    BucketIndex, ClassMetadata, ClassOrigin, ClasspathId, IndexScope, ModuleGraph, ModuleId,
-    ModuleIndex, NameTable, index_jar,
+    BucketIndex, ClassMetadata, ClassOrigin, ClasspathId, IndexScope, IndexedArchiveData,
+    IndexedJavaModule, ModuleGraph, ModuleId, ModuleIndex, NameTable, index_jar,
 };
 
 type AnalysisContextKey = (ModuleId, ClasspathId, Option<SourceRootId>);
@@ -127,6 +127,12 @@ impl WorkspaceIndex {
         self.invalidate_analysis_caches();
     }
 
+    pub fn add_jdk_archive(&self, data: IndexedArchiveData) {
+        self.jdk.add_classes(data.classes);
+        self.jdk.add_modules(data.modules);
+        self.invalidate_analysis_caches();
+    }
+
     pub fn add_jar_classes(&self, scope: IndexScope, classes: Vec<ClassMetadata>) {
         let module = self.ensure_module(scope.module, default_module_name(scope.module));
         let bucket = Arc::new(BucketIndex::new());
@@ -142,7 +148,10 @@ impl WorkspaceIndex {
 
         let bucket = Arc::new(BucketIndex::new());
         match index_jar(Path::new(path.as_ref())) {
-            Ok(classes) => bucket.add_classes(classes),
+            Ok(data) => {
+                bucket.add_classes(data.classes);
+                bucket.add_modules(data.modules);
+            }
             Err(err) => {
                 tracing::warn!(path = path.as_ref(), error = %err, "failed to index jar");
             }
@@ -215,6 +224,40 @@ impl WorkspaceIndex {
             .classpath_summary()
     }
 
+    pub fn visible_bytecode_module_names_for_analysis_context(
+        &self,
+        module_id: ModuleId,
+        classpath_id: ClasspathId,
+        source_root: Option<SourceRootId>,
+    ) -> Vec<Arc<str>> {
+        let mut names = BTreeSet::new();
+        for bucket in
+            self.visible_buckets_for_analysis_context(module_id, classpath_id, source_root)
+        {
+            for name in bucket.module_names() {
+                names.insert(name);
+            }
+        }
+        names.into_iter().collect()
+    }
+
+    pub fn find_visible_bytecode_module_for_analysis_context(
+        &self,
+        module_id: ModuleId,
+        classpath_id: ClasspathId,
+        source_root: Option<SourceRootId>,
+        module_name: &str,
+    ) -> Option<Arc<IndexedJavaModule>> {
+        for bucket in
+            self.visible_buckets_for_analysis_context(module_id, classpath_id, source_root)
+        {
+            if let Some(module) = bucket.get_module(module_name) {
+                return Some(module);
+            }
+        }
+        None
+    }
+
     pub fn view(&self, scope: IndexScope) -> IndexView {
         self.view_for_classpath(scope, ClasspathId::Main)
     }
@@ -238,46 +281,18 @@ impl WorkspaceIndex {
         }
 
         let module = self.ensure_module(module_id, default_module_name(module_id));
-
-        let mut layers: SmallVec<Arc<BucketIndex>, 8> = SmallVec::new();
         let module_jars = module.classpath_jars(classpath_id);
-        for bucket in module.visible_source_layers(classpath_id, source_root) {
-            layers.push(bucket);
-        }
-        for bucket in module.classpath_layers(classpath_id) {
-            layers.push(bucket);
-        }
-
-        let graph = self.graph.read();
-        let mut queue: VecDeque<ModuleId> = VecDeque::new();
-        let mut seen: FxHashSet<ModuleId> = Default::default();
-        seen.insert(module_id);
-        queue.extend(graph.deps_of(module_id).iter().copied());
-
-        while let Some(dep) = queue.pop_front() {
-            if !seen.insert(dep) {
-                continue;
-            }
-            let dep_module = self.ensure_module(dep, default_module_name(dep));
-            for bucket in dep_module.visible_source_layers(ClasspathId::Main, None) {
-                layers.push(bucket);
-            }
-            for bucket in dep_module.classpath_layers(ClasspathId::Main) {
-                layers.push(bucket);
-            }
-            queue.extend(graph.deps_of(dep).iter().copied());
-        }
+        let layers =
+            self.visible_buckets_for_analysis_context(module_id, classpath_id, source_root);
 
         tracing::debug!(
             module = module_id.0,
             requested_classpath = ?classpath_id,
             source_root = ?source_root.map(|id| id.0),
             module_classpath_jars = module_jars.len(),
-            dep_count = seen.len().saturating_sub(1),
-            layer_count = layers.len() + 1,
+            layer_count = layers.len(),
             "building index view for analysis context"
         );
-        layers.push(Arc::clone(&self.jdk));
         let view = IndexView::new(layers);
         if self.version() == started_version {
             self.view_cache.insert(key, (started_version, view.clone()));
@@ -306,6 +321,46 @@ impl WorkspaceIndex {
     ) -> Arc<NameTable> {
         self.view_for_analysis_context(module, classpath_id, source_root)
             .build_name_table()
+    }
+
+    fn visible_buckets_for_analysis_context(
+        &self,
+        module_id: ModuleId,
+        classpath_id: ClasspathId,
+        source_root: Option<SourceRootId>,
+    ) -> SmallVec<Arc<BucketIndex>, 8> {
+        let module = self.ensure_module(module_id, default_module_name(module_id));
+
+        let mut layers: SmallVec<Arc<BucketIndex>, 8> = SmallVec::new();
+        for bucket in module.visible_source_layers(classpath_id, source_root) {
+            layers.push(bucket);
+        }
+        for bucket in module.classpath_layers(classpath_id) {
+            layers.push(bucket);
+        }
+
+        let graph = self.graph.read();
+        let mut queue: VecDeque<ModuleId> = VecDeque::new();
+        let mut seen: FxHashSet<ModuleId> = Default::default();
+        seen.insert(module_id);
+        queue.extend(graph.deps_of(module_id).iter().copied());
+
+        while let Some(dep) = queue.pop_front() {
+            if !seen.insert(dep) {
+                continue;
+            }
+            let dep_module = self.ensure_module(dep, default_module_name(dep));
+            for bucket in dep_module.visible_source_layers(ClasspathId::Main, None) {
+                layers.push(bucket);
+            }
+            for bucket in dep_module.classpath_layers(ClasspathId::Main) {
+                layers.push(bucket);
+            }
+            queue.extend(graph.deps_of(dep).iter().copied());
+        }
+
+        layers.push(Arc::clone(&self.jdk));
+        layers
     }
 
     pub fn add_classes(&self, classes: Vec<ClassMetadata>) {

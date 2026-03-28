@@ -1,13 +1,20 @@
 use std::sync::Arc;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 use crate::index::{ClassOrigin, IndexView};
 use crate::language::LanguageRegistry;
 use crate::language::java::class_parser::find_symbol_range;
+use crate::language::java::module_info::{
+    module_declaration_name_node, render_module_descriptor_source,
+};
 use crate::lsp::request_context::{PreparedRequest, RequestContext};
 use crate::lsp::server::Backend;
 use crate::semantic::context::CursorLocation;
 use crate::semantic::types::symbol_resolver::{ResolvedSymbol, SymbolResolver};
-use crate::workspace::Workspace;
+use crate::workspace::{JavaModuleTarget, Workspace};
 use tower_lsp::jsonrpc;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
@@ -151,33 +158,20 @@ fn handle_goto_definition_blocking(
                 | crate::semantic::context::JavaModuleContextKind::TargetModule
         )
     ) && !ctx.query.is_empty()
-        && let Some(target_uri) = workspace.java_module_uri(ctx.query.as_str())
+        && let Some(target) = workspace.resolve_java_module_target(analysis, ctx.query.as_str())
     {
-        let range = workspace
-            .documents
-            .with_doc(&target_uri, |doc| doc.source().text().to_owned())
-            .or_else(|| {
-                target_uri
-                    .to_file_path()
-                    .ok()
-                    .and_then(|path| std::fs::read_to_string(path).ok())
-            })
-            .and_then(|content| {
-                let mut parser = crate::language::java::make_java_parser();
-                let tree = parser.parse(&content, None)?;
-                let rope = ropey::Rope::from_str(&content);
-                let name_node = crate::language::java::module_info::module_declaration_name_node(
-                    tree.root_node(),
-                )?;
-                Some(crate::lsp::converters::ts_node_to_range(&name_node, &rope))
-            })
-            .unwrap_or_default();
+        let Some(location) = (match target {
+            JavaModuleTarget::Source { uri } => {
+                Some(module_source_location(workspace.as_ref(), &uri))
+            }
+            JavaModuleTarget::Bytecode { module } => module_bytecode_location(module.as_ref()),
+        }) else {
+            log_summary();
+            return Ok(GotoPrepared::Ready(None));
+        };
         log_summary();
         return Ok(GotoPrepared::Ready(Some(GotoDefinitionResponse::Scalar(
-            Location {
-                uri: target_uri,
-                range,
-            },
+            location,
         ))));
     }
 
@@ -641,6 +635,56 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+fn module_source_location(workspace: &Workspace, target_uri: &Url) -> Location {
+    let range = workspace
+        .documents
+        .with_doc(target_uri, |doc| doc.source().text().to_owned())
+        .or_else(|| {
+            target_uri
+                .to_file_path()
+                .ok()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+        })
+        .and_then(|content| module_declaration_name_range(&content))
+        .unwrap_or_default();
+
+    Location {
+        uri: target_uri.clone(),
+        range,
+    }
+}
+
+fn module_bytecode_location(module: &crate::index::IndexedJavaModule) -> Option<Location> {
+    let source = render_module_descriptor_source(&module.descriptor);
+    let cache_path = bytecode_module_cache_path(module);
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&cache_path, source.as_bytes()).ok()?;
+    let uri = Url::from_file_path(&cache_path).ok()?;
+    let range = module_declaration_name_range(&source).unwrap_or_default();
+    Some(Location { uri, range })
+}
+
+fn module_declaration_name_range(content: &str) -> Option<Range> {
+    let mut parser = crate::language::java::make_java_parser();
+    let tree = parser.parse(content, None)?;
+    let rope = ropey::Rope::from_str(content);
+    let name_node = module_declaration_name_node(tree.root_node())?;
+    Some(crate::lsp::converters::ts_node_to_range(&name_node, &rope))
+}
+
+fn bytecode_module_cache_path(module: &crate::index::IndexedJavaModule) -> std::path::PathBuf {
+    let mut hasher = DefaultHasher::new();
+    module.name().hash(&mut hasher);
+    module.origin.hash(&mut hasher);
+    let cache_key = format!("{:016x}", hasher.finish());
+    std::env::temp_dir()
+        .join("java_analyzer_modules")
+        .join(cache_key)
+        .join("module-info.java")
+}
+
 fn extract_class_bytes(jar: &str, internal: &str) -> anyhow::Result<Vec<u8>> {
     let file = std::fs::File::open(jar)?;
     let mut zip = zip::ZipArchive::new(file)?;
@@ -654,9 +698,10 @@ fn extract_class_bytes(jar: &str, internal: &str) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::ClassOrigin;
+    use crate::index::{ClassOrigin, IndexedArchiveData, IndexedJavaModule};
     use crate::language::LanguageRegistry;
     use crate::language::java::class_parser::parse_java_source_via_tree_for_test;
+    use crate::language::java::module_info::JavaModuleDescriptor;
     use crate::lsp::request_cancellation::{CancellationToken, RequestFamily};
     use crate::lsp::request_context::RequestContext;
     use crate::workspace::document::Document;
@@ -689,6 +734,21 @@ mod tests {
             .expect("salsa file for document");
         let db = workspace.salsa_db.lock();
         workspace.refresh_java_module_descriptor_for_salsa_file(&*db, salsa_file);
+    }
+
+    fn make_bytecode_module(name: &str) -> IndexedJavaModule {
+        IndexedJavaModule {
+            descriptor: Arc::new(JavaModuleDescriptor {
+                name: Arc::from(name),
+                is_open: false,
+                requires: vec![],
+                exports: vec![],
+                opens: vec![],
+                uses: vec![],
+                provides: vec![],
+            }),
+            origin: ClassOrigin::Jar(Arc::from("/tmp/modules.jar")),
+        }
     }
 
     fn goto_location_from_marked_source(
@@ -855,5 +915,37 @@ mod tests {
 
         assert_eq!(location.uri, target_uri);
         assert_range_matches_name(target_source, location.range, "com.example.shared");
+    }
+
+    #[test]
+    fn test_goto_module_requires_bytecode_target_renders_synthetic_source() {
+        let workspace = Arc::new(Workspace::new());
+        workspace.index.update(|index| {
+            index.add_jdk_archive(IndexedArchiveData {
+                classes: vec![],
+                modules: vec![make_bytecode_module("com.example.bytecode")],
+            });
+        });
+
+        let app_uri = Url::parse("file:///workspace/app/module-info.java").expect("uri");
+        let location = goto_location_from_marked_source(
+            workspace,
+            app_uri,
+            "module com.example.app { requires com.example.byt|ecode; }",
+        );
+
+        let path = location.uri.to_file_path().expect("synthetic module file");
+        assert!(path.ends_with("module-info.java"), "{path:?}");
+        assert!(
+            path.to_string_lossy().contains("java_analyzer_modules"),
+            "{path:?}"
+        );
+
+        let source = std::fs::read_to_string(&path).expect("synthetic module source");
+        assert!(
+            source.contains("module com.example.bytecode"),
+            "unexpected synthetic module source: {source}"
+        );
+        assert_range_matches_name(&source, location.range, "com.example.bytecode");
     }
 }

@@ -420,8 +420,11 @@ mod tests {
     use super::*;
     use crate::completion::candidate::CandidateKind;
     use crate::completion::engine::{CompletionEngine, CompletionMetadata};
-    use crate::index::{ClassMetadata, ClassOrigin, IndexScope, ModuleId};
+    use crate::index::{
+        ClassMetadata, ClassOrigin, IndexScope, IndexedArchiveData, IndexedJavaModule, ModuleId,
+    };
     use crate::language::LanguageRegistry;
+    use crate::language::java::module_info::JavaModuleDescriptor;
     use crate::lsp::request_cancellation::{CancellationToken, RequestFamily};
     use crate::lsp::request_context::RequestContext;
     use crate::workspace::document::Document;
@@ -481,6 +484,21 @@ mod tests {
             inner_class_of: None,
             generic_signature: None,
             origin,
+        }
+    }
+
+    fn make_bytecode_module(name: &str) -> IndexedJavaModule {
+        IndexedJavaModule {
+            descriptor: Arc::new(JavaModuleDescriptor {
+                name: Arc::from(name),
+                is_open: false,
+                requires: vec![],
+                exports: vec![],
+                opens: vec![],
+                uses: vec![],
+                provides: vec![],
+            }),
+            origin: ClassOrigin::Jar(Arc::from("/tmp/modules.jar")),
         }
     }
 
@@ -935,6 +953,29 @@ mod tests {
         assert!(
             !labels.iter().any(|label| label == "com.example.app"),
             "current module should not be suggested in requires completion: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn test_module_info_target_module_completion_includes_bytecode_modules() {
+        let workspace = Arc::new(Workspace::new());
+        workspace.index.update(|index| {
+            index.add_jdk_archive(IndexedArchiveData {
+                classes: vec![],
+                modules: vec![make_bytecode_module("com.example.runtime")],
+            });
+        });
+
+        let app_uri = Url::parse("file:///workspace/app/module-info.java").expect("uri");
+        let labels = completion_labels_from_marked_source(
+            workspace,
+            app_uri,
+            "module com.example.app { exports com.example.api to com.example.run|time; }",
+        );
+
+        assert!(
+            labels.iter().any(|label| label == "com.example.runtime"),
+            "{labels:?}"
         );
     }
 
