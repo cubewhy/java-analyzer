@@ -1,140 +1,119 @@
-# Java Semantic Pipeline (Current Architecture)
+# Semantic Pipeline
 
-## 1. Glossary
+## Purpose
 
-- `CursorLocation`
-  - Meaning: syntax-level cursor classification from tree-sitter context (`MemberAccess`, `MethodReference`, `TypeAnnotation`, etc.).
-  - Not: a type inference result or compatibility decision.
+This document explains how Java source becomes the semantic objects used by completion, goto definition, and inlay hints.
 
-- `SemanticContext`
-  - Meaning: request-scoped semantic container used by completion providers.
-  - Includes syntax location, locals/imports, enclosing class/package, and enrichment outputs.
-  - Not: a full program-wide type-checking model.
+The important distinction is:
 
-- `FunctionalTargetHint`
-  - Meaning: syntax-derived hint that the current expression is target-typed by assignment/method-argument context.
-  - Carries expected type source text, argument-position info, and expression shape (`method reference` / `lambda`).
-  - Not: proof that a functional conversion is valid.
+- parsing and indexing discover structure
+- semantic context explains the cursor and local scope
+- type resolution explains what expressions and members mean in that scope
 
-- `ExpectedType`
-  - Meaning: normalized expected type propagated into expression context.
-  - Includes `source` (`AssignmentRhs` or `MethodArgument`) and `confidence` (`Exact` / `Partial`).
-  - Not: inferred runtime type of the expression itself.
+## Core Types
 
-- `TypedExpressionContext`
-  - Meaning: enriched expression context attached to `SemanticContext`.
-  - Carries `expected_type`, optional receiver type, and functional compatibility summary.
-  - Not: final overload/type-inference output.
+| Type | Meaning |
+| --- | --- |
+| `CursorLocation` | syntax-level classification of the cursor position |
+| `SemanticContext` | request-scoped semantic snapshot used by editor features |
+| `SourceTypeCtx` | source-facing type-resolution context built from package, imports, and visible types |
+| `TypeName` | canonical semantic type currency |
+| `IndexView` | request-scoped read view over visible source, dependencies, and JDK |
+| `TypeResolver` | member lookup, compatibility checks, and overload resolution |
+| `CurrentClassMember` | explicit or synthetic member visible on the current type |
 
-- `SamSignature`
-  - Meaning: extracted single abstract method shape for a functional interface.
-  - Contains method name, SAM parameter types, and SAM return type.
-  - Not: a solved generic substitution model.
+## End-To-End Flow
 
-- `FunctionalCompat`
-  - Meaning: shallow compatibility result between expression shape and target SAM.
-  - Fields: `status`, `resolved_owner`, `resolved_return`.
-  - Not: full JLS lambda/method-reference constraint solving.
+### 1. Prepare The Request
 
-- `TypeName`
-  - Meaning: canonical semantic type representation used in semantic/completion paths.
-  - Preserves base, generic args, and array depth structurally.
-  - Not: raw source text or a single canonical JVM descriptor string.
+`PreparedRequest::prepare` in `src/lsp/request_context.rs` does the shared setup:
 
-## 2. Type Representation Layers
+- ensure the document has a tree
+- resolve module/classpath/source-root analysis context
+- obtain an `IndexView`
+- extract the current file into classes and prepend them as an overlay
 
-- Source type text
-  - Example: `Function<? super T, ? extends K>`
-  - Origin: AST/source context and hints.
-  - Use: input to `SourceTypeCtx` strict/relaxed normalization.
+That gives every semantic feature a coherent view of unsaved code plus the rest of the workspace.
 
-- Canonical semantic type (`TypeName`)
-  - Example: base + structured args + array dims.
-  - Use: semantic propagation, expected type context, receiver typing.
+### 2. Extract Cursor Context
 
-- Erased/base owner for lookup
-  - Example: `java/util/List`
-  - Use: class/member lookup keys (`collect_inherited_members`, MRO).
-  - Rule: never use serialized full generic internals as owner lookup keys.
+Java cursor context is extracted through Salsa queries under `src/salsa_queries/java/`.
 
-- JVM descriptor/signature forms
-  - Examples: `Ljava/util/List;`, `(Ljava/lang/Object;)I`, generic signatures.
-  - Use: method parameter/return scoring and conversion helpers.
-  - Rule: descriptors are matching/scoring artifacts, not primary semantic storage.
+The extracted data includes:
 
-## 3. Enrichment Pipeline (Current)
+- package and imports
+- enclosing class and internal name
+- visible locals
+- flow overrides
+- cursor location and query text
+- Java-module context when inside `module-info.java`
 
-1. Syntax location extraction
-   - `location.rs` classifies cursor into `CursorLocation`.
-   - For functional targets, `infer_functional_target_hint` captures:
-     - assignment RHS expected type source
-     - method argument target position
-     - expression shape (`MethodReference` / `Lambda`).
+`Document` then caches the resulting `SemanticContext` by document version, workspace version, analysis context, offset, and trigger character.
 
-2. Semantic context creation
-   - `JavaContextExtractor` builds `SemanticContext` with locals/imports/class scope.
+### 3. Enrich The Context
 
-3. Receiver resolution + location normalization
-   - `completion_context.rs` normalizes method-reference locations to existing routing paths.
-   - Receiver semantic type is canonicalized via `TypeName` (strict normalization where possible).
+`ContextEnricher` in `src/language/java/completion_context.rs` upgrades the raw cursor context.
 
-4. Expected type propagation
-   - `enrich_expected_type_context` computes `typed_expr_ctx.expected_type` from:
-     - assignment RHS expected type source
-     - method argument parameter type selection.
-   - Confidence is `Exact` or `Partial`.
+Important enrichment steps:
 
-5. SAM extraction
-   - If expected type exists and resolves to a functional interface, extract `expected_sam`.
+- materialize local-variable types
+- resolve receiver types for member access
+- compute expected types for assignments and method arguments
+- bind functional-interface context for lambdas and method references
+- normalize method-reference and constructor-call cases into shared forms
 
-6. Functional compatibility
-   - If expression shape + expected SAM are both present:
-     - evaluate shallow compatibility (`Exact` / `Partial` / `Incompatible`)
-     - attach result to `typed_expr_ctx.functional_compat`.
+This stage is where many "completion knows where I am but not what types are involved" bugs actually live.
 
-## 4. Supported vs Not Yet Supported
+### 4. Resolve Expressions And Members
 
-- Supported now
-  - Target expected type propagation for assignment RHS and method argument.
-  - SAM extraction for single abstract method interfaces.
-  - Shallow compatibility for:
-    - `Type::method`
-    - `expr::method`
-    - `Type::new`
-    - simple lambdas (parameter-count gate + minimal expression-body check).
+`TypeResolver` in `src/semantic/types.rs` and helpers in `src/language/java/expression_typing.rs` do the heavy semantic work:
 
-- Not yet supported
-  - Full JLS constraint solving for lambda/method-reference conversion.
-  - Deep generic substitution/capture conversion across SAM and candidate methods.
-  - Full lambda body inference (block body flow, statement-level typing).
-  - Global overload-resolution redesign based on functional constraints.
+- resolve simple identifiers from locals, enclosing members, and visible types
+- evaluate chains such as `foo.bar().baz`
+- compute expression result types
+- rank overload candidates
+- substitute generic type parameters conservatively
 
-## 5. Review Invariants
+### 5. Add Synthetic Members
 
-- Preserve representation boundaries
-  - Keep source text, `TypeName`, erased owner, and descriptor/signature uses distinct.
-  - Avoid implicit round-trips that collapse structure.
+Current-type member extraction runs through `src/language/java/synthetic/common.rs`.
 
-- Owner lookup invariant
-  - Use erased owner (`TypeName::erased_internal()`) for class/member lookup keys.
-  - Do not lookup class metadata using serialized generic internal strings.
+That layer merges:
 
-- Expected type invariant
-  - Prefer `typed_expr_ctx.expected_type` as the primary expected-type output.
-  - Keep compatibility fields (`expected_functional_interface`, `expected_sam`) derived from this path.
+- explicit members parsed from the source body
+- record and enum synthetic members
+- Lombok-generated synthetic members
 
-- Relaxed resolution invariant
-  - Preserve outer/base type on inner generic failures and mark `Partial`.
-  - Do not drop to `None` when base type is known.
+Editor features should reason about the merged view, not about explicit members alone.
 
-- Compatibility invariant
-  - `Exact` only when clearly proven.
-  - Use `Partial` for plausibly compatible but under-constrained cases.
-  - Use `Incompatible` only when clearly wrong.
+### 6. Feature-Specific Consumers
 
-## 6. Anti-patterns to Avoid
+- completion: providers read `SemanticContext` and `IndexView`, then `post_processor.rs` scores and deduplicates the final list
+- goto definition: `SymbolResolver` resolves the target symbol, then the handler maps it back to source, synthetic origins, or decompiled bytecode
+- inlay hints: `editor_semantics.rs` and `inlay_hints.rs` reuse the same semantic context and call-resolution helpers
 
-- Provider-local ad hoc parsing that diverges from `SourceTypeCtx` normalization.
-- Using descriptor strings as long-lived semantic type state.
-- Mixing syntax classification concerns directly into provider ranking behavior.
-- Treating functional compatibility output as final type inference.
+## Important Invariants
+
+- `TypeName` is the semantic type currency. Do not pass raw descriptors or ad hoc strings through new semantic APIs.
+- Use erased internal names for class lookup. Generic detail belongs in `TypeName`, not in index keys.
+- Keep source names and internal names separate. Source names are for UI; internal names are for lookup.
+- The open document overlay must remain above workspace and dependency state.
+- Synthetic members are not a side channel. They are part of the semantic model of the current type.
+- Request handlers should not reimplement Java semantics. They should prepare the request, then delegate.
+
+## Where To Change What
+
+- bad cursor classification: `src/language/java/location.rs`
+- missing locals or enclosing context: `src/salsa_queries/semantic.rs` and Java scope helpers
+- wrong receiver typing or expected type: `src/language/java/completion_context.rs`
+- wrong expression result: `src/language/java/expression_typing.rs`
+- wrong overload choice: `src/semantic/types.rs`
+- missing synthetic member: `src/language/java/synthetic/` or `src/language/java/lombok/`
+
+## Common Refactor Mistakes
+
+- skipping `PreparedRequest` and losing the current-file overlay
+- adding a parallel type representation instead of extending `TypeName`
+- looking up classes by pretty-printed Java names instead of internal JVM names
+- fixing a completion symptom inside a provider when the real problem is earlier enrichment
+- forgetting that a source type may expose members through records, enums, or Lombok even when the source body is empty
