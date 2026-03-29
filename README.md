@@ -1,5 +1,7 @@
 # Java Analyzer
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cubewhy/java-analyzer)
+
 [![CI Status](https://github.com/cubewhy/java-analyzer/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/cubewhy/java-analyzer/actions/workflows/rust-ci.yaml)
 ![GitHub License](https://img.shields.io/github/license/cubewhy/java-analyzer)
 
