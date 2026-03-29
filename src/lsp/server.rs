@@ -45,7 +45,7 @@ pub struct Backend {
 
 impl Backend {
     pub fn new(client: Client) -> Self {
-        let cache_dir = dirs::cache_dir()
+        let decompiler_cache_dir = dirs::cache_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("java-analyzer")
             .join("decompiled");
@@ -56,7 +56,7 @@ impl Backend {
             engine: Arc::new(CompletionEngine::new()),
             registry: Arc::new(LanguageRegistry::new()),
             config: tokio::sync::RwLock::new(JavaAnalyzerConfig::default()),
-            decompiler_cache: DecompilerCache::new(cache_dir),
+            decompiler_cache: DecompilerCache::new(decompiler_cache_dir),
             request_cancellation: Arc::new(RequestCancellationManager::new()),
             build_services: tokio::sync::RwLock::new(Vec::new()),
             pending_document_reindex_versions: Arc::new(dashmap::DashMap::new()),
