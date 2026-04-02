@@ -7,6 +7,14 @@
 
 Extreme fast Java LSP, built in Rust
 
+## Archived
+
+The current architecture design is completely flawed. I believe using a handwritten parser + rowan + salsa would be a better approach. Tree-sitter imposes too many limitations. I simply don't have the bandwidth to refactor it, so I'm archiving the repository.
+
+If you got interest, please contact me, we could restart the project together.
+
+My contacts can be found at my GitHub profile.
+
 ## Feature Matrix
 
 [JLS Implement Status (AI generated)](docs/jls-implementation-status.md)
