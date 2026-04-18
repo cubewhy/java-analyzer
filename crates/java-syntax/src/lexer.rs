@@ -88,7 +88,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn scan_tokens(&mut self) -> Result<&[Token<'a>], (&[Token<'a>], &[LexicalError])> {
+    pub fn scan_tokens(mut self) -> Result<Vec<Token<'a>>, (Vec<Token<'a>>, Vec<LexicalError>)> {
         // consume BOM
         if self.reader.peek() == '\u{FEFF}' {
             self.reader.advance();
@@ -111,9 +111,9 @@ impl<'a> Lexer<'a> {
         );
 
         if !self.errors.is_empty() {
-            Err((&self.tokens, &self.errors))
+            Err((self.tokens, self.errors))
         } else {
-            Ok(&self.tokens)
+            Ok(self.tokens)
         }
     }
 
@@ -924,7 +924,7 @@ mod tests {
 
     /// Helper to lex source and return filtered non-trivia tokens for snapshotting
     fn lex_tokens(source: &str) -> Vec<(SyntaxKind, &str)> {
-        let mut lexer = Lexer::new(source);
+        let lexer = Lexer::new(source);
         match lexer.scan_tokens() {
             Ok(tokens) => tokens.iter().map(|t| (t.kind, t.lexeme)).collect(),
             Err((tokens, errors)) => {
@@ -938,7 +938,7 @@ mod tests {
 
     /// Helper to lex source and return errors for snapshotting
     fn lex_errors(source: &str) -> Vec<LexicalErrorKind> {
-        let mut lexer = Lexer::new(source);
+        let lexer = Lexer::new(source);
         match lexer.scan_tokens() {
             Ok(tokens) => panic!(
                 "Expected errors but lexing succeeded for: '{}'\nTokens: {:#?}",
