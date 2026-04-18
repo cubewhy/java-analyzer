@@ -648,7 +648,7 @@ impl<'a> JavaLexer<'a> {
             } else {
                 self.reader.advance();
             }
-            logical_char_count += c.len_utf8();
+            logical_char_count += c.len_utf16();
         }
 
         if self.reader.is_at_end() {
@@ -1676,6 +1676,7 @@ mod tests {
 
     #[test]
     fn test_char_literal_bmp_only() {
+        assert_lex!("'你'", [(TokenType::CharLiteral, "'你'")]);
         assert_lex_errors!("'🐘'", [LexicalErrorType::InvalidChar]);
     }
 
