@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 unicode_categories = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["yaml"] }
+indoc = { workspace = true }

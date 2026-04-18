@@ -1,0 +1,26 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"'a' '\\\\n' '\\\\''\")"
+---
+[
+    (
+        CharLiteral,
+        "'a'",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        CharLiteral,
+        "'\\n'",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        CharLiteral,
+        "'\\''",
+    ),
+]

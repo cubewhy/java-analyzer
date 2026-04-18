@@ -1,0 +1,14 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"// this is a line comment\\n\")"
+---
+[
+    (
+        LineComment,
+        "// this is a line comment",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+]

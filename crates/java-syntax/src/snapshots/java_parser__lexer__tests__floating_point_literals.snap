@@ -1,0 +1,50 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"1.23 .5 10. 3.14f 6.022e23 1e-9d\")"
+---
+[
+    (
+        NumberLiteral,
+        "1.23",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        ".5",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "10.",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "3.14f",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "6.022e23",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "1e-9d",
+    ),
+]

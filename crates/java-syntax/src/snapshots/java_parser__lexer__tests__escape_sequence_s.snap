@@ -1,0 +1,18 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(r#\" \"trailing space\\s\" \"#)"
+---
+[
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        StringLiteral,
+        "\"trailing space\\s\"",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+]

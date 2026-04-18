@@ -1,0 +1,38 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"\\\\u0070ublic class Test {}\")"
+---
+[
+    (
+        Public,
+        "public",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Class,
+        "class",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "Test",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        LeftBrace,
+        "{",
+    ),
+    (
+        RightBrace,
+        "}",
+    ),
+]

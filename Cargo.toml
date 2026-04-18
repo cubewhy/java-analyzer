@@ -3,6 +3,8 @@ resolver = "3"
 members = ["crates/java-syntax", "lib/rust-asm", "xtask"]
 
 [workspace.dependencies]
+indoc = "2.0"
+insta = "1.47.2"
 anyhow = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower-lsp = "0.20"

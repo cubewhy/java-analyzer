@@ -1,0 +1,286 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: lex_tokens(source)
+---
+[
+    (
+        Plus,
+        "+",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        PlusEqual,
+        "+=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        PlusPlus,
+        "++",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Minus,
+        "-",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        MinusEqual,
+        "-=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        MinusMinus,
+        "--",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Arrow,
+        "->",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+    (
+        Star,
+        "*",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        MultipleEqual,
+        "*=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Slash,
+        "/",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        DivideEqual,
+        "/=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Modulo,
+        "%",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        ModuloEqual,
+        "%=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        EqualEqual,
+        "==",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Equal,
+        "=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NotEqual,
+        "!=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Not,
+        "!",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+    (
+        Less,
+        "<",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        LessEq,
+        "<=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Shl,
+        "<<",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        ShlEqual,
+        "<<=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Greater,
+        ">",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        GreaterEq,
+        ">=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Shr,
+        ">>",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        ShrEqual,
+        ">>=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        UnsignedShr,
+        ">>>",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        UnsignedShrEqual,
+        ">>>=",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+    (
+        BitAnd,
+        "&",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        AndEqual,
+        "&=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        BitOr,
+        "|",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        OrEqual,
+        "|=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Caret,
+        "^",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        XorEqual,
+        "^=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        And,
+        "&&",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Or,
+        "||",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+]

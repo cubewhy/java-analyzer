@@ -1,0 +1,14 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: lex_tokens(source)
+---
+[
+    (
+        TextBlock,
+        "\"\"\"\nHello\n  World\n\"\"\"",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+]

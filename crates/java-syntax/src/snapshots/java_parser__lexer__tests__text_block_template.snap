@@ -1,0 +1,22 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: lex_tokens(source)
+---
+[
+    (
+        TextBlockTemplateBegin,
+        "\"\"\"\n  Line 1 \\{",
+    ),
+    (
+        Identifier,
+        "a",
+    ),
+    (
+        TextBlockTemplateEnd,
+        "}\n  Line 2\"\"\"",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+]

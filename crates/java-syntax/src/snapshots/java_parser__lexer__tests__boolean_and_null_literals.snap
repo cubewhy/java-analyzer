@@ -1,0 +1,26 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"true false null\")"
+---
+[
+    (
+        True,
+        "true",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        False,
+        "false",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Null,
+        "null",
+    ),
+]

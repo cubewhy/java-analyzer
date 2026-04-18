@@ -1,0 +1,42 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: lex_tokens(source)
+---
+[
+    (
+        Javadoc,
+        "/**\n * This is a Javadoc comment\n * @param x the value\n */",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+    (
+        Public,
+        "public",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Int,
+        "int",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "x",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+]

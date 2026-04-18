@@ -1,0 +1,74 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"List<String> list = new ArrayList<>();\")"
+---
+[
+    (
+        Identifier,
+        "List",
+    ),
+    (
+        Less,
+        "<",
+    ),
+    (
+        Identifier,
+        "String",
+    ),
+    (
+        Greater,
+        ">",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "list",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Equal,
+        "=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        New,
+        "new",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "ArrayList",
+    ),
+    (
+        Less,
+        "<",
+    ),
+    (
+        Greater,
+        ">",
+    ),
+    (
+        LeftParen,
+        "(",
+    ),
+    (
+        RightParen,
+        ")",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+]

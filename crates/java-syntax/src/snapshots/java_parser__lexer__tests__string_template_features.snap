@@ -1,0 +1,26 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"STR.\\\"Hello \\\\{name}!\\\"\")"
+---
+[
+    (
+        Identifier,
+        "STR",
+    ),
+    (
+        Dot,
+        ".",
+    ),
+    (
+        StringTemplateBegin,
+        "\"Hello \\{",
+    ),
+    (
+        Identifier,
+        "name",
+    ),
+    (
+        StringTemplateEnd,
+        "}!\"",
+    ),
+]

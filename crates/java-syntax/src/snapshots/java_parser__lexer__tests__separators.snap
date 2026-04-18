@@ -1,0 +1,98 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"( ) { } [ ] ; , . ... :: @\")"
+---
+[
+    (
+        LeftParen,
+        "(",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        RightParen,
+        ")",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        LeftBrace,
+        "{",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        RightBrace,
+        "}",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        LeftBracket,
+        "[",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        RightBracket,
+        "]",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Dot,
+        ".",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Ellipsis,
+        "...",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        ColonColon,
+        "::",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        At,
+        "@",
+    ),
+]

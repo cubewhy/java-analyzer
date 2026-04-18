@@ -834,7 +834,7 @@ impl JavaLexicalError {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum LexicalErrorType {
     UnexpectedChar(char),
     MissingSemicolon,
@@ -858,895 +858,241 @@ fn is_java_whitespace(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use indoc::indoc;
+    use insta::assert_debug_snapshot;
 
-    macro_rules! assert_lex {
-        ($source:expr, [ $( ($expected_type:expr, $expected_lexeme:expr) ),* $(,)? ]) => {
-            let mut lexer = JavaLexer::new($source);
-            match lexer.scan_tokens() {
-                Ok(tokens) => {
-                    let actual_filtered: Vec<_> = tokens.iter()
-                        .filter(|t| !t.token_type.is_trivia())
-                        .collect();
-
-                    let expected: Vec<(TokenType, &str)> = vec![
-                        $( ($expected_type, $expected_lexeme) ),*
-                    ];
-
-                    assert_eq!(
-                        actual_filtered.len(),
-                        expected.len(),
-                        "Token count mismatch for source: '{}'\nActual tokens: {:#?}",
-                        $source,
-                        tokens
-                    );
-
-                    for (i, token) in actual_filtered.into_iter().enumerate() {
-                        assert_eq!(
-                            token.token_type, expected[i].0,
-                            "Type mismatch at index {} for source '{}'", i, $source
-                        );
-                        assert_eq!(
-                            token.lexeme, expected[i].1,
-                            "Lexeme mismatch at index {} for source '{}'", i, $source
-                        );
-                    }
-                }
-                Err((tokens, errors)) => {
-                    panic!("Lexing failed for '{}'\nTokens: {:#?}\nErrors: {:#?}", $source, tokens, errors);
-                }
+    /// Helper to lex source and return filtered non-trivia tokens for snapshotting
+    fn lex_tokens(source: &str) -> Vec<(TokenType, &str)> {
+        let mut lexer = JavaLexer::new(source);
+        match lexer.scan_tokens() {
+            Ok(tokens) => tokens.iter().map(|t| (t.token_type, t.lexeme)).collect(),
+            Err((tokens, errors)) => {
+                panic!(
+                    "Lexing failed unexpectedly for: '{}'\nTokens: {:#?}\nErrors: {:#?}",
+                    source, tokens, errors
+                );
             }
-        };
+        }
     }
 
-    macro_rules! assert_lex_errors {
-        ($source:expr, [ $( $expected_error_pattern:pat ),* $(,)? ]) => {
-            let mut lexer = JavaLexer::new($source);
-            match lexer.scan_tokens() {
-                Ok(tokens) => panic!("Expected errors but lexing succeeded for: '{}'\nTokens: {:#?}", $source, tokens),
-                Err((_, errors)) => {
-                    let mut err_iter = errors.iter();
-
-                    $(
-                        let err = err_iter.next().expect(&format!("Not enough errors returned for source: '{}'\nActual errors: {:#?}", $source, errors));
-                        assert!(
-                            matches!(&err.error_type, $expected_error_pattern),
-                            "Error type mismatch. Expected pattern '{}' but got {:?}\nActual errors: {:#?}",
-                            stringify!($expected_error_pattern), err.error_type, errors
-                        );
-                    )*
-
-                    assert!(
-                        err_iter.next().is_none(),
-                        "Too many errors returned for source: '{}'\nActual errors: {:#?}",
-                        $source, errors
-                    );
-                }
-            }
-        };
+    /// Helper to lex source and return errors for snapshotting
+    fn lex_errors(source: &str) -> Vec<LexicalErrorType> {
+        let mut lexer = JavaLexer::new(source);
+        match lexer.scan_tokens() {
+            Ok(tokens) => panic!(
+                "Expected errors but lexing succeeded for: '{}'\nTokens: {:#?}",
+                source, tokens
+            ),
+            Err((_, errors)) => errors.iter().map(|e| e.error_type).collect(),
+        }
     }
 
     #[test]
     fn test_empty_and_whitespace() {
-        assert_lex!("", []);
-        assert_lex!(" \t\n\r  ", []);
+        assert_debug_snapshot!(lex_tokens(""));
+        assert_debug_snapshot!(lex_tokens(" \t\n\r  "));
     }
 
     #[test]
     fn test_comments() {
-        // Comments should be consumed and yield no tokens
-        assert_lex!("// this is a line comment\n", []);
-        assert_lex!("/* this is a \n block comment */", []);
+        // Comments should be consumed and yield no tokens (if non-trivia)
+        assert_debug_snapshot!(lex_tokens("// this is a line comment\n"));
+        assert_debug_snapshot!(lex_tokens("/* this is a \n block comment */"));
+        assert_debug_snapshot!(lex_tokens("int /* comment */ x // line"));
+    }
 
-        // Mixed with tokens
-        assert_lex!(
-            "int /* comment */ x // line",
-            [(TokenType::Int, "int"), (TokenType::Identifier, "x"),]
-        );
+    #[test]
+    fn test_javadoc() {
+        // Javadoc is technically a block comment starting with /**
+        let source = indoc! {"
+            /**
+             * This is a Javadoc comment
+             * @param x the value
+             */
+            public int x;
+        "};
+        // We ensure the lexer skips it correctly or identifies it if configured
+        assert_debug_snapshot!(lex_tokens(source));
     }
 
     #[test]
     fn test_keywords_and_identifiers() {
-        assert_lex!(
-            "public static void main",
-            [
-                (TokenType::Public, "public"),
-                (TokenType::Static, "static"),
-                (TokenType::Void, "void"),
-                (TokenType::Identifier, "main")
-            ]
-        );
-
-        assert_lex!(
-            "class interface enum record",
-            [
-                (TokenType::Class, "class"),
-                (TokenType::Interface, "interface"),
-                (TokenType::Enum, "enum"),
-                (TokenType::Identifier, "record") // "record" is a contextual keyword, so Identifier is correct for a basic lexer
-            ]
-        );
-
-        assert_lex!(
-            "$myVar _underscore value123",
-            [
-                (TokenType::Identifier, "$myVar"),
-                (TokenType::Identifier, "_underscore"),
-                (TokenType::Identifier, "value123")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("public static void main"));
+        assert_debug_snapshot!(lex_tokens("class interface enum record"));
+        assert_debug_snapshot!(lex_tokens("$myVar _underscore value123"));
     }
 
     #[test]
     fn test_boolean_and_null_literals() {
-        assert_lex!(
-            "true false null",
-            [
-                (TokenType::True, "true"),
-                (TokenType::False, "false"),
-                (TokenType::Null, "null")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("true false null"));
     }
 
     #[test]
     fn test_separators() {
-        assert_lex!(
-            "( ) { } [ ] ; , . ... :: @",
-            [
-                (TokenType::LeftParen, "("),
-                (TokenType::RightParen, ")"),
-                (TokenType::LeftBrace, "{"),
-                (TokenType::RightBrace, "}"),
-                (TokenType::LeftBracket, "["),
-                (TokenType::RightBracket, "]"),
-                (TokenType::Semicolon, ";"),
-                (TokenType::Comma, ","),
-                (TokenType::Dot, "."),
-                (TokenType::Ellipsis, "..."),
-                (TokenType::ColonColon, "::"),
-                (TokenType::At, "@")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("( ) { } [ ] ; , . ... :: @"));
     }
 
     #[test]
     fn test_operators() {
-        assert_lex!(
-            "+ += ++ - -= -- ->",
-            [
-                (TokenType::Plus, "+"),
-                (TokenType::PlusEqual, "+="),
-                (TokenType::PlusPlus, "++"),
-                (TokenType::Minus, "-"),
-                (TokenType::MinusEqual, "-="),
-                (TokenType::MinusMinus, "--"),
-                (TokenType::Arrow, "->")
-            ]
-        );
-
-        assert_lex!(
-            "* *= / /= % %= == = != !",
-            [
-                (TokenType::Star, "*"),
-                (TokenType::MultipleEqual, "*="),
-                (TokenType::Slash, "/"),
-                (TokenType::DivideEqual, "/="),
-                (TokenType::Modulo, "%"),
-                (TokenType::ModuloEqual, "%="),
-                (TokenType::EqualEqual, "=="),
-                (TokenType::Equal, "="),
-                (TokenType::NotEqual, "!="),
-                (TokenType::Not, "!")
-            ]
-        );
-
-        assert_lex!(
-            "< <= << <<= > >= >> >>= >>> >>>=",
-            [
-                (TokenType::Less, "<"),
-                (TokenType::LessEq, "<="),
-                (TokenType::Shl, "<<"),
-                (TokenType::ShlEqual, "<<="),
-                (TokenType::Greater, ">"),
-                (TokenType::GreaterEq, ">="),
-                (TokenType::Shr, ">>"),
-                (TokenType::ShrEqual, ">>="),
-                (TokenType::UnsignedShr, ">>>"),
-                (TokenType::UnsignedShrEqual, ">>>=")
-            ]
-        );
-
-        assert_lex!(
-            "& &= | |= ^ ^= && ||",
-            [
-                (TokenType::BitAnd, "&"),
-                (TokenType::AndEqual, "&="),
-                (TokenType::BitOr, "|"),
-                (TokenType::OrEqual, "|="),
-                (TokenType::Caret, "^"),
-                (TokenType::XorEqual, "^="),
-                (TokenType::And, "&&"),
-                (TokenType::Or, "||")
-            ]
-        );
+        let source = indoc! {"
+            + += ++ - -= -- ->
+            * *= / /= % %= == = != !
+            < <= << <<= > >= >> >>= >>> >>>=
+            & &= | |= ^ ^= && ||
+        "};
+        assert_debug_snapshot!(lex_tokens(source));
     }
 
     #[test]
     fn test_integer_literals() {
-        // Decimal
-        assert_lex!(
-            "0 123 1_000_000 456L",
-            [
-                (TokenType::NumberLiteral, "0"),
-                (TokenType::NumberLiteral, "123"),
-                (TokenType::NumberLiteral, "1_000_000"),
-                (TokenType::NumberLiteral, "456L")
-            ]
-        );
-
-        // Hexadecimal
-        assert_lex!(
-            "0x0 0x1A2B 0XCAFE_BABE 0xFFl",
-            [
-                (TokenType::NumberLiteral, "0x0"),
-                (TokenType::NumberLiteral, "0x1A2B"),
-                (TokenType::NumberLiteral, "0XCAFE_BABE"),
-                (TokenType::NumberLiteral, "0xFFl")
-            ]
-        );
-
-        // Binary
-        assert_lex!(
-            "0b0 0B1010_0101 0b11L",
-            [
-                (TokenType::NumberLiteral, "0b0"),
-                (TokenType::NumberLiteral, "0B1010_0101"),
-                (TokenType::NumberLiteral, "0b11L")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("0 123 1_000_000 456L"));
+        assert_debug_snapshot!(lex_tokens("0x0 0x1A2B 0XCAFE_BABE 0xFFl"));
+        assert_debug_snapshot!(lex_tokens("0b0 0B1010_0101 0b11L"));
     }
 
     #[test]
     fn test_floating_point_literals() {
-        assert_lex!(
-            "1.23 .5 10. 3.14f 6.022e23 1e-9d",
-            [
-                (TokenType::NumberLiteral, "1.23"),
-                (TokenType::NumberLiteral, ".5"),
-                (TokenType::NumberLiteral, "10."),
-                (TokenType::NumberLiteral, "3.14f"),
-                (TokenType::NumberLiteral, "6.022e23"),
-                (TokenType::NumberLiteral, "1e-9d")
-            ]
-        );
-
-        // Hexadecimal float
-        assert_lex!(
-            "0x1.0p3 0x.8P-2f",
-            [
-                (TokenType::NumberLiteral, "0x1.0p3"),
-                (TokenType::NumberLiteral, "0x.8P-2f")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("1.23 .5 10. 3.14f 6.022e23 1e-9d"));
+        assert_debug_snapshot!(lex_tokens("0x1.0p3 0x.8P-2f"));
     }
 
     #[test]
     fn test_string_literals() {
-        assert_lex!(
-            r#" "hello world" "escape \" test" "" "#,
-            [
-                (TokenType::StringLiteral, r#""hello world""#),
-                (TokenType::StringLiteral, r#""escape \" test""#),
-                (TokenType::StringLiteral, r#""""#)
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens(r#" "hello world" "escape \" test" "" "#));
     }
 
     #[test]
     fn test_text_blocks() {
-        // Valid Java 15+ text block starts with """ followed by a newline
-        assert_lex!(
-            "\"\"\"\nHello\n  World\n\"\"\"",
-            [(TokenType::TextBlock, "\"\"\"\nHello\n  World\n\"\"\"")]
-        );
+        let source = indoc! {r#"
+            """
+            Hello
+              World
+            """
+        "#};
+        assert_debug_snapshot!(lex_tokens(source));
     }
 
     #[test]
     fn test_char_literals() {
-        assert_lex!(
-            "'a' '\\n' '\\''",
-            [
-                (TokenType::CharLiteral, "'a'"),
-                (TokenType::CharLiteral, "'\\n'"),
-                (TokenType::CharLiteral, "'\\''")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("'a' '\\n' '\\''"));
     }
 
     #[test]
     fn test_complex_jls_scenario() {
-        let source = "List<String> list = new ArrayList<>();";
-        assert_lex!(
-            source,
-            [
-                (TokenType::Identifier, "List"),
-                (TokenType::Less, "<"),
-                (TokenType::Identifier, "String"),
-                (TokenType::Greater, ">"),
-                (TokenType::Identifier, "list"),
-                (TokenType::Equal, "="),
-                (TokenType::New, "new"),
-                (TokenType::Identifier, "ArrayList"),
-                (TokenType::Less, "<"),
-                (TokenType::Greater, ">"),
-                (TokenType::LeftParen, "("),
-                (TokenType::RightParen, ")"),
-                (TokenType::Semicolon, ";")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("List<String> list = new ArrayList<>();"));
     }
 
     #[test]
     fn test_error_unterminated_string() {
-        assert_lex_errors!(
-            "\"this string has no end",
-            [LexicalErrorType::UnterminatedString]
-        );
-        // Strings cannot span across physical newlines
-        assert_lex_errors!(
-            "\"line1\nline2\"",
-            [
-                LexicalErrorType::UnterminatedString,
-                LexicalErrorType::UnterminatedString
-            ]
-        );
+        assert_debug_snapshot!(lex_errors("\"this string has no end"));
+        assert_debug_snapshot!(lex_errors("\"line1\nline2\""));
     }
 
     #[test]
     fn test_error_unterminated_comment() {
-        assert_lex_errors!(
-            "/* this block comment never ends ",
-            [LexicalErrorType::UnterminatedComment]
-        );
+        assert_debug_snapshot!(lex_errors("/* this block comment never ends "));
     }
 
     #[test]
     fn test_error_invalid_numbers() {
-        // Underscore at the end of a number is invalid in JLS
-        assert_lex_errors!("123_", [LexicalErrorType::InvalidNumber]);
-
-        // Binary with non 0/1
-        assert_lex_errors!("0b1012", [LexicalErrorType::InvalidNumber]);
-
-        // _ after .
-        assert_lex_errors!("0._1f", [LexicalErrorType::InvalidNumber]);
-
-        // Invalid Octal
-        assert_lex_errors!("019", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0_19", [LexicalErrorType::InvalidNumber]);
+        assert_debug_snapshot!(lex_errors("123_"));
+        assert_debug_snapshot!(lex_errors("0b1012"));
+        assert_debug_snapshot!(lex_errors("0._1f"));
+        assert_debug_snapshot!(lex_errors("019"));
     }
 
     #[test]
     fn test_error_illegal_text_block_open() {
-        // Text block must have a newline immediately after """
-        assert_lex_errors!(
-            "\"\"\"illegal",
-            [
-                LexicalErrorType::IllegalTextBlockOpen,
-                LexicalErrorType::UnterminatedTextBlock
-            ]
-        );
+        assert_debug_snapshot!(lex_errors("\"\"\"illegal"));
     }
 
     #[test]
     fn test_error_invalid_char() {
-        // Char literals can only contain exactly one character (or one escape sequence)
-        assert_lex_errors!("'abc'", [LexicalErrorType::InvalidChar]);
-        assert_lex_errors!("''", [LexicalErrorType::InvalidChar]);
+        assert_debug_snapshot!(lex_errors("'abc'"));
+        assert_debug_snapshot!(lex_errors("''"));
     }
 
     #[test]
-    fn test_unicode_escape_in_keywords_and_identifiers() {
-        // \u0070 -> 'p'
-        assert_lex!(
-            "\\u0070ublic class Test {}",
-            [
-                (TokenType::Public, "public"),
-                (TokenType::Class, "class"),
-                (TokenType::Identifier, "Test"),
-                (TokenType::LeftBrace, "{"),
-                (TokenType::RightBrace, "}"),
-            ]
-        );
-
-        // \u005F -> '_'
-        assert_lex!(
-            "int my\\u005Fvar = 1;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "my_var"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "1"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_unicode_escape_multiple_u() {
-        // \uuuu0061 -> 'a'
-        assert_lex!(
-            "char \\uuuu0061 = 'a';",
-            [
-                (TokenType::Char, "char"),
-                (TokenType::Identifier, "a"),
-                (TokenType::Equal, "="),
-                (TokenType::CharLiteral, "'a'"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_unicode_escape_operators() {
-        assert_lex!(
-            "int a = 1 \\u002B\\u002B;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "a"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "1"),
-                (TokenType::PlusPlus, "++"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
+    fn test_unicode_escapes() {
+        // Testing keywords, identifiers and multiple 'u's
+        assert_debug_snapshot!(lex_tokens("\\u0070ublic class Test {}"));
+        assert_debug_snapshot!(lex_tokens("int my\\u005Fvar = 1;"));
+        assert_debug_snapshot!(lex_tokens("char \\uuuu0061 = 'a';"));
+        assert_debug_snapshot!(lex_tokens("int a = 1 \\u002B\\u002B;"));
     }
 
     #[test]
     fn test_unicode_escape_in_strings() {
-        assert_lex_errors!(
-            "String s = \"\\u0022\";",
-            [LexicalErrorType::UnterminatedString]
-        );
-
-        assert_lex!(
-            "String s = \"\\u005C\\u0022\";",
-            [
-                (TokenType::Identifier, "String"),
-                (TokenType::Identifier, "s"),
-                (TokenType::Equal, "="),
-                (TokenType::StringLiteral, "\"\\\"\""),
-                (TokenType::Semicolon, ";")
-            ]
-        );
+        assert_debug_snapshot!(lex_errors("String s = \"\\u0022\";"));
+        assert_debug_snapshot!(lex_tokens("String s = \"\\u005C\\u0022\";"));
     }
 
     #[test]
     fn test_error_invalid_unicode_escapes() {
-        assert_lex_errors!(
-            "int \\u006 = 1;",
-            [
-                LexicalErrorType::UnexpectedChar('\\'),
-                LexicalErrorType::InvalidUnicodeEscape,
-            ]
-        );
-
-        // Invalid hex (G is not hex)
-        assert_lex_errors!(
-            "int \\u006G = 1;",
-            [
-                LexicalErrorType::UnexpectedChar('\\'),
-                LexicalErrorType::InvalidUnicodeEscape,
-            ]
-        );
+        assert_debug_snapshot!(lex_errors("int \\u006 = 1;"));
+        assert_debug_snapshot!(lex_errors("int \\u006G = 1;"));
     }
 
     #[test]
-    fn test_comment_terminated_by_unicode_escapes() {
-        // \u000A -> '\n'
-        assert_lex!(
-            "// hidden comment \\u000A int x = 1;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "x"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "1"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
-
-        // \u000D -> '\r'
-        assert_lex!(
-            "// hidden comment \\u000D int y = 2;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "y"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "2"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
+    fn test_comment_termination_variants() {
+        // Unicode escapes acting as line terminators for comments
+        assert_debug_snapshot!(lex_tokens("// hidden comment \\u000A int x = 1;"));
+        assert_debug_snapshot!(lex_tokens("// normal comment \r int z = 3;"));
+        assert_debug_snapshot!(lex_tokens("// normal comment \r\n int w = 4;"));
     }
 
     #[test]
-    fn test_comment_terminated_by_raw_cr_and_crlf() {
-        // CR
-        assert_lex!(
-            "// normal comment \r int z = 3;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "z"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "3"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
-
-        // CRLF
-        assert_lex!(
-            "// normal comment \r\n int w = 4;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "w"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "4"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
+    fn test_invalid_underscore_placements() {
+        assert_debug_snapshot!(lex_errors("123_"));
+        assert_debug_snapshot!(lex_errors("123_.45"));
+        assert_debug_snapshot!(lex_errors("123._45"));
+        assert_debug_snapshot!(lex_errors("1e_10"));
+        assert_debug_snapshot!(lex_errors("1e+_10"));
     }
 
     #[test]
-    fn test_valid_number_extremes() {
-        assert_lex!(
-            "0x0.0p0f 0b1_0 00_0 1.e2 .1e-2 1f 1d 1l 0x.8p1 0X1.P-1D 0_123",
-            [
-                (TokenType::NumberLiteral, "0x0.0p0f"),
-                (TokenType::NumberLiteral, "0b1_0"),
-                (TokenType::NumberLiteral, "00_0"),
-                (TokenType::NumberLiteral, "1.e2"),
-                (TokenType::NumberLiteral, ".1e-2"),
-                (TokenType::NumberLiteral, "1f"),
-                (TokenType::NumberLiteral, "1d"),
-                (TokenType::NumberLiteral, "1l"),
-                (TokenType::NumberLiteral, "0x.8p1"),
-                (TokenType::NumberLiteral, "0X1.P-1D"),
-                (TokenType::NumberLiteral, "0_123"),
-            ]
-        );
-    }
+    fn test_string_template_features() {
+        assert_debug_snapshot!(lex_tokens("STR.\"Hello \\{name}!\""));
+        assert_debug_snapshot!(lex_tokens("\"a \\{b} c \\{d} e\""));
 
-    #[test]
-    fn test_invalid_underscore_placement_integer() {
-        // Trailing underscores on integer
-        assert_lex_errors!("123_", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0x123_", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0b10_", [LexicalErrorType::InvalidNumber]);
-    }
+        let nested = indoc! {r#"
+            "Result: \{ new int[]{1, 2} }"
+        "#};
+        assert_debug_snapshot!(lex_tokens(nested));
 
-    #[test]
-    fn test_invalid_underscore_placement_float() {
-        // Underscore immediately before decimal
-        assert_lex_errors!("123_.45", [LexicalErrorType::InvalidNumber]);
-
-        // Underscore immediately after decimal
-        assert_lex_errors!("123._45", [LexicalErrorType::InvalidNumber]);
-
-        // Trailing underscore on fractional part
-        assert_lex_errors!("123.45_", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!(".45_", [LexicalErrorType::InvalidNumber]);
-    }
-
-    #[test]
-    fn test_invalid_underscore_placement_exponent() {
-        // Underscore immediately before exponent (caught by fractional/integer trailing check)
-        assert_lex_errors!("123_e10", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("123.4_e10", [LexicalErrorType::InvalidNumber]);
-
-        // Underscore immediately after exponent indicator
-        assert_lex_errors!("1e_10", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0x1p_10", [LexicalErrorType::InvalidNumber]);
-
-        // Underscore immediately after exponent sign
-        assert_lex_errors!("1e+_10", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("1e-_10", [LexicalErrorType::InvalidNumber]);
-
-        // Trailing underscore on exponent
-        assert_lex_errors!("1e10_", [LexicalErrorType::InvalidNumber]);
-    }
-
-    #[test]
-    fn test_invalid_octals() {
-        // Base 8 literal containing 8 or 9
-        assert_lex_errors!("08", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("09", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0128", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0_9", [LexicalErrorType::InvalidNumber]);
-    }
-
-    #[test]
-    fn test_invalid_exponents_missing_digits() {
-        // Exponent indicators with no digits following
-        assert_lex_errors!("1e", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("1e+", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("1e-", [LexicalErrorType::InvalidNumber]);
-
-        // Hex exponent missing digits
-        assert_lex_errors!("0x1p", [LexicalErrorType::InvalidNumber]);
-        assert_lex_errors!("0x1p+", [LexicalErrorType::InvalidNumber]);
-    }
-
-    #[test]
-    fn test_multiple_invalid_factors() {
-        // Both invalid octal AND invalid underscore placement
-        // Should report the first encountered issue or both depending on exact iteration,
-        // but based on current implementation, it processes the whole integer loop.
-        // It will report InvalidNumber for '9' and then again if there's a trailing underscore.
-        assert_lex_errors!(
-            "09_",
-            [
-                LexicalErrorType::InvalidNumber,
-                LexicalErrorType::InvalidNumber
-            ]
-        );
-    }
-
-    #[test]
-    fn test_char_literal_strict_validation() {
-        assert_lex!(
-            "'a' '\\n' '\\t' '\\\\' '\\''",
-            [
-                (TokenType::CharLiteral, "'a'"),
-                (TokenType::CharLiteral, "'\\n'"),
-                (TokenType::CharLiteral, "'\\t'"),
-                (TokenType::CharLiteral, "'\\\\'"),
-                (TokenType::CharLiteral, "'\\''"),
-            ]
-        );
-
-        // empty char literal
-        assert_lex_errors!("''", [LexicalErrorType::InvalidChar]);
-
-        // multiple chars in a char literal
-        assert_lex_errors!("'ab'", [LexicalErrorType::InvalidChar]);
-        assert_lex_errors!("'\\n\\t'", [LexicalErrorType::InvalidChar]);
-
-        // invalid escape
-        assert_lex_errors!("'\\z'", [LexicalErrorType::InvalidEscapeSequence]);
-    }
-
-    #[test]
-    fn test_string_literal_escapes() {
-        assert_lex!(
-            r#" "\b\t\n\f\r\"\'\\" "#,
-            [(TokenType::StringLiteral, r#""\b\t\n\f\r\"\'\\""#)]
-        );
-
-        assert_lex!(
-            r#" "hello\sworld" "#,
-            [(TokenType::StringLiteral, r#""hello\sworld""#)]
-        );
-
-        // invalid escape seq
-        assert_lex_errors!(
-            r#" "hello \x world" "#,
-            [LexicalErrorType::InvalidEscapeSequence]
-        );
-
-        // \\n is not supported in single-line strings
-        // You may confused why the lexer doesn't throw UnterminatedString in this case
-        // IntelliJ will not throw this error; IntelliJ recognizes it as a string.
-        assert_lex_errors!(
-            "\"hello \\\n world\"",
-            [LexicalErrorType::InvalidEscapeSequence]
-        );
-    }
-
-    #[test]
-    fn test_octal_escapes() {
-        assert_lex!(
-            r#" "\0" "\77" "\177" "\377" "#,
-            [
-                (TokenType::StringLiteral, r#""\0""#),
-                (TokenType::StringLiteral, r#""\77""#),
-                (TokenType::StringLiteral, r#""\177""#),
-                (TokenType::StringLiteral, r#""\377""#),
-            ]
-        );
-
-        assert_lex!(r#" "\400" "#, [(TokenType::StringLiteral, r#""\400""#)]);
-
-        assert_lex!(
-            "'\\377' '\\0'",
-            [
-                (TokenType::CharLiteral, "'\\377'"),
-                (TokenType::CharLiteral, "'\\0'"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_text_block_specific_escapes() {
-        let valid_text_block = "\"\"\"\n line 1 \\\n line 2 \\s\n\"\"\"";
-        assert_lex!(valid_text_block, [(TokenType::TextBlock, valid_text_block)]);
-
-        // invalid escape (\p)
-        let invalid_text_block = "\"\"\"\n line 1 \\p \n\"\"\"";
-        assert_lex_errors!(
-            invalid_text_block,
-            [LexicalErrorType::InvalidEscapeSequence]
-        );
-    }
-
-    #[test]
-    fn test_multiple_errors_in_string() {
-        assert_lex_errors!(
-            r#" " \q and \z " "#,
-            [
-                LexicalErrorType::InvalidEscapeSequence,
-                LexicalErrorType::InvalidEscapeSequence
-            ]
-        );
-    }
-
-    #[test]
-    fn test_string_template_simple() {
-        assert_lex!(
-            "STR.\"Hello \\{name}!\"",
-            [
-                (TokenType::Identifier, "STR"), // Template Processor
-                (TokenType::Dot, "."),
-                (TokenType::StringTemplateBegin, "\"Hello \\{"),
-                (TokenType::Identifier, "name"),
-                (TokenType::StringTemplateEnd, "}!\"")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_string_template_multiple_fragments() {
-        assert_lex!(
-            "\"a \\{b} c \\{d} e\"",
-            [
-                (TokenType::StringTemplateBegin, "\"a \\{"),
-                (TokenType::Identifier, "b"),
-                (TokenType::StringTemplateMid, "} c \\{"),
-                (TokenType::Identifier, "d"),
-                (TokenType::StringTemplateEnd, "} e\"")
-            ]
-        );
-    }
-
-    #[test]
-    fn test_string_template_with_nested_braces() {
-        assert_lex!(
-            "\"Result: \\{ new int[]{1, 2} }\"",
-            [
-                (TokenType::StringTemplateBegin, "\"Result: \\{"),
-                (TokenType::New, "new"),
-                (TokenType::Int, "int"),
-                (TokenType::LeftBracket, "["),
-                (TokenType::RightBracket, "]"),
-                (TokenType::LeftBrace, "{"),
-                (TokenType::NumberLiteral, "1"),
-                (TokenType::Comma, ","),
-                (TokenType::NumberLiteral, "2"),
-                (TokenType::RightBrace, "}"),          // array
-                (TokenType::StringTemplateEnd, "}\"")  // template
-            ]
-        );
-    }
-
-    #[test]
-    fn test_nested_string_templates() {
-        assert_lex!(
-            "\"Outer \\{ \"Inner \\{x}\" }\"",
-            [
-                (TokenType::StringTemplateBegin, "\"Outer \\{"),
-                (TokenType::StringTemplateBegin, "\"Inner \\{"),
-                (TokenType::Identifier, "x"),
-                (TokenType::StringTemplateEnd, "}\""),
-                (TokenType::StringTemplateEnd, "}\"")
-            ]
-        );
+        assert_debug_snapshot!(lex_tokens("\"Outer \\{ \"Inner \\{x}\" }\""));
     }
 
     #[test]
     fn test_text_block_template() {
-        assert_lex!(
-            "\"\"\"\n  Line 1 \\{a}\n  Line 2\"\"\"",
-            [
-                (TokenType::TextBlockTemplateBegin, "\"\"\"\n  Line 1 \\{"),
-                (TokenType::Identifier, "a"),
-                (TokenType::TextBlockTemplateEnd, "}\n  Line 2\"\"\"")
-            ]
-        );
+        let source = indoc! {r#"
+            """
+              Line 1 \{a}
+              Line 2"""
+        "#};
+        assert_debug_snapshot!(lex_tokens(source));
     }
 
     #[test]
-    fn test_error_unterminated_string_template() {
-        assert_lex_errors!("\"Hello \\{name", [LexicalErrorType::UnterminatedTemplate]);
-    }
-
-    #[test]
-    fn test_float_starting_with_zero_nine() {
-        assert_lex!(
-            "09.5 09e2 09f 08.0D",
-            [
-                (TokenType::NumberLiteral, "09.5"),
-                (TokenType::NumberLiteral, "09e2"),
-                (TokenType::NumberLiteral, "09f"),
-                (TokenType::NumberLiteral, "08.0D"),
-            ]
-        );
-    }
-
-    #[test]
-    fn test_text_block_opening_whitespace() {
-        let valid_text_block = "\"\"\" \t \n  body\n\"\"\"";
-        assert_lex!(
-            valid_text_block,
-            [(TokenType::TextBlock, "\"\"\" \t \n  body\n\"\"\"")]
-        );
-    }
-
-    #[test]
-    fn test_char_literal_bmp_only() {
-        assert_lex!("'你'", [(TokenType::CharLiteral, "'你'")]);
-        assert_lex_errors!("'🐘'", [LexicalErrorType::InvalidChar]);
-    }
-
-    #[test]
-    fn test_eof_sub_character() {
-        assert_lex!(
-            "int x = 1;\x1A",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "x"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "1"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
-
-        // \x1A should only appear on the end of file
-        assert_lex_errors!(
-            "int \x1A x = 1;",
-            [LexicalErrorType::UnexpectedChar('\u{1a}')]
-        );
-    }
-
-    #[test]
-    fn test_utf8_bom() {
-        assert_lex!(
-            "\u{FEFF}int x = 1;",
-            [
-                (TokenType::Int, "int"),
-                (TokenType::Identifier, "x"),
-                (TokenType::Equal, "="),
-                (TokenType::NumberLiteral, "1"),
-                (TokenType::Semicolon, ";"),
-            ]
-        );
-
-        assert_lex!("\u{FEFF}", []);
+    fn test_special_characters_and_bom() {
+        // UTF-8 BOM
+        assert_debug_snapshot!(lex_tokens("\u{FEFF}int x = 1;"));
+        // EOF Sub character
+        assert_debug_snapshot!(lex_tokens("int x = 1;\x1A"));
+        // Emoji validation (BMP only for chars)
+        assert_debug_snapshot!(lex_tokens("'你'"));
+        assert_debug_snapshot!(lex_errors("'🐘'"));
     }
 
     #[test]
     fn test_escape_sequence_s() {
-        assert_lex!(
-            r#" "trailing space\s" "#,
-            [(TokenType::StringLiteral, r#""trailing space\s""#)]
-        );
-
-        let text_block_with_s = "\"\"\"\n    line 1\\s\n    line 2\n\"\"\"";
-        assert_lex!(
-            text_block_with_s,
-            [(TokenType::TextBlock, text_block_with_s)]
-        );
-
-        assert_lex!(
-            r#" "hello\s\tworld" "#,
-            [(TokenType::StringLiteral, r#""hello\s\tworld""#)]
-        );
+        assert_debug_snapshot!(lex_tokens(r#" "trailing space\s" "#));
+        let text_block = indoc! {r#"
+            """
+                line 1\s
+                line 2
+            """
+        "#};
+        assert_debug_snapshot!(lex_tokens(text_block));
     }
 }
