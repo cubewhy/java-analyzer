@@ -2,6 +2,7 @@ use crate::{
     lexer::token::{JavaToken, TokenType},
     reader::SourceReader,
 };
+use unicode_categories::UnicodeCategories;
 
 pub mod token;
 
@@ -89,7 +90,7 @@ impl<'a> JavaLexer<'a> {
                     }
 
                     c => {
-                        if c.is_alphabetic() || c == '_' || c == '$' {
+                        if is_java_identifier_start(c) {
                             self.handle_identifier();
                         } else {
                             self.report_error(LexicalErrorType::UnexpectedChar(c));
@@ -432,11 +433,7 @@ impl<'a> JavaLexer<'a> {
     }
 
     fn handle_identifier(&mut self) {
-        while !self.reader.is_at_end()
-            && (self.reader.peek().is_alphanumeric()
-                || self.reader.peek() == '_'
-                || self.reader.peek() == '$')
-        {
+        while !self.reader.is_at_end() && is_java_identifier_part(self.reader.peek()) {
             self.reader.advance(); // consume next char
         }
 
@@ -580,6 +577,14 @@ pub enum LexicalErrorType {
     UnterminatedTextBlock,
     InvalidNumber,
     InvalidUnicodeEscape,
+}
+
+fn is_java_identifier_start(c: char) -> bool {
+    c.is_alphabetic() || c.is_symbol_currency() || c.is_punctuation_connector()
+}
+
+fn is_java_identifier_part(c: char) -> bool {
+    is_java_identifier_start(c) || c.is_numeric()
 }
 
 #[cfg(test)]

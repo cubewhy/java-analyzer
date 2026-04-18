@@ -9,6 +9,7 @@ tower-lsp = "0.20"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 dashmap = "6"
+unicode_categories = "0.1"
 rayon = "1.10"
 rustc-hash = "2.1.2"
 parking_lot = "0.12"
