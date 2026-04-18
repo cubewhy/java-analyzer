@@ -594,12 +594,7 @@ impl<'a> JavaLexer<'a> {
         }
 
         match self.reader.peek() {
-            'b' | 't' | 'n' | 'f' | 'r' | '"' | '\'' | '\\' => {
-                self.reader.advance();
-                true
-            }
-
-            's' => {
+            'b' | 't' | 'n' | 'f' | 'r' | 's' | '"' | '\'' | '\\' => {
                 self.reader.advance();
                 true
             }
