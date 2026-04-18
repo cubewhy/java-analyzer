@@ -1,0 +1,26 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"$myVar _underscore value123\")"
+---
+[
+    (
+        Identifier,
+        "$myVar",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "_underscore",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "value123",
+    ),
+]

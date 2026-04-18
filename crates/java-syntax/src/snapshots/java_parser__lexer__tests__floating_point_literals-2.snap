@@ -1,0 +1,18 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"0x1.0p3 0x.8P-2f\")"
+---
+[
+    (
+        NumberLiteral,
+        "0x1.0p3",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "0x.8P-2f",
+    ),
+]

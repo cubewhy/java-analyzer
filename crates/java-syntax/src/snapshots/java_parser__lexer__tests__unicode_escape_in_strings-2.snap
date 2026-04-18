@@ -1,0 +1,38 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"String s = \\\"\\\\u005C\\\\u0022\\\";\")"
+---
+[
+    (
+        Identifier,
+        "String",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "s",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Equal,
+        "=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        StringLiteral,
+        "\"\\\"\"",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+]

@@ -1,0 +1,38 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"int x = 1;\\x1A\")"
+---
+[
+    (
+        Int,
+        "int",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "x",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Equal,
+        "=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "1",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+]

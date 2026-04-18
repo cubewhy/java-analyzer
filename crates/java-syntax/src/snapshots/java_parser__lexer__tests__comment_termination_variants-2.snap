@@ -1,0 +1,46 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"// normal comment \\r int z = 3;\")"
+---
+[
+    (
+        LineComment,
+        "// normal comment ",
+    ),
+    (
+        Whitespace,
+        "\r ",
+    ),
+    (
+        Int,
+        "int",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "z",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Equal,
+        "=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "3",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+]

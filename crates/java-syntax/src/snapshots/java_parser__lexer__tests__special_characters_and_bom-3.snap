@@ -1,0 +1,10 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"'你'\")"
+---
+[
+    (
+        CharLiteral,
+        "'你'",
+    ),
+]

@@ -1,0 +1,38 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"char \\\\uuuu0061 = 'a';\")"
+---
+[
+    (
+        Char,
+        "char",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Identifier,
+        "a",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Equal,
+        "=",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        CharLiteral,
+        "'a'",
+    ),
+    (
+        Semicolon,
+        ";",
+    ),
+]

@@ -1,0 +1,7 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_errors(\"123._45\")"
+---
+[
+    InvalidNumber,
+]

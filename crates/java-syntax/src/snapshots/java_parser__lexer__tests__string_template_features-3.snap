@@ -1,0 +1,70 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: lex_tokens(nested)
+---
+[
+    (
+        StringTemplateBegin,
+        "\"Result: \\{",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        New,
+        "new",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        Int,
+        "int",
+    ),
+    (
+        LeftBracket,
+        "[",
+    ),
+    (
+        RightBracket,
+        "]",
+    ),
+    (
+        LeftBrace,
+        "{",
+    ),
+    (
+        NumberLiteral,
+        "1",
+    ),
+    (
+        Comma,
+        ",",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "2",
+    ),
+    (
+        RightBrace,
+        "}",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        StringTemplateEnd,
+        "}\"",
+    ),
+    (
+        Whitespace,
+        "\n",
+    ),
+]

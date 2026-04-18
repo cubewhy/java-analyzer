@@ -1,0 +1,26 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"\\\"a \\\\{b} c \\\\{d} e\\\"\")"
+---
+[
+    (
+        StringTemplateBegin,
+        "\"a \\{",
+    ),
+    (
+        Identifier,
+        "b",
+    ),
+    (
+        StringTemplateMid,
+        "} c \\{",
+    ),
+    (
+        Identifier,
+        "d",
+    ),
+    (
+        StringTemplateEnd,
+        "} e\"",
+    ),
+]

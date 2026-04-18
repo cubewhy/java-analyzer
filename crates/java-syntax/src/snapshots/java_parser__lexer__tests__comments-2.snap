@@ -1,0 +1,10 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"/* this is a \\n block comment */\")"
+---
+[
+    (
+        BlockComment,
+        "/* this is a \n block comment */",
+    ),
+]

@@ -1,0 +1,10 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\" \\t\\n\\r  \")"
+---
+[
+    (
+        Whitespace,
+        " \t\n\r  ",
+    ),
+]

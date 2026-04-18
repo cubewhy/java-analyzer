@@ -1,0 +1,26 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_tokens(\"0b0 0B1010_0101 0b11L\")"
+---
+[
+    (
+        NumberLiteral,
+        "0b0",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "0B1010_0101",
+    ),
+    (
+        Whitespace,
+        " ",
+    ),
+    (
+        NumberLiteral,
+        "0b11L",
+    ),
+]

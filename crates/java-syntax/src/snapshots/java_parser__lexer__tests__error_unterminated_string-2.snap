@@ -1,0 +1,8 @@
+---
+source: crates/java-syntax/src/lexer.rs
+expression: "lex_errors(\"\\\"line1\\nline2\\\"\")"
+---
+[
+    UnterminatedString,
+    UnterminatedString,
+]
