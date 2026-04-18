@@ -19,55 +19,49 @@ pub enum SyntaxKind {
     TEXT_BLOCK_TEMPLATE_BEGIN,
     TEXT_BLOCK_TEMPLATE_MID,
     TEXT_BLOCK_TEMPLATE_END,
-    NULL_LIT,           // null
-    TRUE_LIT,           // true
-    FALSE_LIT,          // false
-    CHAR_LIT,           // ''
-    SEMICOLON,          // ;
-    DOT,                // .
-    AT,                 // @
-    PLUS,               // +
-    MINUS,              // -
-    STAR,               // *
-    SLASH,              // /
-    LESS_EQUAL,         // <=
-    LESS,               // <
-    GREATER,            // >
-    GREATER_EQUAL,      // >=
-    EQUAL_EQUAL,        // ==
-    EQUAL,              // =
-    SHL,                // <<
-    SHR,                // >>
-    OR,                 // ||
-    BIT_OR,             // |
-    BIT_OR_EQUAL,       // |=
-    OR_EQUAL,           // |=
-    AND,                // &&
-    BIT_AND,            // &
-    AND_EQUAL,          // &=
-    NOT,                // !
-    MODULO,             //
-    CARET,              // ^
-    DIVIDE_EQUAL,       // /=
-    NOT_EQUAL,          // !=
-    MULTIPLE_EQUAL,     // *=
-    PLUS_EQUAL,         // +=
-    PLUS_PLUS,          // ++
-    MINUS_EQUAL,        // -=
-    MINUS_MINUS,        // --
-    XOR_EQUAL,          // ^=
-    MODULO_EQUAL,       // %=
-    SHR_EQUAL,          // >>=
-    SHL_EQUAL,          // <<=
-    UNSIGNED_SHR_EQUAL, // <<<=
-    UNSIGNED_SHR,       // <<<
-    COMMA,              // ,
-    QUESTION,           // ?
-    ARROW,              // ->
-    COLON_COLON,        // ::
-    COLON,              // :
-    ELLIPSIS,           // ...
-    TEXT_BLOCK,         // """ """
+    NULL_LIT,       // null
+    TRUE_LIT,       // true
+    FALSE_LIT,      // false
+    CHAR_LIT,       // ''
+    SEMICOLON,      // ;
+    DOT,            // .
+    AT,             // @
+    PLUS,           // +
+    MINUS,          // -
+    STAR,           // *
+    SLASH,          // /
+    LESS_EQUAL,     // <=
+    LESS,           // <
+    GREATER,        // >
+    GREATER_EQUAL,  // >=
+    EQUAL_EQUAL,    // ==
+    EQUAL,          // =
+    OR,             // ||
+    BIT_OR,         // |
+    BIT_OR_EQUAL,   // |=
+    OR_EQUAL,       // |=
+    AND,            // &&
+    BIT_AND,        // &
+    AND_EQUAL,      // &=
+    NOT,            // !
+    MODULO,         //
+    CARET,          // ^
+    DIVIDE_EQUAL,   // /=
+    NOT_EQUAL,      // !=
+    MULTIPLE_EQUAL, // *=
+    PLUS_EQUAL,     // +=
+    PLUS_PLUS,      // ++
+    MINUS_EQUAL,    // -=
+    MINUS_MINUS,    // --
+    XOR_EQUAL,      // ^=
+    MODULO_EQUAL,   // %=
+    COMMA,          // ,
+    QUESTION,       // ?
+    ARROW,          // ->
+    COLON_COLON,    // ::
+    COLON,          // :
+    ELLIPSIS,       // ...
+    TEXT_BLOCK,     // """ """
 
     // Keywords
     PACKAGE_KW,      // package
