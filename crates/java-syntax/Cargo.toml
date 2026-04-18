@@ -8,5 +8,5 @@ publish = false
 unicode_categories = { workspace = true }
 
 [dev-dependencies]
-insta = { workspace = true, features = ["yaml"] }
+insta = { workspace = true }
 indoc = { workspace = true }
