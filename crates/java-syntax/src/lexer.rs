@@ -444,27 +444,56 @@ impl<'a> JavaLexer<'a> {
     }
 
     fn handle_char_literal(&mut self) {
-        let mut is_escaped = false;
+        let mut logical_char_count = 0;
+        let mut has_invalid_escape = false;
 
         while !self.reader.is_at_end() {
             let c = self.reader.peek();
-
-            if c == '\'' && !is_escaped {
-                break;
-            }
 
             if c == '\n' || c == '\r' {
                 self.report_error(LexicalErrorType::UnterminatedChar);
                 return;
             }
 
-            if c == '\\' {
-                is_escaped = !is_escaped;
-            } else {
-                is_escaped = false;
+            if c == '\'' {
+                break;
             }
 
-            self.reader.advance();
+            if c == '\\' {
+                self.reader.advance(); // \
+
+                // JLS §3.10.6
+                match self.reader.peek() {
+                    'b' | 't' | 'n' | 'f' | 'r' | '"' | '\'' | '\\' => {
+                        self.reader.advance();
+                    }
+                    '0'..='7' => {
+                        let first_digit = self.reader.peek();
+                        self.reader.advance();
+
+                        if self.reader.peek() >= '0' && self.reader.peek() <= '7' {
+                            self.reader.advance(); // consume the second octal number
+                            if first_digit <= '3'
+                                && self.reader.peek() >= '0'
+                                && self.reader.peek() <= '7'
+                            {
+                                self.reader.advance(); // consume the third octal number
+                            }
+                        }
+                    }
+                    _ => {
+                        // invalid escape
+                        has_invalid_escape = true;
+                        if !self.reader.is_at_end() && self.reader.peek() != '\'' {
+                            self.reader.advance();
+                        }
+                    }
+                }
+                logical_char_count += 1;
+            } else {
+                self.reader.advance();
+                logical_char_count += 1;
+            }
         }
 
         if self.reader.is_at_end() {
@@ -472,8 +501,11 @@ impl<'a> JavaLexer<'a> {
             return;
         }
 
-        // consume tailing quotation mark
-        self.reader.advance(); // '
+        self.reader.advance();
+
+        if has_invalid_escape || logical_char_count != 1 {
+            self.report_error(LexicalErrorType::InvalidChar);
+        }
 
         self.push_token(TokenType::CharLiteral);
     }
