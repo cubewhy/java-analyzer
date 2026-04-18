@@ -101,157 +101,129 @@ impl<'a> JavaLexer<'a> {
     }
 
     fn handle_number(&mut self) {
+        let mut num_base = 10;
+        // We use this flag to accurately catch trailing underscores without eager consumption
+        let mut last_was_underscore = false;
+
         if self.reader.peek() == '0' {
             let next = self.reader.peek_next();
             if next == 'x' || next == 'X' {
                 self.reader.advance(); // '0'
                 self.reader.advance(); // 'x'
-                self.handle_hex_literal();
-                return;
+                num_base = 16;
             } else if next == 'b' || next == 'B' {
                 self.reader.advance(); // '0'
                 self.reader.advance(); // 'b'
-                self.handle_binary_literal();
-                return;
+                num_base = 2;
+            } else if next == '_' || next.is_ascii_digit() {
+                self.reader.advance(); // '0'
+                // We set base to 8, but will consume using base 10 below to prevent
+                // splitting valid floats (like 09.5) or splitting invalid octals (like 09)
+                num_base = 8;
             }
         }
 
-        self.handle_decimal_or_float();
-    }
+        // Consume the integer part
+        // Even if it's octal, consume base 10 digits to keep the token intact.
+        // The parser/semantic analyzer will catch an invalid octal like '09'.
+        let consume_base = if num_base == 8 { 10 } else { num_base };
 
-    fn handle_binary_literal(&mut self) {
-        self.consume_binary_digits();
-
-        let c = self.reader.peek().to_ascii_lowercase();
-        if c == 'l' {
-            self.reader.advance();
-        }
-
-        self.push_token(TokenType::NumberLiteral);
-    }
-
-    fn consume_binary_digits(&mut self) {
-        while !self.reader.is_at_end() {
+        loop {
             let c = self.reader.peek();
-            if c.is_ascii_digit() {
-                if !matches!(c, '0' | '1') {
+            if c.is_numeric() || c.is_digit(consume_base) {
+                if !c.is_digit(num_base) {
                     self.report_error(LexicalErrorType::InvalidNumber);
                 }
                 self.reader.advance();
+                last_was_underscore = false; // Reset flag when a valid digit is seen
             } else if c == '_' {
-                if !self.reader.peek_next().is_ascii_digit() {
-                    self.report_error(LexicalErrorType::InvalidNumber);
-                }
                 self.reader.advance();
+                last_was_underscore = true; // Mark that the last char we saw was '_'
             } else {
                 break;
             }
         }
-    }
 
-    fn handle_decimal_or_float(&mut self) {
-        let mut is_float = false;
-
-        if self.reader.peek() == '.' {
-            // float numbers like .1
-            is_float = true;
-        } else {
-            // float numbers like 1.1
-            self.consume_digits();
-            if self.reader.peek() == '.' {
-                is_float = true;
-            }
-        }
-
-        if is_float {
-            self.reader.advance();
-            self.consume_digits();
-        }
-
-        // Scientific notation
-        if self.reader.peek() == 'e' || self.reader.peek() == 'E' {
-            self.reader.advance();
-            if self.reader.peek() == '+' || self.reader.peek() == '-' {
-                self.reader.advance();
-            }
-            if !self.reader.peek().is_ascii_digit() {
-                self.report_error(LexicalErrorType::InvalidNumber);
-            }
-            self.consume_digits();
-        }
-
-        // type suffix
-        let c = self.reader.peek().to_ascii_lowercase();
-        if c == 'f' || c == 'd' || c == 'l' {
-            if c == 'l' && is_float {
-                self.report_error(LexicalErrorType::InvalidNumber);
-            }
-            self.reader.advance();
-        }
-
-        self.push_token(TokenType::NumberLiteral);
-    }
-
-    fn handle_hex_literal(&mut self) {
-        self.consume_hex_digits();
-
-        if self.reader.peek() == '.' {
-            self.reader.advance();
-            self.consume_hex_digits();
-        }
-
-        if self.reader.peek() == 'p' || self.reader.peek() == 'P' {
-            self.reader.advance();
-            if self.reader.peek() == '+' || self.reader.peek() == '-' {
-                self.reader.advance();
-            }
-            self.consume_digits();
-        }
-
-        let c = self.reader.peek().to_ascii_lowercase();
-        if c == 'f' || c == 'd' || c == 'l' {
-            self.reader.advance();
-        }
-
-        self.push_token(TokenType::NumberLiteral);
-    }
-
-    fn consume_digits(&mut self) {
-        if self.reader.peek() == '_' {
-            // invalid number (starts with _)
-            // like ._1f, _1
+        // Catch trailing underscores on the integer part (e.g., `123_`)
+        if last_was_underscore {
             self.report_error(LexicalErrorType::InvalidNumber);
+            last_was_underscore = false;
         }
 
-        while !self.reader.is_at_end() {
-            let c = self.reader.peek();
-            if c.is_ascii_digit() {
-                self.reader.advance();
-            } else if c == '_' {
-                if !self.reader.peek_next().is_ascii_digit() {
-                    self.report_error(LexicalErrorType::InvalidNumber);
-                }
-                self.reader.advance();
-            } else {
-                break;
-            }
-        }
-    }
+        // Parse float fractional part
+        if self.reader.peek() == '.' {
+            self.reader.advance(); // '.'
 
-    fn consume_hex_digits(&mut self) {
-        while !self.reader.is_at_end() {
-            let c = self.reader.peek();
-            if c.is_ascii_hexdigit() {
-                self.reader.advance();
-            } else if c == '_' {
-                if !self.reader.peek_next().is_ascii_hexdigit() {
-                    self.report_error(LexicalErrorType::InvalidNumber);
+            // Java doesn't allow `1._2`
+            if self.reader.peek() == '_' {
+                self.report_error(LexicalErrorType::InvalidNumber);
+            }
+
+            loop {
+                let c = self.reader.peek();
+                if c.is_digit(consume_base) {
+                    self.reader.advance();
+                    last_was_underscore = false;
+                } else if c == '_' {
+                    self.reader.advance();
+                    last_was_underscore = true;
+                } else {
+                    break;
                 }
-                self.reader.advance();
-            } else {
-                break;
+            }
+
+            if last_was_underscore {
+                self.report_error(LexicalErrorType::InvalidNumber);
+                last_was_underscore = false;
             }
         }
+
+        // Parse exponent
+        let c = self.reader.peek();
+        let is_dec_exp = num_base != 16 && c.eq_ignore_ascii_case(&'e');
+        let is_hex_exp = num_base == 16 && c.eq_ignore_ascii_case(&'p');
+
+        if is_dec_exp || is_hex_exp {
+            self.reader.advance(); // consume 'e' or 'p'
+
+            // Optional sign
+            let sign = self.reader.peek();
+            if sign == '+' || sign == '-' {
+                self.reader.advance();
+            }
+
+            // Underscores immediately after exponent indicator are invalid (e.g., `1e_10`)
+            if self.reader.peek() == '_' {
+                self.report_error(LexicalErrorType::InvalidNumber);
+            }
+
+            let mut has_exp_digits = false;
+            loop {
+                let c = self.reader.peek();
+                if c.is_ascii_digit() {
+                    self.reader.advance();
+                    last_was_underscore = false;
+                    has_exp_digits = true;
+                } else if c == '_' {
+                    self.reader.advance();
+                    last_was_underscore = true;
+                } else {
+                    break;
+                }
+            }
+
+            // Catch missing digits after 'e' or trailing underscores
+            if !has_exp_digits || last_was_underscore {
+                self.report_error(LexicalErrorType::InvalidNumber);
+            }
+        }
+
+        // Parse type suffix
+        if matches!(self.reader.peek().to_ascii_lowercase(), 'l' | 'f' | 'd') {
+            self.reader.advance();
+        }
+
+        self.push_token(TokenType::NumberLiteral);
     }
 
     fn handle_dot(&mut self) {
@@ -971,6 +943,10 @@ mod tests {
 
         // _ after .
         assert_lex_errors!("0._1f", [LexicalErrorType::InvalidNumber]);
+
+        // Invalid Octal
+        assert_lex_errors!("019", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0_19", [LexicalErrorType::InvalidNumber]);
     }
 
     #[test]
@@ -1138,6 +1114,101 @@ mod tests {
                 (TokenType::Equal, "="),
                 (TokenType::NumberLiteral, "4"),
                 (TokenType::Semicolon, ";"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_valid_number_extremes() {
+        assert_lex!(
+            "0x0.0p0f 0b1_0 00_0 1.e2 .1e-2 1f 1d 1l 0x.8p1 0X1.P-1D 0_123",
+            [
+                (TokenType::NumberLiteral, "0x0.0p0f"),
+                (TokenType::NumberLiteral, "0b1_0"),
+                (TokenType::NumberLiteral, "00_0"),
+                (TokenType::NumberLiteral, "1.e2"),
+                (TokenType::NumberLiteral, ".1e-2"),
+                (TokenType::NumberLiteral, "1f"),
+                (TokenType::NumberLiteral, "1d"),
+                (TokenType::NumberLiteral, "1l"),
+                (TokenType::NumberLiteral, "0x.8p1"),
+                (TokenType::NumberLiteral, "0X1.P-1D"),
+                (TokenType::NumberLiteral, "0_123"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_invalid_underscore_placement_integer() {
+        // Trailing underscores on integer
+        assert_lex_errors!("123_", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0x123_", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0b10_", [LexicalErrorType::InvalidNumber]);
+    }
+
+    #[test]
+    fn test_invalid_underscore_placement_float() {
+        // Underscore immediately before decimal
+        assert_lex_errors!("123_.45", [LexicalErrorType::InvalidNumber]);
+
+        // Underscore immediately after decimal
+        assert_lex_errors!("123._45", [LexicalErrorType::InvalidNumber]);
+
+        // Trailing underscore on fractional part
+        assert_lex_errors!("123.45_", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!(".45_", [LexicalErrorType::InvalidNumber]);
+    }
+
+    #[test]
+    fn test_invalid_underscore_placement_exponent() {
+        // Underscore immediately before exponent (caught by fractional/integer trailing check)
+        assert_lex_errors!("123_e10", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("123.4_e10", [LexicalErrorType::InvalidNumber]);
+
+        // Underscore immediately after exponent indicator
+        assert_lex_errors!("1e_10", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0x1p_10", [LexicalErrorType::InvalidNumber]);
+
+        // Underscore immediately after exponent sign
+        assert_lex_errors!("1e+_10", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("1e-_10", [LexicalErrorType::InvalidNumber]);
+
+        // Trailing underscore on exponent
+        assert_lex_errors!("1e10_", [LexicalErrorType::InvalidNumber]);
+    }
+
+    #[test]
+    fn test_invalid_octals() {
+        // Base 8 literal containing 8 or 9
+        assert_lex_errors!("08", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("09", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0128", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0_9", [LexicalErrorType::InvalidNumber]);
+    }
+
+    #[test]
+    fn test_invalid_exponents_missing_digits() {
+        // Exponent indicators with no digits following
+        assert_lex_errors!("1e", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("1e+", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("1e-", [LexicalErrorType::InvalidNumber]);
+
+        // Hex exponent missing digits
+        assert_lex_errors!("0x1p", [LexicalErrorType::InvalidNumber]);
+        assert_lex_errors!("0x1p+", [LexicalErrorType::InvalidNumber]);
+    }
+
+    #[test]
+    fn test_multiple_invalid_factors() {
+        // Both invalid octal AND invalid underscore placement
+        // Should report the first encountered issue or both depending on exact iteration,
+        // but based on current implementation, it processes the whole integer loop.
+        // It will report InvalidNumber for '9' and then again if there's a trailing underscore.
+        assert_lex_errors!(
+            "09_",
+            [
+                LexicalErrorType::InvalidNumber,
+                LexicalErrorType::InvalidNumber
             ]
         );
     }
