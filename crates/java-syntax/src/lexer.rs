@@ -1,9 +1,12 @@
 use crate::{
-    lexer::token::{JavaToken, TokenType},
+    lexer::{
+        identifier::{is_java_identifier_part, is_java_identifier_start},
+        token::{JavaToken, TokenType},
+    },
     reader::SourceReader,
 };
-use unicode_categories::UnicodeCategories;
 
+pub mod identifier;
 pub mod token;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -829,14 +832,6 @@ pub enum LexicalErrorType {
     UnterminatedChar,
     InvalidEscapeSequence,
     UnterminatedTemplate,
-}
-
-fn is_java_identifier_start(c: char) -> bool {
-    c.is_alphabetic() || c.is_symbol_currency() || c.is_punctuation_connector()
-}
-
-fn is_java_identifier_part(c: char) -> bool {
-    is_java_identifier_start(c) || c.is_numeric()
 }
 
 // https://docs.oracle.com/javase/specs/jls/se25/html/jls-3.html#jls-3.6
