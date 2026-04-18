@@ -444,28 +444,36 @@ impl<'a> JavaLexer<'a> {
     }
 
     fn handle_char_literal(&mut self) {
-        let mut last: Option<char> = None;
+        let mut is_escaped = false;
 
-        while !self.reader.is_at_end() && (self.reader.peek() != '\'' || last == Some('\\')) {
-            last = Some(self.reader.advance());
+        while !self.reader.is_at_end() {
+            let c = self.reader.peek();
+
+            if c == '\'' && !is_escaped {
+                break;
+            }
+
+            if c == '\n' || c == '\r' {
+                self.report_error(LexicalErrorType::InvalidChar);
+                return;
+            }
+
+            if c == '\\' {
+                is_escaped = !is_escaped;
+            } else {
+                is_escaped = false;
+            }
+
+            self.reader.advance();
         }
 
         if self.reader.is_at_end() {
-            // Unterminated char
-            self.report_error(LexicalErrorType::UnterminatedString);
+            self.report_error(LexicalErrorType::UnterminatedChar);
+            return;
         }
 
         // consume tailing quotation mark
         self.reader.advance(); // '
-
-        let lexeme = self.reader.current_token_lexeme();
-        let s1 = lexeme.strip_prefix('\'').unwrap_or(lexeme);
-        let s2 = s1.strip_suffix('\'').unwrap_or(s1);
-        let s3 = s2.strip_prefix('\\').unwrap_or(s2);
-
-        if s3.chars().count() != 1 {
-            self.report_error(LexicalErrorType::InvalidChar);
-        }
 
         self.push_token(TokenType::CharLiteral);
     }
@@ -577,6 +585,7 @@ pub enum LexicalErrorType {
     UnterminatedTextBlock,
     InvalidNumber,
     InvalidUnicodeEscape,
+    UnterminatedChar,
 }
 
 fn is_java_identifier_start(c: char) -> bool {
